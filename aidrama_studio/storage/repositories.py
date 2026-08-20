@@ -10,7 +10,9 @@ from aidrama_studio.domain import (
     ProjectStatus,
     StoryBible,
     StoryRevisionStatus,
+    StructuredScript,
 )
+from aidrama_studio.domain.script import ScriptRevisionStatus
 
 from .database import DatabasePaths, connect, initialize_database
 
@@ -312,3 +314,67 @@ class ProjectRepository:
                 "DELETE FROM story_bible_revisions WHERE id = ?", (revision_id,)
             )
         return cursor.rowcount == 1
+
+    @staticmethod
+    def _script_revision_from_row(row) -> dict[str, Any]:
+        return {
+            "id": row["id"], "project_id": row["project_id"], "version": row["version"],
+            "status": ScriptRevisionStatus(row["status"]),
+            "source_story_revision_id": row["source_story_revision_id"],
+            "content": StructuredScript.model_validate(json.loads(row["content_json"])),
+            "generation_input": json.loads(row["generation_input_json"]) if row["generation_input_json"] else None,
+            "created_at": row["created_at"], "updated_at": row["updated_at"],
+        }
+
+    def create_script_revision(self, *, revision_id: str, project_id: str, version: int,
+                               status: ScriptRevisionStatus, source_story_revision_id: str,
+                               content: StructuredScript, generation_input: dict[str, Any] | None,
+                               created_at: str, updated_at: str) -> dict[str, Any]:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, project_id):
+                raise KeyError(f"项目不存在: {project_id}")
+            connection.execute("""INSERT INTO structured_script_revisions
+                (id, project_id, version, status, source_story_revision_id, content_json,
+                 generation_input_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)""",
+                (revision_id, project_id, version, status.value, source_story_revision_id,
+                 json.dumps(content.model_dump(mode="json"), ensure_ascii=False, sort_keys=True),
+                 json.dumps(generation_input, ensure_ascii=False, sort_keys=True) if generation_input is not None else None,
+                 created_at, updated_at))
+            row = connection.execute("SELECT * FROM structured_script_revisions WHERE id = ?", (revision_id,)).fetchone()
+        return self._script_revision_from_row(row)
+
+    def get_script_revision(self, revision_id: str) -> dict[str, Any] | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM structured_script_revisions WHERE id = ?", (revision_id,)).fetchone()
+        return self._script_revision_from_row(row) if row else None
+
+    def list_script_revisions(self, project_id: str) -> list[dict[str, Any]]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM structured_script_revisions WHERE project_id = ? ORDER BY version DESC", (project_id,)).fetchall()
+        return [self._script_revision_from_row(row) for row in rows]
+
+    def update_script_revision(self, revision_id: str, *, content: StructuredScript, updated_at: str,
+                               generation_input: dict[str, Any] | None = None) -> dict[str, Any]:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM structured_script_revisions WHERE id = ?", (revision_id,)).fetchone()
+            if row is None: raise KeyError(f"Structured Script revision 不存在: {revision_id}")
+            if row["status"] != ScriptRevisionStatus.DRAFT.value: raise ValueError("只有 DRAFT revision 可以直接保存")
+            connection.execute("UPDATE structured_script_revisions SET content_json=?, generation_input_json=COALESCE(?, generation_input_json), updated_at=? WHERE id=?",
+                (json.dumps(content.model_dump(mode="json"), ensure_ascii=False, sort_keys=True),
+                 json.dumps(generation_input, ensure_ascii=False, sort_keys=True) if generation_input is not None else None, updated_at, revision_id))
+            row = connection.execute("SELECT * FROM structured_script_revisions WHERE id = ?", (revision_id,)).fetchone()
+        return self._script_revision_from_row(row)
+
+    def approve_script_revision(self, revision_id: str, *, updated_at: str) -> dict[str, Any]:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM structured_script_revisions WHERE id = ?", (revision_id,)).fetchone()
+            if row is None: raise KeyError("Structured Script revision 不存在")
+            if row["status"] == ScriptRevisionStatus.SUPERSEDED.value: raise ValueError("已被替代的 revision 不能批准")
+            connection.execute("UPDATE structured_script_revisions SET status=?, updated_at=? WHERE project_id=? AND status=? AND id<>?",
+                (ScriptRevisionStatus.SUPERSEDED.value, updated_at, row["project_id"], ScriptRevisionStatus.APPROVED.value, revision_id))
+            connection.execute("UPDATE structured_script_revisions SET status=?, updated_at=? WHERE id=?", (ScriptRevisionStatus.APPROVED.value, updated_at, revision_id))
+            project = connection.execute("SELECT status FROM projects WHERE id=?", (row["project_id"],)).fetchone()
+            if project and project["status"] in (ProjectStatus.DRAFT.value, ProjectStatus.STORY.value):
+                connection.execute("UPDATE projects SET status=?, updated_at=? WHERE id=?", (ProjectStatus.PREPRODUCTION.value, updated_at, row["project_id"]))
+            row = connection.execute("SELECT * FROM structured_script_revisions WHERE id = ?", (revision_id,)).fetchone()
+        return self._script_revision_from_row(row)
