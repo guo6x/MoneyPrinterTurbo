@@ -1,13 +1,332 @@
+from __future__ import annotations
+
+from copy import deepcopy
+
+import streamlit as st
+from loguru import logger
+
 from aidrama_studio.components.page_header import page_header
-from aidrama_studio.pages._shared import coming_soon
+from aidrama_studio.domain import Character, Location, StoryBible, StoryRevisionStatus
+from aidrama_studio.pages._shared import current_project_or_stop
+from aidrama_studio.services import StoryService, StoryServiceError
+from aidrama_studio.services.ai import llm_configuration_status
+
+
+BEAT_TYPES = ["OPENING", "DEVELOPMENT", "TURNING_POINT", "CLIMAX", "ENDING"]
+
+
+def _go_settings() -> None:
+    from aidrama_studio.components.navigation import request_navigation
+
+    request_navigation("settings")
+
+
+def _working_key(revision_id: str) -> str:
+    return f"story_working_{revision_id}"
+
+
+def _revision_label(revision: dict) -> str:
+    return f"v{revision['version']} · {revision['status'].value}"
+
+
+def _get_working(revision: dict) -> dict:
+    key = _working_key(revision["id"])
+    if key not in st.session_state:
+        st.session_state[key] = revision["content"].model_dump(mode="python")
+    return st.session_state[key]
+
+
+def _input(label: str, value: str, key: str, *, area: bool = False, **kwargs) -> str:
+    if area:
+        return st.text_area(label, value=value, key=key, **kwargs)
+    return st.text_input(label, value=value, key=key, **kwargs)
+
+
+def _list_text(values: list[str], separator: str = ", ") -> str:
+    return separator.join(values)
+
+
+def _parse_list(value: str, separator: str = ",") -> list[str]:
+    return [item.strip() for item in value.replace("，", separator).split(separator) if item.strip()]
+
+
+def _render_brief(project, service: StoryService) -> None:
+    st.markdown("### 创作 Brief")
+    st.caption("Brief 只保存创作输入，不会保存 API Key、Base URL 或其他凭据。")
+    brief_key = f"story-brief-{project.id}"
+    genre_key = f"story-genre-{project.id}"
+    tone_key = f"story-tone-{project.id}"
+    audience_key = f"story-audience-{project.id}"
+    constraints_key = f"story-constraints-{project.id}"
+    _input(
+        "核心创意 / 项目 Brief",
+        st.session_state.get(brief_key, project.description),
+        brief_key,
+        area=True,
+        height=155,
+        placeholder="例如：一个失去记忆的夜班司机，在最后一班车上遇见未来的自己。",
+    )
+    _input("类型", st.session_state.get(genre_key, "都市悬疑"), genre_key)
+    _input("基调", st.session_state.get(tone_key, "克制、紧张"), tone_key)
+    _input(
+        "目标观众（可选）",
+        st.session_state.get(audience_key, ""),
+        audience_key,
+        placeholder="例如：喜欢反转悬疑的短视频观众",
+    )
+    _input(
+        "创作约束（可选）",
+        st.session_state.get(constraints_key, ""),
+        constraints_key,
+        area=True,
+        height=95,
+        placeholder="例如：不出现大型群像；结尾保留一个视觉钩子。",
+    )
+
+    ready, detail = llm_configuration_status()
+    if not ready:
+        st.info(f"AI 服务尚未配置：{detail}")
+        if st.button("前往设置", key=f"story-settings-{project.id}"):
+            _go_settings()
+    if st.button(
+        "AI 生成 Story Bible",
+        type="primary",
+        use_container_width=True,
+        disabled=not ready,
+        key=f"generate-story-{project.id}",
+    ):
+        try:
+            with st.spinner("正在构建人物与世界观…"):
+                revision = service.generate_story_bible(
+                    project,
+                    brief=st.session_state.get(brief_key, ""),
+                    genre=st.session_state.get(genre_key, ""),
+                    tone=st.session_state.get(tone_key, ""),
+                    target_audience=st.session_state.get(audience_key, ""),
+                    creative_constraints=st.session_state.get(constraints_key, ""),
+                )
+            st.session_state.story_revision_id = revision["id"]
+            st.toast(f"Story Bible v{revision['version']} 已生成")
+            st.rerun()
+        except StoryServiceError as exc:
+            st.error(str(exc))
+        except Exception:
+            logger.exception("story page generation failed")
+            st.error("Story Bible 生成失败，请稍后重试。")
+
+    if st.button("创建空白 Story Bible", use_container_width=True, key=f"blank-story-{project.id}"):
+        try:
+            revision = service.create_blank_draft(project)
+            st.session_state.story_revision_id = revision["id"]
+            st.toast("已创建可编辑的 Story Bible Draft")
+            st.rerun()
+        except Exception:
+            logger.exception("failed to create blank Story Bible")
+            st.error("空白 Story Bible 创建失败，请稍后重试。")
+
+    st.markdown("### 版本历史")
+    revisions = service.list_revisions(project.id)
+    if not revisions:
+        st.caption("还没有 revision。你可以先生成或创建一个空白 Draft。")
+    for revision in revisions:
+        with st.container(border=True):
+            select_col, action_col = st.columns([3, 1])
+            select_col.markdown(f"**{_revision_label(revision)}**")
+            select_col.caption(revision["updated_at"].replace("T", " ").split(".")[0])
+            if action_col.button("查看", key=f"view-revision-{revision['id']}", use_container_width=True):
+                st.session_state.story_revision_id = revision["id"]
+                st.rerun()
+            if revision["status"] is StoryRevisionStatus.APPROVED:
+                if action_col.button("新 Draft", key=f"fork-revision-{revision['id']}", use_container_width=True):
+                    try:
+                        forked = service.create_revision_from_approved(revision["id"])
+                        st.session_state.story_revision_id = forked["id"]
+                        st.rerun()
+                    except Exception:
+                        logger.exception("failed to fork approved Story Bible")
+                        st.error("无法从该版本创建 Draft。")
+
+
+def _render_overview(working: dict, revision_id: str) -> None:
+    st.markdown("#### 故事概览")
+    working["title"] = _input("标题", working["title"], f"{revision_id}-title")
+    working["logline"] = _input("Logline", working["logline"], f"{revision_id}-logline", area=True, height=90)
+    working["premise"] = _input("故事前提", working["premise"], f"{revision_id}-premise", area=True, height=115)
+    left, right = st.columns(2)
+    with left:
+        working["genre"] = _input("类型", working["genre"], f"{revision_id}-genre")
+        working["tone"] = _input("基调", working["tone"], f"{revision_id}-tone")
+    with right:
+        themes = _input("主题（逗号分隔）", _list_text(working["themes"]), f"{revision_id}-themes")
+        working["themes"] = _parse_list(themes)
+    st.markdown("#### 世界观")
+    world = working["world"]
+    left, right = st.columns(2)
+    with left:
+        world["era"] = _input("时代", world["era"], f"{revision_id}-world-era")
+        world["setting"] = _input("世界设定", world["setting"], f"{revision_id}-world-setting", area=True, height=100)
+    with right:
+        rules = _input("世界规则（每行一条）", "\n".join(world["rules"]), f"{revision_id}-world-rules", area=True, height=100)
+        world["rules"] = [line.strip() for line in rules.splitlines() if line.strip()]
+        world["timeline_notes"] = _input("时间线备注", world["timeline_notes"], f"{revision_id}-world-timeline", area=True, height=80)
+
+
+def _render_characters(working: dict, revision_id: str) -> None:
+    st.markdown("#### 人物")
+    st.caption("人物使用稳定内部 ID；被 Story Beat 引用的人物不能直接删除。")
+    remove_id = None
+    for character in working["characters"]:
+        with st.container(border=True):
+            top_left, top_right = st.columns([4, 1])
+            top_left.markdown(f"**{character['id']} · {character['name']}**")
+            if top_right.button("移除", key=f"remove-char-{revision_id}-{character['id']}"):
+                remove_id = character["id"]
+            character["name"] = _input("姓名", character["name"], f"{revision_id}-{character['id']}-name")
+            character["role"] = _input("角色定位", character["role"], f"{revision_id}-{character['id']}-role")
+            character["identity"] = _input("身份", character["identity"], f"{revision_id}-{character['id']}-identity", area=True, height=70)
+            character["personality"] = _input("性格", character["personality"], f"{revision_id}-{character['id']}-personality", area=True, height=70)
+            character["appearance"] = _input("外观", character["appearance"], f"{revision_id}-{character['id']}-appearance", area=True, height=70)
+            character["motivation"] = _input("动机", character["motivation"], f"{revision_id}-{character['id']}-motivation", area=True, height=70)
+            character["relationship_notes"] = _input("关系备注", character["relationship_notes"], f"{revision_id}-{character['id']}-relationships", area=True, height=70)
+            character["speech_style"] = _input("说话方式", character["speech_style"], f"{revision_id}-{character['id']}-speech")
+            character["age_or_range"] = _input("年龄段", character["age_or_range"], f"{revision_id}-{character['id']}-age")
+    if remove_id:
+        referenced = any(remove_id in beat["characters"] for beat in working["story_beats"])
+        if referenced:
+            st.error("该人物仍被 Story Beat 引用，请先解除引用后再移除。")
+        elif len(working["characters"]) <= 1:
+            st.error("Story Bible 至少需要保留一个人物。")
+        else:
+            working["characters"] = [item for item in working["characters"] if item["id"] != remove_id]
+            st.rerun()
+    if st.button("+ 添加人物", key=f"add-char-{revision_id}"):
+        index = len(working["characters"]) + 1
+        working["characters"].append(Character(id=f"char_{index:03d}", name=f"新人物 {index}").model_dump())
+        st.rerun()
+
+
+def _render_locations(working: dict, revision_id: str) -> None:
+    st.markdown("#### 场景")
+    st.caption("被 Story Beat 引用的场景不能直接删除，避免产生悬空引用。")
+    remove_id = None
+    for location in working["locations"]:
+        with st.container(border=True):
+            top_left, top_right = st.columns([4, 1])
+            top_left.markdown(f"**{location['id']} · {location['name']}**")
+            if top_right.button("移除", key=f"remove-loc-{revision_id}-{location['id']}"):
+                remove_id = location["id"]
+            location["name"] = _input("名称", location["name"], f"{revision_id}-{location['id']}-name")
+            location["function"] = _input("叙事功能", location["function"], f"{revision_id}-{location['id']}-function", area=True, height=70)
+            left, right = st.columns(2)
+            with left:
+                location["environment"] = _input("环境", location["environment"], f"{revision_id}-{location['id']}-environment", area=True, height=80)
+                location["visual_style"] = _input("视觉风格", location["visual_style"], f"{revision_id}-{location['id']}-visual", area=True, height=80)
+            with right:
+                location["time_of_day"] = _input("时间", location["time_of_day"], f"{revision_id}-{location['id']}-time")
+                props = _input("关键道具（逗号分隔）", _list_text(location["key_props"]), f"{revision_id}-{location['id']}-props")
+                location["key_props"] = _parse_list(props)
+    if remove_id:
+        referenced = any(remove_id == beat["location_id"] for beat in working["story_beats"])
+        if referenced:
+            st.error("该场景仍被 Story Beat 引用，请先解除引用后再移除。")
+        elif len(working["locations"]) <= 1:
+            st.error("Story Bible 至少需要保留一个场景。")
+        else:
+            working["locations"] = [item for item in working["locations"] if item["id"] != remove_id]
+            st.rerun()
+    if st.button("+ 添加场景", key=f"add-loc-{revision_id}"):
+        index = len(working["locations"]) + 1
+        working["locations"].append(Location(id=f"loc_{index:03d}", name=f"新场景 {index}").model_dump())
+        st.rerun()
+
+
+def _render_beats(working: dict, revision_id: str) -> None:
+    st.markdown("#### 剧情结构")
+    st.caption("order 可直接编辑；保存时会检查顺序、人物引用和场景引用。")
+    character_options = [item["id"] for item in working["characters"]]
+    location_options = [item["id"] for item in working["locations"]]
+    for beat in sorted(working["story_beats"], key=lambda item: item["order"]):
+        with st.container(border=True):
+            st.markdown(f"**{beat['id']} · Beat {beat['order']}**")
+            left, middle, right = st.columns([1, 2, 2])
+            with left:
+                beat["order"] = st.number_input("顺序", min_value=1, max_value=100, value=int(beat["order"]), key=f"{revision_id}-{beat['id']}-order")
+            with middle:
+                beat["type"] = st.selectbox("类型", BEAT_TYPES, index=BEAT_TYPES.index(beat["type"]) if beat["type"] in BEAT_TYPES else 0, key=f"{revision_id}-{beat['id']}-type")
+            with right:
+                selected_location = st.selectbox("场景", ["（无）"] + location_options, index=(location_options.index(beat["location_id"]) + 1) if beat["location_id"] in location_options else 0, key=f"{revision_id}-{beat['id']}-location")
+                beat["location_id"] = None if selected_location == "（无）" else selected_location
+            beat["summary"] = _input("摘要", beat["summary"], f"{revision_id}-{beat['id']}-summary", area=True, height=80)
+            beat["characters"] = st.multiselect("出场人物", character_options, default=[item for item in beat["characters"] if item in character_options], key=f"{revision_id}-{beat['id']}-characters")
+            beat["emotional_goal"] = _input("情绪目标", beat["emotional_goal"], f"{revision_id}-{beat['id']}-emotion")
+
+
+def _build_content(working: dict) -> StoryBible:
+    return StoryBible.model_validate(deepcopy(working))
+
+
+def _render_bible_editor(project, service: StoryService, revision: dict) -> None:
+    working = _get_working(revision)
+    revision_id = revision["id"]
+    status = revision["status"]
+    status_text = {StoryRevisionStatus.DRAFT: "DRAFT", StoryRevisionStatus.APPROVED: "APPROVED · 已确认", StoryRevisionStatus.SUPERSEDED: "SUPERSEDED"}[status]
+    st.markdown(f'<div class="story-revision-bar"><strong>Story Bible v{revision["version"]}</strong><span class="story-revision-status">{status_text}</span></div>', unsafe_allow_html=True)
+    overview, characters, locations, beats = st.tabs(["故事概览", "人物", "场景", "剧情结构"])
+    with overview:
+        _render_overview(working, revision_id)
+    with characters:
+        _render_characters(working, revision_id)
+    with locations:
+        _render_locations(working, revision_id)
+    with beats:
+        _render_beats(working, revision_id)
+
+    save_label = "保存修改" if status is StoryRevisionStatus.DRAFT else "保存为新 Draft"
+    save_col, approve_col = st.columns([2, 1])
+    if save_col.button(save_label, type="primary", use_container_width=True, key=f"save-story-{revision_id}"):
+        try:
+            saved = service.save_draft(project.id, _build_content(working), revision_id=revision_id)
+            st.session_state.story_revision_id = saved["id"]
+            st.toast(f"Story Bible v{saved['version']} 已保存")
+            st.rerun()
+        except ValueError as exc:
+            st.error(f"无法保存：{exc}")
+        except Exception:
+            logger.exception("failed to save Story Bible draft")
+            st.error("保存失败，请检查必填字段和引用关系。")
+    if status is StoryRevisionStatus.DRAFT:
+        if approve_col.button("确认 Story Bible", use_container_width=True, key=f"approve-story-{revision_id}"):
+            try:
+                saved = service.save_draft(project.id, _build_content(working), revision_id=revision_id)
+                approved = service.approve_revision(saved["id"])
+                st.session_state.story_revision_id = approved["id"]
+                st.success("Story Bible 已确认。结构化剧本将在下一阶段生成。")
+                st.rerun()
+            except ValueError as exc:
+                st.error(f"确认前校验失败：{exc}")
+            except Exception:
+                logger.exception("failed to approve Story Bible")
+                st.error("确认失败，请稍后重试。")
+    elif status is StoryRevisionStatus.APPROVED:
+        approve_col.success("已确认")
 
 
 def render() -> None:
-    page_header(
-        "创意与剧本", "STORY DEVELOPMENT", "从一句创意建立可生产的短剧叙事蓝图。"
-    )
-    coming_soon(
-        "故事开发将在后续 Task 开启",
-        "Task001 已建立项目上下文；Story Bible 与结构化剧本尚未生成。",
-        ["Story Bible", "角色关系与世界观", "结构化场景和剧情节拍"],
-    )
+    page_header("创意与剧本", "STORY DEVELOPMENT", "从一句创意建立可生产的 Story Bible，并保留每一次 revision。")
+    project = current_project_or_stop()
+    service = StoryService()
+    revisions = service.list_revisions(project.id)
+    current_id = st.session_state.get("story_revision_id")
+    revision = service.get_revision(current_id) if current_id else None
+    if revision is None and revisions:
+        revision = revisions[0]
+        st.session_state.story_revision_id = revision["id"]
+    left, right = st.columns([0.85, 1.65], gap="large")
+    with left:
+        _render_brief(project, service)
+    with right:
+        if revision is None:
+            st.markdown("### Story Bible")
+            st.info("右侧会展示结构化故事蓝图。你可以从左侧生成，或先创建空白 Draft。")
+        else:
+            _render_bible_editor(project, service, revision)

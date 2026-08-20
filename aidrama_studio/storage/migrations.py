@@ -28,7 +28,39 @@ def _migration_001_projects(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX idx_projects_status ON projects(status)")
 
 
-MIGRATIONS: tuple[Migration, ...] = ((1, _migration_001_projects),)
+def _migration_002_story_bible_revisions(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE story_bible_revisions (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            content_json TEXT NOT NULL,
+            generation_input_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(project_id, version),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_story_revisions_project ON story_bible_revisions(project_id, version DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX idx_story_revisions_status ON story_bible_revisions(project_id, status)"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX idx_story_one_approved "
+        "ON story_bible_revisions(project_id) WHERE status = 'APPROVED'"
+    )
+
+
+MIGRATIONS: tuple[Migration, ...] = (
+    (1, _migration_001_projects),
+    (2, _migration_002_story_bible_revisions),
+)
 
 
 def apply_migrations(connection: sqlite3.Connection) -> int:

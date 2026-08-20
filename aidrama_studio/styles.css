@@ -15,6 +15,32 @@
   color: var(--aidrama-text);
 }
 
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li,
+[data-testid="stCaptionContainer"],
+[data-testid="stWidgetLabel"] p,
+[data-testid="stWidgetLabel"] label {
+  color: var(--aidrama-text) !important;
+}
+
+[data-testid="stCaptionContainer"] {
+  color: var(--aidrama-muted) !important;
+}
+
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-testid="stNumberInput"] input {
+  color: #15202b !important;
+}
+
+.stButton > button {
+  color: #15202b !important;
+}
+
+.stButton > button[kind="primary"] {
+  color: #ffffff !important;
+}
+
 [data-testid="stSidebar"] {
   background: #0e1219;
   border-right: 1px solid var(--aidrama-border);
@@ -121,6 +147,24 @@
 .aidrama-empty-state h3 {
   color: var(--aidrama-text);
   margin: 0.55rem 0 0.45rem;
+}
+
+.story-revision-bar {
+  align-items: center;
+  background: var(--aidrama-panel-2);
+  border: 1px solid var(--aidrama-border);
+  border-radius: 10px;
+  display: flex;
+  gap: 0.65rem;
+  justify-content: space-between;
+  margin-bottom: 0.85rem;
+  padding: 0.75rem 0.95rem;
+}
+
+.story-revision-status {
+  color: var(--aidrama-accent);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
 }
 
 @media (max-width: 1100px) {

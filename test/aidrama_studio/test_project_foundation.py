@@ -36,7 +36,7 @@ def test_migration_001_is_applied_and_recorded(paths: DatabasePaths):
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'projects'"
         ).fetchone()
 
-    assert versions == [(1,)]
+    assert versions == [(1,), (2,)]
     assert projects_table == ("projects",)
 
 
@@ -49,7 +49,7 @@ def test_migrations_are_idempotent(paths: DatabasePaths):
             0
         ]
 
-    assert count == 1
+    assert count == 2
 
 
 def test_project_model_validation_rejects_invalid_values(service: ProjectService):
