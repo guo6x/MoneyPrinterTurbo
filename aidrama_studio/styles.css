@@ -1,0 +1,134 @@
+:root {
+  --aidrama-bg: #0a0d12;
+  --aidrama-panel: #121720;
+  --aidrama-panel-2: #181f2a;
+  --aidrama-border: #293241;
+  --aidrama-text: #edf1f7;
+  --aidrama-muted: #8f9bab;
+  --aidrama-accent: #d6a35a;
+  --aidrama-success: #56b68b;
+}
+
+[data-testid="stAppViewContainer"],
+[data-testid="stHeader"] {
+  background: var(--aidrama-bg);
+  color: var(--aidrama-text);
+}
+
+[data-testid="stSidebar"] {
+  background: #0e1219;
+  border-right: 1px solid var(--aidrama-border);
+}
+
+.block-container {
+  max-width: 1500px;
+  padding-top: 2.2rem;
+  padding-bottom: 3rem;
+}
+
+.aidrama-brand {
+  color: var(--aidrama-text);
+  font-size: 1.2rem;
+  font-weight: 720;
+  letter-spacing: 0.02em;
+  margin: 0.25rem 0 0.2rem;
+}
+
+.aidrama-page-header {
+  border-bottom: 1px solid var(--aidrama-border);
+  margin-bottom: 1.5rem;
+  padding-bottom: 1.15rem;
+}
+
+.aidrama-page-header h1 {
+  color: var(--aidrama-text);
+  font-size: clamp(1.75rem, 3vw, 2.55rem);
+  line-height: 1.08;
+  margin: 0.35rem 0 0.5rem;
+}
+
+.aidrama-page-header p,
+.aidrama-empty-state p {
+  color: var(--aidrama-muted);
+  margin: 0;
+}
+
+.aidrama-eyebrow,
+.aidrama-empty-label {
+  color: var(--aidrama-accent);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+[data-testid="stVerticalBlockBorderWrapper"] {
+  background: var(--aidrama-panel);
+  border-color: var(--aidrama-border) !important;
+  border-radius: 12px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
+}
+
+.aidrama-cover {
+  align-items: center;
+  background: #1c2430;
+  border: 1px solid #303b4c;
+  border-radius: 8px;
+  color: #687588;
+  display: flex;
+  font-size: 0.68rem;
+  font-weight: 700;
+  height: 105px;
+  justify-content: center;
+  letter-spacing: 0.16em;
+  margin-bottom: 0.85rem;
+}
+
+.aidrama-status {
+  background: #232c39;
+  border: 1px solid #344052;
+  border-radius: 999px;
+  color: #c8d1dc;
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 650;
+  padding: 0.22rem 0.55rem;
+  white-space: nowrap;
+}
+
+.aidrama-status-completed {
+  background: rgba(86, 182, 139, 0.12);
+  border-color: rgba(86, 182, 139, 0.38);
+  color: #7bd1a7;
+}
+
+.aidrama-status-production,
+.aidrama-status-review,
+.aidrama-status-postproduction {
+  background: rgba(214, 163, 90, 0.12);
+  border-color: rgba(214, 163, 90, 0.36);
+  color: #e2b777;
+}
+
+.aidrama-empty-state {
+  background: var(--aidrama-panel);
+  border: 1px dashed #344052;
+  border-radius: 12px;
+  margin: 1rem 0 1.35rem;
+  padding: clamp(1.4rem, 4vw, 2.5rem);
+}
+
+.aidrama-empty-state h3 {
+  color: var(--aidrama-text);
+  margin: 0.55rem 0 0.45rem;
+}
+
+@media (max-width: 1100px) {
+  .block-container {
+    padding-left: 1.25rem;
+    padding-right: 1.25rem;
+  }
+  .aidrama-cover {
+    height: 82px;
+  }
+}

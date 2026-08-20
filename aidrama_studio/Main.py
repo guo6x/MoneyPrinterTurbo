@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import streamlit as st
+from loguru import logger
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from aidrama_studio.components.navigation import build_navigation  # noqa: E402
+from aidrama_studio.storage.database import initialize_database  # noqa: E402
+
+
+st.set_page_config(
+    page_title="AIDrama Studio",
+    page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={"About": "AIDrama Studio\n\nBuilt on MoneyPrinterTurbo · MIT License"},
+)
+
+
+def _load_styles() -> None:
+    style_path = Path(__file__).with_name("styles.css")
+    st.markdown(
+        f"<style>{style_path.read_text(encoding='utf-8')}</style>",
+        unsafe_allow_html=True,
+    )
+
+
+def main() -> None:
+    _load_styles()
+    st.session_state.setdefault("current_project_id", None)
+    try:
+        initialize_database()
+    except Exception:
+        logger.exception("failed to initialize AIDrama Studio storage")
+        st.error("AIDrama Studio 无法初始化本地存储，请检查目录写入权限。")
+        st.stop()
+
+    with st.sidebar:
+        st.markdown(
+            '<div class="aidrama-brand">AIDrama Studio</div>', unsafe_allow_html=True
+        )
+        st.caption("AI 短剧全链路制作工作台")
+
+    navigation = build_navigation()
+    navigation.run()
+
+
+if __name__ == "__main__":
+    main()

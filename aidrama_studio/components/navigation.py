@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+import streamlit as st
+
+from aidrama_studio.pages import (
+    assets,
+    dashboard,
+    director,
+    postproduction,
+    production,
+    review,
+    settings,
+    story,
+)
+
+
+PAGE_DEFINITIONS = (
+    ("dashboard", "工作台", "dashboard", dashboard.render),
+    ("story", "创意与剧本", "story", story.render),
+    ("assets", "角色与场景", "assets", assets.render),
+    ("director", "分镜导演台", "director", director.render),
+    ("production", "制作中心", "production", production.render),
+    ("review", "QC & Review", "review", review.render),
+    ("postproduction", "后期与成片", "postproduction", postproduction.render),
+    ("settings", "设置", "settings", settings.render),
+)
+
+
+def build_navigation():
+    pages = {
+        key: st.Page(render, title=title, url_path=url_path)
+        for key, title, url_path, render in PAGE_DEFINITIONS
+    }
+    st.session_state["_aidrama_pages"] = pages
+    navigation = st.navigation(
+        {
+            "AIDrama Studio": [
+                pages["dashboard"],
+                pages["story"],
+                pages["assets"],
+                pages["director"],
+                pages["production"],
+                pages["review"],
+                pages["postproduction"],
+            ],
+            "System": [pages["settings"]],
+        },
+        position="sidebar",
+    )
+    requested = st.session_state.pop("_aidrama_next_page", None)
+    if requested in pages:
+        st.switch_page(pages[requested])
+    return navigation
+
+
+def request_navigation(page_key: str) -> None:
+    st.session_state["_aidrama_next_page"] = page_key
+    st.rerun()
+
+
+def set_current_project(project_id: str | None) -> None:
+    st.session_state.current_project_id = project_id
