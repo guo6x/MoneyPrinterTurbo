@@ -366,7 +366,6 @@ class TestVideoControllerTasks(unittest.TestCase):
                         operation()
                     self.assertEqual(raised.exception.status_code, 404)
 
-
 class TestVideoControllerFiles(unittest.TestCase):
     @staticmethod
     def _request(range_header=None):
