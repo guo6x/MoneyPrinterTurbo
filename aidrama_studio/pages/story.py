@@ -365,9 +365,29 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
     working["summary"] = _input("剧本摘要", working.get("summary", ""), f"{revision['id']}-script-summary", area=True, height=80)
     character_options = [c["id"] for c in story_revision["content"].model_dump(mode="python")["characters"]]
     location_options = [l["id"] for l in story_revision["content"].model_dump(mode="python")["locations"]]
+    st.markdown("#### Scene Navigator")
+    scene_options = sorted(working["scenes"], key=lambda x: x["order"])
+    selected_scene = st.selectbox(
+        "当前 Scene",
+        scene_options,
+        format_func=lambda x: f"Scene {int(x['order']):02d} · {x['title']} · {x['location_id']} · {x.get('estimated_duration_seconds', 0):g}s",
+        key=f"scene-navigator-{revision['id']}",
+    )
+    st.caption("Scene Navigator 保持当前选择；下方编辑器展示全部场景，便于快速浏览与编辑。")
     for scene in sorted(working["scenes"], key=lambda x: x["order"]):
         with st.container(border=True):
             st.markdown(f"**{scene['id']} · Scene {scene['order']}**")
+            scene_move_left, scene_move_right = st.columns([1, 1])
+            if scene_move_left.button("Scene ↑", key=f"scene-up-{revision['id']}-{scene['id']}"):
+                previous = next((x for x in working["scenes"] if x["order"] == scene["order"] - 1), None)
+                if previous:
+                    previous["order"], scene["order"] = scene["order"], previous["order"]
+                    st.rerun()
+            if scene_move_right.button("Scene ↓", key=f"scene-down-{revision['id']}-{scene['id']}"):
+                following = next((x for x in working["scenes"] if x["order"] == scene["order"] + 1), None)
+                if following:
+                    following["order"], scene["order"] = scene["order"], following["order"]
+                    st.rerun()
             c1, c2, c3 = st.columns(3)
             scene["order"] = c1.number_input("顺序", 1, 999, int(scene["order"]), key=f"{revision['id']}-{scene['id']}-order")
             scene["title"] = c2.text_input("场景标题", scene["title"], key=f"{revision['id']}-{scene['id']}-title")
@@ -383,6 +403,17 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
             scene["estimated_duration_seconds"] = st.number_input("预计时长（秒）", min_value=0.1, value=float(scene.get("estimated_duration_seconds", 1)), key=f"{revision['id']}-{scene['id']}-duration")
             for beat in sorted(scene["beats"], key=lambda x: x["order"]):
                 b1, b2, b3 = st.columns([1, 2, 3])
+                move_up, move_down = st.columns([1, 1])
+                if move_up.button("Beat ↑", key=f"beat-up-{revision['id']}-{scene['id']}-{beat['id']}"):
+                    previous = next((x for x in scene["beats"] if x["order"] == beat["order"] - 1), None)
+                    if previous:
+                        previous["order"], beat["order"] = beat["order"], previous["order"]
+                        st.rerun()
+                if move_down.button("Beat ↓", key=f"beat-down-{revision['id']}-{scene['id']}-{beat['id']}"):
+                    following = next((x for x in scene["beats"] if x["order"] == beat["order"] + 1), None)
+                    if following:
+                        following["order"], beat["order"] = beat["order"], following["order"]
+                        st.rerun()
                 beat["order"] = b1.number_input("Beat 顺序", 1, 999, int(beat["order"]), key=f"{revision['id']}-{beat['id']}-order")
                 beat_type = getattr(beat.get("type"), "value", beat.get("type", "ACTION"))
                 beat["type"] = b2.selectbox("类型", [x.value for x in ScriptBeatType], index=[x.value for x in ScriptBeatType].index(beat_type), key=f"{revision['id']}-{beat['id']}-type")

@@ -35,10 +35,18 @@ class ScriptService:
         content.validate_against(story); return self._create(project.id, story_revision["id"], content)
     def save_draft(self, project_id, content, *, revision_id=None, generation_input=None):
         revision = self.get_revision(revision_id) if revision_id else None
+        source_id = revision["source_story_revision_id"] if revision else None
+        if source_id:
+            source = self.repository.get_story_revision(source_id)
+            if source:
+                content.validate_against(source["content"])
         if revision and revision["status"] is ScriptRevisionStatus.DRAFT: return self.repository.update_script_revision(revision_id, content=content, updated_at=_now(), generation_input=generation_input)
         if revision and revision["status"] is ScriptRevisionStatus.APPROVED: return self._create(project_id, revision["source_story_revision_id"], content, generation_input)
         latest = self.get_latest_revision(project_id)
-        if latest and latest["status"] is ScriptRevisionStatus.DRAFT: return self.repository.update_script_revision(latest["id"], content=content, updated_at=_now(), generation_input=generation_input)
+        if latest and latest["status"] is ScriptRevisionStatus.DRAFT:
+            source = self.repository.get_story_revision(latest["source_story_revision_id"])
+            if source: content.validate_against(source["content"])
+            return self.repository.update_script_revision(latest["id"], content=content, updated_at=_now(), generation_input=generation_input)
         raise ValueError("新建剧本必须提供 source story revision")
     def create_revision_from_approved(self, revision_id):
         rev = self.get_revision(revision_id)

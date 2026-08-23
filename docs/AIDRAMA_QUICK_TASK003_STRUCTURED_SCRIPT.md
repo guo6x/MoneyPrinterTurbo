@@ -31,3 +31,28 @@ INNER_MONOLOGUE beats.
 
 Task003 deliberately does not create shot lists, images, video, production,
 or QC workflows, and does not modify the MoneyPrinterTurbo LLM core.
+
+## VALIDATION_CLOSURE
+
+- Migration tests now verify ordered versions 1/2/3, recorded timestamps, all
+  three tables, and idempotent repeated initialization. AIDrama suite: 19
+  passed, 0 failed.
+- Full project regression excluding the documented Windows path-separator
+  baseline passed 617 tests with 10 skipped. The single baseline test
+  `test_worker_logs_are_available_without_streamlit_session_state` remains the
+  only failure: Loguru emits `test\\services\\...` on Windows while its test
+  pattern expects `test/services/...`. No MPT code or test was changed.
+- Python compile and `git diff --check` pass. Both `streamlit run
+  webui/Main.py` and `streamlit run aidrama_studio/Main.py` returned HTTP 200
+  startup smoke responses.
+- Browser acceptance used a local test project. Dashboard, project opening,
+  Story Bible approval, Structured Script tab, manual script creation, Scene
+  Navigator, scene add/edit, beat add, beat reorder controls, draft save,
+  preview, history, approval, PREPRODUCTION advancement, Story Bible v2
+  approval, and the old-script OUTDATED warning were observed. Approval of an
+  invalid dialogue without a character was blocked. Screenshots were saved to
+  `.tmp/aidrama-task003-browser/structured-script-1920.png` and
+  `.tmp/aidrama-task003-browser/structured-script-1366.png` (not committed).
+- Live LLM was not run because no API key is configured. Responsive checks at
+  1920x1080 and 1366x768 showed the sidebar, tabs, navigator, editor, history,
+  and approval controls without severe overlap or horizontal overflow.

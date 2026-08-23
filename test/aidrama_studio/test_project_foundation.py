@@ -8,6 +8,7 @@ import pytest
 from aidrama_studio.domain import AspectRatio, ProjectStatus
 from aidrama_studio.services import ProjectService
 from aidrama_studio.storage.database import DatabasePaths, initialize_database
+from aidrama_studio.storage.migrations import MIGRATIONS
 from aidrama_studio.storage.repositories import ProjectRepository
 
 
@@ -25,31 +26,54 @@ def service(paths: DatabasePaths) -> ProjectService:
     return ProjectService(ProjectRepository(paths))
 
 
-def test_migration_001_is_applied_and_recorded(paths: DatabasePaths):
+def test_all_migrations_are_applied_in_order_and_recorded(paths: DatabasePaths):
     initialize_database(paths)
 
     with sqlite3.connect(paths.database) as connection:
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        projects_table = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'projects'"
-        ).fetchone()
+        migration_rows = connection.execute(
+            "SELECT version, applied_at FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
 
-    assert versions == [(1,), (2,)]
-    assert projects_table == ("projects",)
+    expected_versions = [version for version, _ in MIGRATIONS]
+    assert expected_versions == [1, 2, 3]
+    assert versions == [(version,) for version in expected_versions]
+    assert [row[0] for row in migration_rows] == expected_versions
+    assert all(row[1] for row in migration_rows)
+    assert {"projects", "story_bible_revisions", "structured_script_revisions"} <= tables
 
 
 def test_migrations_are_idempotent(paths: DatabasePaths):
     initialize_database(paths)
+    with sqlite3.connect(paths.database) as connection:
+        before = connection.execute(
+            "SELECT version, applied_at FROM schema_migrations ORDER BY version"
+        ).fetchall()
+
     initialize_database(paths)
 
     with sqlite3.connect(paths.database) as connection:
-        count = connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[
-            0
-        ]
+        after = connection.execute(
+            "SELECT version, applied_at FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
 
-    assert count == 2
+    assert after == before
+    assert [row[0] for row in after] == [1, 2, 3]
+    assert {"projects", "story_bible_revisions", "structured_script_revisions"} <= tables
 
 
 def test_project_model_validation_rejects_invalid_values(service: ProjectService):
