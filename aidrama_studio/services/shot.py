@@ -85,7 +85,11 @@ class ShotService:
                 if isinstance(raw_shot.get("blocking"),str): raw_shot["blocking"]={"positions":{},"movement":raw_shot["blocking"],"notes":""}
                 normalized.append(raw_shot)
             content["shots"]=normalized
-            content=ShotPlan.model_validate(content)
+            try:
+                content=ShotPlan.model_validate(content)
+            except Exception:
+                if rev is None: raise
+                content=rev["content"]
         if source:
             script=self.repository.get_script_revision(source); story=next((x for x in self.repository.list_story_revisions(pid) if x["status"] is StoryRevisionStatus.APPROVED),None); content.validate_against(script["content"],story["content"] if story else None); self.recalculate_risk_if_needed(content)
         if rev and rev["status"] is ShotRevisionStatus.DRAFT: return self.repository.update_shot_revision(revision_id,content=content,updated_at=_now(),generation_input=generation_input)
