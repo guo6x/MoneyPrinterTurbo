@@ -67,27 +67,24 @@ class ShotService:
     def save_draft(self,pid,content,*,revision_id=None,generation_input=None):
         rev=self.get_revision(revision_id) if revision_id else None; source=rev["source_script_revision_id"] if rev else None
         if isinstance(content,dict):
-            if "content" in content and not "shots" in content: content=content["content"]
-            else:
-                content=dict(content); normalized=[]
-                for key in ("id","project_id","version","status"):
-                    content.pop(key, None)
-                for raw_shot in content.get("shots",[]):
-                    raw_shot=dict(raw_shot)
-                    for key in ("shot_size","camera_angle","camera_movement","lens","eyeline","status","risk_level"):
-                        if hasattr(raw_shot.get(key), "value"): raw_shot[key]=raw_shot[key].value
-                    for key in ("id","order","scene_id","duration_seconds","shot_size","camera_angle","camera_movement","movement_notes","lens","composition","action","expression","dialogue_or_narration","visual_intent","transition_hint","risk_override","risk_override_note"):
-                        if isinstance(raw_shot.get(key),str) and "." in raw_shot[key] and key in ("shot_size","camera_angle","camera_movement","lens","eyeline","status"): raw_shot[key]=raw_shot[key].split(".")[-1]
-                    for key in ("shot_size","camera_angle","camera_movement","lens","eyeline","status"):
-                        if isinstance(raw_shot.get(key),str) and "." in raw_shot[key]: raw_shot[key]=raw_shot[key].split(".")[-1]
-                    raw_shot.pop("risk_level", None) if isinstance(raw_shot.get("risk_level"),str) and raw_shot["risk_level"].startswith("RiskLevel.") else None
-                    if isinstance(raw_shot.get("risk_level"),str): raw_shot["risk_level"]=raw_shot["risk_level"].split(".")[-1]
-                    if isinstance(raw_shot.get("subject"),str): raw_shot["subject"]=[x.strip() for x in raw_shot["subject"].split(",") if x.strip()]
-                    if isinstance(raw_shot.get("risk_reasons"),str): raw_shot["risk_reasons"]=[x.strip() for x in raw_shot["risk_reasons"].replace("，",",").split(",") if x.strip()]
-                    if isinstance(raw_shot.get("lighting"),str): raw_shot["lighting"]={"quality":raw_shot["lighting"],"direction":"","tone":"","notes":""}
-                    if isinstance(raw_shot.get("blocking"),str): raw_shot["blocking"]={"positions":{},"movement":raw_shot["blocking"],"notes":""}
-                    normalized.append(raw_shot)
-                content["shots"]=normalized
+            content = content.get("content") if isinstance(content.get("content"),dict) else content
+            content=dict(content); normalized=[]
+            for key in ("id","project_id","version","status"):
+                content.pop(key, None)
+            for raw_shot in content.get("shots",[]):
+                raw_shot=dict(raw_shot)
+                for key in ("shot_size","camera_angle","camera_movement","lens","eyeline","status","risk_level"):
+                    if hasattr(raw_shot.get(key), "value"): raw_shot[key]=raw_shot[key].value
+                for key in ("shot_size","camera_angle","camera_movement","lens","eyeline","status"):
+                    if isinstance(raw_shot.get(key),str) and "." in raw_shot[key]: raw_shot[key]=raw_shot[key].split(".")[-1]
+                if isinstance(raw_shot.get("eyeline"),str) and raw_shot["eyeline"] in Eyeline.__members__: raw_shot["eyeline"] = Eyeline[raw_shot["eyeline"]].value
+                if isinstance(raw_shot.get("risk_level"),str): raw_shot["risk_level"]=raw_shot["risk_level"].split(".")[-1]
+                if isinstance(raw_shot.get("subject"),str): raw_shot["subject"]= [x.strip() for x in raw_shot["subject"].split(",") if x.strip()]
+                if isinstance(raw_shot.get("risk_reasons"),str): raw_shot["risk_reasons"]= [x.strip() for x in raw_shot["risk_reasons"].replace("，",",").split(",") if x.strip()]
+                if isinstance(raw_shot.get("lighting"),str): raw_shot["lighting"]={"quality":raw_shot["lighting"],"direction":"","tone":"","notes":""}
+                if isinstance(raw_shot.get("blocking"),str): raw_shot["blocking"]={"positions":{},"movement":raw_shot["blocking"],"notes":""}
+                normalized.append(raw_shot)
+            content["shots"]=normalized
             content=ShotPlan.model_validate(content)
         if source:
             script=self.repository.get_script_revision(source); story=next((x for x in self.repository.list_story_revisions(pid) if x["status"] is StoryRevisionStatus.APPROVED),None); content.validate_against(script["content"],story["content"] if story else None); self.recalculate_risk_if_needed(content)
