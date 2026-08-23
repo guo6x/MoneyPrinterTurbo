@@ -44,11 +44,11 @@ def test_all_migrations_are_applied_in_order_and_recorded(paths: DatabasePaths):
         }
 
     expected_versions = [version for version, _ in MIGRATIONS]
-    assert expected_versions == [1, 2, 3]
+    assert expected_versions == [1, 2, 3, 4]
     assert versions == [(version,) for version in expected_versions]
     assert [row[0] for row in migration_rows] == expected_versions
     assert all(row[1] for row in migration_rows)
-    assert {"projects", "story_bible_revisions", "structured_script_revisions"} <= tables
+    assert {"projects", "story_bible_revisions", "structured_script_revisions", "shot_plan_revisions"} <= tables
 
 
 def test_migrations_are_idempotent(paths: DatabasePaths):
@@ -72,8 +72,8 @@ def test_migrations_are_idempotent(paths: DatabasePaths):
         }
 
     assert after == before
-    assert [row[0] for row in after] == [1, 2, 3]
-    assert {"projects", "story_bible_revisions", "structured_script_revisions"} <= tables
+    assert [row[0] for row in after] == [1, 2, 3, 4]
+    assert {"projects", "story_bible_revisions", "structured_script_revisions", "shot_plan_revisions"} <= tables
 
 
 def test_project_model_validation_rejects_invalid_values(service: ProjectService):
