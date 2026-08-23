@@ -3,6 +3,7 @@ import streamlit as st
 from aidrama_studio.components.page_header import page_header
 from aidrama_studio.pages._shared import current_project_or_stop
 from aidrama_studio.services import ScriptService
+from aidrama_studio.domain import ShotStatus
 
 def _shot_service():
     try:
@@ -48,7 +49,19 @@ def _editor(service, project, plan):
         if a.button("↑ 上移", key=f"up-{pid}-{idx}"): _call(service, "move_shot", pid, idx, -1); st.rerun()
         if b.button("↓ 下移", key=f"down-{pid}-{idx}"): _call(service, "move_shot", pid, idx, 1); st.rerun()
         if c.button("保存 Draft", type="primary", key=f"save-{pid}"):
-            _call(service, "save_draft", project.id, plan) or _call(service, "update_plan", pid, plan); st.toast("Shot Plan Draft 已保存")
+            try:
+                canonical = service.get_revision(pid)["content"]
+                existing = canonical.shots[idx]
+                for field in ("scene_id", "composition", "action", "expression", "dialogue_or_narration", "visual_intent", "transition_hint"):
+                    if field in shot: setattr(existing, field, shot[field])
+                existing.duration_seconds = float(shot.get("duration_seconds", existing.duration_seconds))
+                existing.status = ShotStatus.LOCKED if shot.get("status") == "LOCKED" else ShotStatus.PLANNED
+                if isinstance(shot.get("subject"), str): existing.subject = [x.strip() for x in shot["subject"].split(",") if x.strip()]
+                if isinstance(shot.get("risk_reasons"), str): existing.risk_reasons = [x.strip() for x in shot["risk_reasons"].replace("，", ",").split(",") if x.strip()]
+                service.save_draft(project.id, canonical, revision_id=pid)
+                st.toast("Shot Plan Draft 已保存")
+            except Exception as exc:
+                st.error(f"保存失败：{exc}")
 
 
 def render() -> None:
