@@ -56,3 +56,8 @@ or QC workflows, and does not modify the MoneyPrinterTurbo LLM core.
 - Live LLM was not run because no API key is configured. Responsive checks at
   1920x1080 and 1366x768 showed the sidebar, tabs, navigator, editor, history,
   and approval controls without severe overlap or horizontal overflow.
+- Session-state observation: Streamlit reruns from add/save/approve actions kept
+  the current project, selected script revision, scene navigator, and tab
+  state stable. A hard browser reload creates a new Streamlit session and
+  returns to Dashboard; reopening the persisted project restores the script.
+  Current-project URL persistence was added for dashboard selection paths.
