@@ -73,11 +73,26 @@ def _migration_003_structured_script_revisions(connection: sqlite3.Connection) -
     connection.execute("CREATE INDEX idx_script_revisions_status ON structured_script_revisions(project_id, status)")
     connection.execute("CREATE UNIQUE INDEX idx_script_one_approved ON structured_script_revisions(project_id) WHERE status = 'APPROVED'")
 
+def _migration_004_shot_plan_revisions(connection: sqlite3.Connection) -> None:
+    connection.execute("""CREATE TABLE shot_plan_revisions (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, version INTEGER NOT NULL,
+        status TEXT NOT NULL, source_script_revision_id TEXT NOT NULL,
+        content_json TEXT NOT NULL, generation_input_json TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(project_id, version),
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(source_script_revision_id) REFERENCES structured_script_revisions(id)
+    )""")
+    connection.execute("CREATE INDEX idx_shot_revisions_project ON shot_plan_revisions(project_id, version DESC)")
+    connection.execute("CREATE INDEX idx_shot_revisions_status ON shot_plan_revisions(project_id, status)")
+    connection.execute("CREATE UNIQUE INDEX idx_shot_one_approved ON shot_plan_revisions(project_id) WHERE status='APPROVED'")
+
 
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
     (3, _migration_003_structured_script_revisions),
+    (4, _migration_004_shot_plan_revisions),
 )
 
 

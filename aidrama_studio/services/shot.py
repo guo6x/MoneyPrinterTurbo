@@ -1,0 +1,96 @@
+from __future__ import annotations
+from datetime import datetime,timezone
+from uuid import uuid4
+from aidrama_studio.domain import *
+from aidrama_studio.services import ai
+from aidrama_studio.services.shot_parser import parse_shot_plan,ShotPlanParseError
+from aidrama_studio.services.shot_prompt import build_shot_prompt,build_shot_repair_prompt
+from aidrama_studio.storage import ProjectRepository
+def _now(): return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+class ShotServiceError(RuntimeError): pass
+class ShotService:
+    def __init__(self,repository=None,*,text_generator=None,config_snapshot_provider=None): self.repository=repository or ProjectRepository(); self._text_generator=text_generator or ai.generate_text; self._snapshot_provider=config_snapshot_provider or ai.snapshot_llm_config
+    def list_revisions(self,pid): return self.repository.list_shot_revisions(pid)
+    def list_plans(self,pid):
+        out=[]
+        for rev in self.list_revisions(pid):
+            item={"id":rev["id"],"project_id":rev["project_id"],"version":rev["version"],"status":rev["status"],"source_script_revision_id":rev["source_script_revision_id"]}
+            item.update(rev["content"].model_dump(mode="python")); out.append(item)
+        return out
+    def get_revision(self,rid): return self.repository.get_shot_revision(rid)
+    def get_latest_revision(self,pid):
+        x=self.list_revisions(pid); return x[0] if x else None
+    def get_approved_revision(self,pid): return next((x for x in self.list_revisions(pid) if x["status"] is ShotRevisionStatus.APPROVED),None)
+    def _next(self,pid): x=self.get_latest_revision(pid); return x["version"]+1 if x else 1
+    def _create(self,pid,source,content,generation_input=None):
+        n=_now(); return self.repository.create_shot_revision(revision_id=uuid4().hex,project_id=pid,version=self._next(pid),status=ShotRevisionStatus.DRAFT,source_script_revision_id=source,content=content,generation_input=generation_input,created_at=n,updated_at=n)
+    def _story_script(self,pid):
+        stories=self.repository.list_story_revisions(pid); scripts=self.repository.list_script_revisions(pid); return next((x for x in scripts if x["status"] is ScriptRevisionStatus.APPROVED),None),next((x for x in stories if x["status"] is StoryRevisionStatus.APPROVED),None)
+    def recalculate_risk_if_needed(self,plan):
+        for s in plan.shots:
+            if s.risk_override: continue
+            reasons=[]
+            if s.shot_size in (ShotSize.CLOSE_UP,ShotSize.EXTREME_CLOSE_UP): reasons.append("EMOTIONAL_CLOSEUP")
+            if len(s.subject)>1: reasons.append("MULTI_CHARACTER")
+            if s.camera_movement is not CameraMovement.STATIC: reasons.append("CAMERA_MOTION")
+            if s.source_script_beat_ids: reasons.append("KEY_STORY_BEAT")
+            s.risk_level=RiskLevel.HIGH if len(reasons)>=2 else RiskLevel.MEDIUM if reasons else RiskLevel.LOW; s.risk_reasons=reasons
+        return plan
+    def validate_plan(self,rev_or_plan,project=None,*,block_extreme=False):
+        rev=rev_or_plan if isinstance(rev_or_plan,dict) else None; plan=rev["content"] if rev else rev_or_plan; script,story=self._story_script(rev["project_id"] if rev else project.id); plan.validate_against(script["content"],story["content"]); self.recalculate_risk_if_needed(plan)
+        if block_extreme and project and abs(plan.total_duration_seconds-project.target_duration_seconds)>project.target_duration_seconds*.30: raise ValueError("Shot duration exceeds ±30% blocking threshold")
+        return plan
+    def create_manual_shot_plan(self,project,script_revision=None):
+        if script_revision is None: script_revision,_=self._story_script(project.id)
+        if not script_revision or script_revision["status"] is not ScriptRevisionStatus.APPROVED: raise ShotServiceError("请先完成并确认结构化剧本。")
+        shots=[]
+        for scene in script_revision["content"].scenes:
+            beat=scene.beats[0]; shots.append(Shot(id=f"shot_{len(shots)+1:03d}",order=len(shots)+1,scene_id=scene.id,source_script_beat_ids=[beat.id] if beat.type.value in ("DIALOGUE","INNER_MONOLOGUE") else [],duration_seconds=scene.estimated_duration_seconds,subject=scene.character_ids,action=beat.text,dialogue_or_narration=beat.text if beat.type.value in ("DIALOGUE","NARRATION","INNER_MONOLOGUE") else "",visual_intent=f"建立 {scene.title} 的视觉空间"))
+        plan=ShotPlan(title=script_revision["content"].title,summary="",source_script_revision_id=script_revision["id"],shots=shots); self.recalculate_risk_if_needed(plan); return self._create(project.id,script_revision["id"],plan)
+    create_manual_plan = create_manual_shot_plan
+    def create_plan(self, project_id, script_revision_id):
+        project=self.repository.get_project(project_id); script=self.repository.get_script_revision(script_revision_id); return self.create_manual_shot_plan(project,script)
+    def save_draft(self,pid,content,*,revision_id=None,generation_input=None):
+        rev=self.get_revision(revision_id) if revision_id else None; source=rev["source_script_revision_id"] if rev else None
+        if isinstance(content,dict):
+            if "content" in content and not "shots" in content: content=content["content"]
+            else:
+                content=dict(content); normalized=[]
+                for raw_shot in content.get("shots",[]):
+                    raw_shot=dict(raw_shot)
+                    if isinstance(raw_shot.get("subject"),str): raw_shot["subject"]=[x.strip() for x in raw_shot["subject"].split(",") if x.strip()]
+                    if isinstance(raw_shot.get("risk_reasons"),str): raw_shot["risk_reasons"]=[x.strip() for x in raw_shot["risk_reasons"].replace("，",",").split(",") if x.strip()]
+                    if isinstance(raw_shot.get("lighting"),str): raw_shot["lighting"]={"quality":raw_shot["lighting"],"direction":"","tone":"","notes":""}
+                    if isinstance(raw_shot.get("blocking"),str): raw_shot["blocking"]={"positions":{},"movement":raw_shot["blocking"],"notes":""}
+                    normalized.append(raw_shot)
+                content["shots"]=normalized
+            content=ShotPlan.model_validate(content)
+        if source:
+            script=self.repository.get_script_revision(source); story=next((x for x in self.repository.list_story_revisions(pid) if x["status"] is StoryRevisionStatus.APPROVED),None); content.validate_against(script["content"],story["content"] if story else None); self.recalculate_risk_if_needed(content)
+        if rev and rev["status"] is ShotRevisionStatus.DRAFT: return self.repository.update_shot_revision(revision_id,content=content,updated_at=_now(),generation_input=generation_input)
+        if rev and rev["status"] is ShotRevisionStatus.APPROVED: return self._create(pid,source,content,generation_input)
+        latest=self.get_latest_revision(pid)
+        if latest and latest["status"] is ShotRevisionStatus.DRAFT: return self.repository.update_shot_revision(latest["id"],content=content,updated_at=_now(),generation_input=generation_input)
+        raise ValueError("Shot Plan source script revision required")
+    def is_outdated(self,rev_or_id):
+        rev=self.get_revision(rev_or_id) if isinstance(rev_or_id,str) else rev_or_id
+        if not rev:return False
+        script,_=self._story_script(rev["project_id"]); return script is not None and script["id"]!=rev["source_script_revision_id"]
+    def approve_revision(self,rid):
+        rev=self.get_revision(rid)
+        if not rev: raise KeyError("Shot Plan revision 不存在")
+        if self.is_outdated(rev): raise ValueError("该分镜基于旧版剧本，需重新同步后才能批准")
+        self.validate_plan(rev,block_extreme=False); return self.repository.approve_shot_revision(rid,updated_at=_now())
+    approve_plan = approve_revision
+    def generate_shot_plan(self,project):
+        script,story=self._story_script(project.id)
+        if not script: raise ShotServiceError("请先完成并确认结构化剧本。")
+        snap=self._snapshot_provider(); prompt=build_shot_prompt(project,script["content"],story["content"])
+        try:
+            raw=self._text_generator(prompt,snap)
+            try: plan=parse_shot_plan(raw); plan.validate_against(script["content"],story["content"]); self.recalculate_risk_if_needed(plan)
+            except (ShotPlanParseError,ValueError) as e:
+                plan=parse_shot_plan(self._text_generator(build_shot_repair_prompt(getattr(e,"raw",raw),str(e)),snap)); plan.validate_against(script["content"],story["content"]); self.recalculate_risk_if_needed(plan)
+        except ai.AIDramaAIError as e: raise ShotServiceError(str(e)) from e
+        except Exception as e: raise ShotServiceError("Shot Plan 生成失败，请稍后重试。") from e
+        return self._create(project.id,script["id"],plan,{"target_duration_seconds":project.target_duration_seconds,"aspect_ratio":project.aspect_ratio.value})

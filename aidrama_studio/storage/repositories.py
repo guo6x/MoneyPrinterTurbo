@@ -13,6 +13,7 @@ from aidrama_studio.domain import (
     StructuredScript,
 )
 from aidrama_studio.domain.script import ScriptRevisionStatus
+from aidrama_studio.domain.shot import ShotPlan, ShotRevisionStatus
 
 from .database import DatabasePaths, connect, initialize_database
 
@@ -378,3 +379,33 @@ class ProjectRepository:
                 connection.execute("UPDATE projects SET status=?, updated_at=? WHERE id=?", (ProjectStatus.PREPRODUCTION.value, updated_at, row["project_id"]))
             row = connection.execute("SELECT * FROM structured_script_revisions WHERE id = ?", (revision_id,)).fetchone()
         return self._script_revision_from_row(row)
+
+    @staticmethod
+    def _shot_revision_from_row(row) -> dict[str, Any]:
+        return {"id":row["id"],"project_id":row["project_id"],"version":row["version"],"status":ShotRevisionStatus(row["status"]),"source_script_revision_id":row["source_script_revision_id"],"content":ShotPlan.model_validate(json.loads(row["content_json"])),"generation_input":json.loads(row["generation_input_json"]) if row["generation_input_json"] else None,"created_at":row["created_at"],"updated_at":row["updated_at"]}
+    def create_shot_revision(self, *, revision_id, project_id, version, status, source_script_revision_id, content, generation_input, created_at, updated_at):
+        with connect(self.paths.database) as c:
+            if not self._project_exists(c, project_id): raise KeyError(f"项目不存在: {project_id}")
+            c.execute("INSERT INTO shot_plan_revisions(id,project_id,version,status,source_script_revision_id,content_json,generation_input_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",(revision_id,project_id,version,status.value,source_script_revision_id,json.dumps(content.model_dump(mode="json"),ensure_ascii=False,sort_keys=True),json.dumps(generation_input,ensure_ascii=False,sort_keys=True) if generation_input is not None else None,created_at,updated_at))
+            row=c.execute("SELECT * FROM shot_plan_revisions WHERE id=?",(revision_id,)).fetchone()
+        return self._shot_revision_from_row(row)
+    def get_shot_revision(self, revision_id):
+        with connect(self.paths.database) as c: row=c.execute("SELECT * FROM shot_plan_revisions WHERE id=?",(revision_id,)).fetchone()
+        return self._shot_revision_from_row(row) if row else None
+    def list_shot_revisions(self, project_id):
+        with connect(self.paths.database) as c: rows=c.execute("SELECT * FROM shot_plan_revisions WHERE project_id=? ORDER BY version DESC",(project_id,)).fetchall()
+        return [self._shot_revision_from_row(x) for x in rows]
+    def update_shot_revision(self, revision_id, *, content, updated_at, generation_input=None):
+        with connect(self.paths.database) as c:
+            row=c.execute("SELECT * FROM shot_plan_revisions WHERE id=?",(revision_id,)).fetchone()
+            if row is None: raise KeyError("Shot Plan revision 不存在")
+            if row["status"] != ShotRevisionStatus.DRAFT.value: raise ValueError("只有 DRAFT revision 可以直接保存")
+            c.execute("UPDATE shot_plan_revisions SET content_json=?,generation_input_json=COALESCE(?,generation_input_json),updated_at=? WHERE id=?",(json.dumps(content.model_dump(mode="json"),ensure_ascii=False,sort_keys=True),json.dumps(generation_input,ensure_ascii=False,sort_keys=True) if generation_input is not None else None,updated_at,revision_id)); row=c.execute("SELECT * FROM shot_plan_revisions WHERE id=?",(revision_id,)).fetchone()
+        return self._shot_revision_from_row(row)
+    def approve_shot_revision(self, revision_id, *, updated_at):
+        with connect(self.paths.database) as c:
+            row=c.execute("SELECT * FROM shot_plan_revisions WHERE id=?",(revision_id,)).fetchone()
+            if row is None: raise KeyError("Shot Plan revision 不存在")
+            if row["status"] == ShotRevisionStatus.SUPERSEDED.value: raise ValueError("已被替代的 revision 不能批准")
+            c.execute("UPDATE shot_plan_revisions SET status=?,updated_at=? WHERE project_id=? AND status=? AND id<>?",(ShotRevisionStatus.SUPERSEDED.value,updated_at,row["project_id"],ShotRevisionStatus.APPROVED.value,revision_id)); c.execute("UPDATE shot_plan_revisions SET status=?,updated_at=? WHERE id=?",(ShotRevisionStatus.APPROVED.value,updated_at,revision_id)); row=c.execute("SELECT * FROM shot_plan_revisions WHERE id=?",(revision_id,)).fetchone()
+        return self._shot_revision_from_row(row)
