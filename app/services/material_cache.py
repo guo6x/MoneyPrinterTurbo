@@ -242,6 +242,9 @@ def load_material_search_cache(
     # 系统时间回拨或文件从其它机器复制后，mtime 可能落在未来。此时不能把
     # 缓存长期视为新鲜数据，直接失效并重新请求远端更可靠。
     if cache_age < 0 or cache_age >= MATERIAL_SEARCH_CACHE_TTL_SECONDS:
+        logger.warning(
+            f"discarding expired material search cache: file={cache_path.name}"
+        )
         _remove_invalid_cache(cache_path)
         return None
 
