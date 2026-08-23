@@ -74,6 +74,8 @@ class ShotService:
                     content.pop(key, None)
                 for raw_shot in content.get("shots",[]):
                     raw_shot=dict(raw_shot)
+                    for key in ("shot_size","camera_angle","camera_movement","lens","eyeline","status","risk_level"):
+                        if hasattr(raw_shot.get(key), "value"): raw_shot[key]=raw_shot[key].value
                     for key in ("id","order","scene_id","duration_seconds","shot_size","camera_angle","camera_movement","movement_notes","lens","composition","action","expression","dialogue_or_narration","visual_intent","transition_hint","risk_override","risk_override_note"):
                         if isinstance(raw_shot.get(key),str) and "." in raw_shot[key] and key in ("shot_size","camera_angle","camera_movement","lens","eyeline","status"): raw_shot[key]=raw_shot[key].split(".")[-1]
                     for key in ("shot_size","camera_angle","camera_movement","lens","eyeline","status"):
