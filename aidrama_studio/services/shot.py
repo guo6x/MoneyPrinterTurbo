@@ -50,14 +50,36 @@ class ShotService:
     create_manual_plan = create_manual_shot_plan
     def create_plan(self, project_id, script_revision_id):
         project=self.repository.get_project(project_id); script=self.repository.get_script_revision(script_revision_id); return self.create_manual_shot_plan(project,script)
+    def add_shot(self, revision_id):
+        rev=self.get_revision(revision_id)
+        if not rev or rev["status"] is not ShotRevisionStatus.DRAFT: raise ValueError("只能向 DRAFT Shot Plan 添加镜头")
+        plan=rev["content"]; scene_id=plan.shots[-1].scene_id if plan.shots else "scene_001"; n=len(plan.shots)+1
+        plan.shots.append(Shot(id=f"shot_{n:03d}",order=n,scene_id=scene_id,duration_seconds=1,visual_intent="补充空间与动作信息")); self.recalculate_risk_if_needed(plan)
+        return self.repository.update_shot_revision(revision_id,content=plan,updated_at=_now())
+    def move_shot(self, revision_id, index, delta):
+        rev=self.get_revision(revision_id)
+        if not rev or rev["status"] is not ShotRevisionStatus.DRAFT: raise ValueError("只能调整 DRAFT Shot Plan")
+        plan=rev["content"]; target=index+delta
+        if not 0<=target<len(plan.shots): return rev
+        plan.shots[index],plan.shots[target]=plan.shots[target],plan.shots[index]
+        plan.shots[index].order,plan.shots[target].order=index+1,target+1
+        return self.repository.update_shot_revision(revision_id,content=plan,updated_at=_now())
     def save_draft(self,pid,content,*,revision_id=None,generation_input=None):
         rev=self.get_revision(revision_id) if revision_id else None; source=rev["source_script_revision_id"] if rev else None
         if isinstance(content,dict):
             if "content" in content and not "shots" in content: content=content["content"]
             else:
                 content=dict(content); normalized=[]
+                for key in ("id","project_id","version","status"):
+                    content.pop(key, None)
                 for raw_shot in content.get("shots",[]):
                     raw_shot=dict(raw_shot)
+                    for key in ("id","order","scene_id","duration_seconds","shot_size","camera_angle","camera_movement","movement_notes","lens","composition","action","expression","dialogue_or_narration","visual_intent","transition_hint","risk_override","risk_override_note"):
+                        if isinstance(raw_shot.get(key),str) and "." in raw_shot[key] and key in ("shot_size","camera_angle","camera_movement","lens","eyeline","status"): raw_shot[key]=raw_shot[key].split(".")[-1]
+                    for key in ("shot_size","camera_angle","camera_movement","lens","eyeline","status"):
+                        if isinstance(raw_shot.get(key),str) and "." in raw_shot[key]: raw_shot[key]=raw_shot[key].split(".")[-1]
+                    raw_shot.pop("risk_level", None) if isinstance(raw_shot.get("risk_level"),str) and raw_shot["risk_level"].startswith("RiskLevel.") else None
+                    if isinstance(raw_shot.get("risk_level"),str): raw_shot["risk_level"]=raw_shot["risk_level"].split(".")[-1]
                     if isinstance(raw_shot.get("subject"),str): raw_shot["subject"]=[x.strip() for x in raw_shot["subject"].split(",") if x.strip()]
                     if isinstance(raw_shot.get("risk_reasons"),str): raw_shot["risk_reasons"]=[x.strip() for x in raw_shot["risk_reasons"].replace("，",",").split(",") if x.strip()]
                     if isinstance(raw_shot.get("lighting"),str): raw_shot["lighting"]={"quality":raw_shot["lighting"],"direction":"","tone":"","notes":""}

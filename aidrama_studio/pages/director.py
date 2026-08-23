@@ -43,7 +43,7 @@ def _editor(service, project, plan):
         with right:
             for key, label in (("subject", "主体"), ("action", "动作"), ("expression", "表情"), ("eyeline", "视线"), ("lighting", "灯光"), ("blocking", "调度"), ("dialogue_or_narration", "对白 / 旁白"), ("visual_intent", "视觉意图"), ("transition_hint", "转场提示")):
                 shot[key] = st.text_area(label, str(_value(shot, key, "")), key=f"{pid}-{idx}-{key}", height=55)
-        st.checkbox("锁定镜头", value=bool(_value(shot, "locked", False)), key=f"{pid}-{idx}-locked")
+        shot["status"] = "LOCKED" if st.checkbox("锁定镜头", value=_value(shot, "status", "PLANNED") == "LOCKED", key=f"{pid}-{idx}-locked") else "PLANNED"
         a,b,c = st.columns(3)
         if a.button("↑ 上移", key=f"up-{pid}-{idx}"): _call(service, "move_shot", pid, idx, -1); st.rerun()
         if b.button("↓ 下移", key=f"down-{pid}-{idx}"): _call(service, "move_shot", pid, idx, 1); st.rerun()
