@@ -35,6 +35,10 @@ def _load_styles() -> None:
 def main() -> None:
     _load_styles()
     st.session_state.setdefault("current_project_id", None)
+    if not st.session_state.get("current_project_id"):
+        project_from_url = st.query_params.get("project")
+        if project_from_url:
+            st.session_state.current_project_id = project_from_url
     try:
         initialize_database()
     except Exception:

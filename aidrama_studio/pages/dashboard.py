@@ -52,6 +52,7 @@ def _create_project_form(service: ProjectService) -> None:
                 st.error("项目创建失败，请检查数据库与项目目录权限。")
             else:
                 st.session_state.current_project_id = project.id
+                st.query_params["project"] = project.id
                 st.toast("项目已创建")
                 _navigate("story")
 
@@ -195,6 +196,7 @@ def render() -> None:
                 st.error("演示项目创建失败。")
             else:
                 st.session_state.current_project_id = demo.id
+                st.query_params["project"] = demo.id
                 st.rerun()
         return
 
@@ -216,6 +218,7 @@ def render() -> None:
             action = project_card(project)
             if action == "open":
                 st.session_state.current_project_id = project.id
+                st.query_params["project"] = project.id
                 _navigate("story")
             elif action == "edit":
                 st.session_state.editing_project_id = project.id
