@@ -1,5 +1,6 @@
 from __future__ import annotations
 from datetime import datetime,timezone
+import ast
 from uuid import uuid4
 from aidrama_studio.domain import *
 from aidrama_studio.services import ai
@@ -79,8 +80,14 @@ class ShotService:
                     if isinstance(raw_shot.get(key),str) and "." in raw_shot[key]: raw_shot[key]=raw_shot[key].split(".")[-1]
                 if isinstance(raw_shot.get("eyeline"),str) and raw_shot["eyeline"] in Eyeline.__members__: raw_shot["eyeline"] = Eyeline[raw_shot["eyeline"]].value
                 if isinstance(raw_shot.get("risk_level"),str): raw_shot["risk_level"]=raw_shot["risk_level"].split(".")[-1]
-                if isinstance(raw_shot.get("subject"),str): raw_shot["subject"]= [x.strip() for x in raw_shot["subject"].split(",") if x.strip()]
-                if isinstance(raw_shot.get("risk_reasons"),str): raw_shot["risk_reasons"]= [x.strip() for x in raw_shot["risk_reasons"].replace("，",",").split(",") if x.strip()]
+                for list_key in ("subject", "risk_reasons"):
+                    if isinstance(raw_shot.get(list_key), str):
+                        text = raw_shot[list_key].replace("，", ",").strip()
+                        try:
+                            parsed = ast.literal_eval(text) if text.startswith("[") else None
+                        except (ValueError, SyntaxError):
+                            parsed = None
+                        raw_shot[list_key] = [str(x).strip() for x in (parsed if isinstance(parsed, list) else text.split(",")) if str(x).strip()]
                 if isinstance(raw_shot.get("lighting"),str): raw_shot["lighting"]={"quality":raw_shot["lighting"],"direction":"","tone":"","notes":""}
                 if isinstance(raw_shot.get("blocking"),str): raw_shot["blocking"]={"positions":{},"movement":raw_shot["blocking"],"notes":""}
                 normalized.append(raw_shot)

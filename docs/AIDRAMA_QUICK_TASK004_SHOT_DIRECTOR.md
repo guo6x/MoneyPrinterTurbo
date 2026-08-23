@@ -33,3 +33,14 @@ The closure run records migration 001–004 ordering, schema and idempotency che
 ## Test evidence
 
 Record exact totals and pass/fail counts in the final task handoff. Any failure must distinguish a pre-existing baseline from a Task004 regression; no dependency installation is required or permitted.
+
+### VALIDATION_CLOSURE — 2026-08-23
+
+- Migration 001–004: ordered execution, schema records, idempotent repeated initialization, and preservation of `projects`, `story_bible_revisions`, `structured_script_revisions`, and `shot_plan_revisions` all passed.
+- AIDrama suite: **24 passed, 0 failed, 0 skipped**.
+- Full project regression: **621 passed, 2 failed, 10 skipped**. The two failures are preserved unrelated baselines: the documented Windows path-separator worker-log assertion and the existing material-cache corrupted-cache logger assertion. No Task004 regression was observed (`NEW_REGRESSIONS=0`).
+- Python compilation and `git diff --check`: passed. No dependencies were installed.
+- Startup smoke: AIDrama `streamlit run aidrama_studio/Main.py` and original MPT `streamlit run webui/Main.py` both reached server startup.
+- Browser acceptance used the existing approved-script test project. Dashboard → project → 创意与剧本 → Story Bible → Structured Script → 分镜导演台 was exercised. Manual plan creation, scene/shot navigator, new shot, metadata/action/dialogue edits, reorder, lock control, Draft save, refresh persistence, preview/history, and approval passed. Screenshots were saved under `.tmp/aidrama-task004-browser/` at 1920×1080 and 1366×768; no severe overflow, overlap, hidden navigator, or clipped CTA was observed.
+- Session state remained stable while switching shots, rerunning after save, and navigating Story/Script/Director. The approved Shot Plan revision was then superseded by a new script revision in service validation: the old plan reported `OUTDATED` and approval was blocked while history remained readable.
+- Live provider smoke: `NOT_RUN_WITH_REASON` (no API key configured).

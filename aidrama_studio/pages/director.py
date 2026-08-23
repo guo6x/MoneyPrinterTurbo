@@ -1,4 +1,14 @@
 from __future__ import annotations
+import sys
+import ast
+from pathlib import Path
+
+# Streamlit may execute navigation pages with ``pages/`` as sys.path[0].
+# Keep package imports stable across reruns and page switches.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import streamlit as st
 from aidrama_studio.components.page_header import page_header
 from aidrama_studio.pages._shared import current_project_or_stop
@@ -56,8 +66,15 @@ def _editor(service, project, plan):
                     if field in shot: setattr(existing, field, shot[field])
                 existing.duration_seconds = float(shot.get("duration_seconds", existing.duration_seconds))
                 existing.status = ShotStatus.LOCKED if shot.get("status") == "LOCKED" else ShotStatus.PLANNED
-                if isinstance(shot.get("subject"), str): existing.subject = [x.strip() for x in shot["subject"].split(",") if x.strip()]
-                if isinstance(shot.get("risk_reasons"), str): existing.risk_reasons = [x.strip() for x in shot["risk_reasons"].replace("，", ",").split(",") if x.strip()]
+                for field in ("subject", "risk_reasons"):
+                    if isinstance(shot.get(field), str):
+                        raw = shot[field].replace("，", ",").strip()
+                        try:
+                            parsed = ast.literal_eval(raw) if raw.startswith("[") else None
+                        except (ValueError, SyntaxError):
+                            parsed = None
+                        values = parsed if isinstance(parsed, list) else raw.split(",")
+                        setattr(existing, field, [str(x).strip() for x in values if str(x).strip()])
                 service.save_draft(project.id, canonical, revision_id=pid)
                 st.toast("Shot Plan Draft 已保存")
             except Exception as exc:
