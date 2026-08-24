@@ -106,6 +106,8 @@ class ProductionService:
 
         required_characters: set[str] = set()
         required_locations: set[str] = set()
+        missing_character_references: list[str] = []
+        missing_location_references: list[str] = []
         shot_count = 0
         if plan is not None and plan["status"] is ShotRevisionStatus.APPROVED:
             shot_count = len(plan["content"].shots)
@@ -137,11 +139,13 @@ class ProductionService:
                     if not self.reference_service.is_binding_ready(
                         project_id, ReferenceBindingType.CHARACTER, character_id, story["id"]
                     ):
+                        missing_character_references.append(character_id)
                         blocked.append(f"missing locked character reference: {character_id}")
                 for location_id in sorted(required_locations):
                     if not self.reference_service.is_binding_ready(
                         project_id, ReferenceBindingType.LOCATION, location_id, story["id"]
                     ):
+                        missing_location_references.append(location_id)
                         blocked.append(f"missing locked location reference: {location_id}")
 
         return {
@@ -152,6 +156,15 @@ class ProductionService:
             "required_characters": sorted(required_characters),
             "required_locations": sorted(required_locations),
             "shot_count": shot_count,
+            # These are a projection for clients such as the director console;
+            # the readiness decision above remains the single source of truth.
+            "story_bible_approved": story is not None,
+            "structured_script_approved": script is not None,
+            "shot_plan_approved": plan is not None and plan["status"] is ShotRevisionStatus.APPROVED,
+            "missing_character_references": missing_character_references,
+            "missing_location_references": missing_location_references,
+            "character_reference_coverage": f"{len(required_characters) - len(missing_character_references)}/{len(required_characters)}",
+            "location_reference_coverage": f"{len(required_locations) - len(missing_location_references)}/{len(required_locations)}",
         }
 
     calculate_production_readiness = validate_job_readiness
@@ -304,3 +317,38 @@ class ProductionService:
         shots = self.repository.list_production_shots(job.id)
         attempts = {shot.id: self.repository.list_production_attempts(shot.id) for shot in shots}
         return {"job": job, "shots": shots, "attempts": attempts, "status": job.status}
+
+    def get_shot_board(self, project_id: str, job_id: str) -> list[dict[str, object]]:
+        """Return the director-facing shot board without exposing persistence.
+
+        The page needs a small amount of canonical Shot Plan/Structured Script
+        context (scene title and visual intent), but it must not query SQLite.
+        Keeping this projection here also guarantees that board ordering is
+        always the persisted ``ProductionShot.order_index`` ordering.
+        """
+        job = self._get_job(project_id, job_id)
+        production_shots = sorted(
+            self.repository.list_production_shots(job.id),
+            key=lambda item: (item.order_index, item.id),
+        )
+        plan = self.repository.get_shot_revision(job.shot_plan_revision_id)
+        plan_shots = {item.id: item for item in (plan["content"].shots if plan else [])}
+        script = None
+        if plan is not None:
+            script_revision = self.repository.get_script_revision(plan["source_script_revision_id"])
+            script = script_revision["content"] if script_revision else None
+        scenes = {scene.id: scene for scene in (script.scenes if script else [])}
+        board: list[dict[str, object]] = []
+        for production_shot in production_shots:
+            shot = plan_shots.get(production_shot.shot_id)
+            scene = scenes.get(shot.scene_id) if shot else None
+            board.append(
+                {
+                    "production_shot": production_shot,
+                    "shot": shot,
+                    "scene_id": shot.scene_id if shot else "—",
+                    "scene_name": scene.title if scene else "—",
+                    "description": (shot.visual_intent if shot else "") or (scene.summary if scene else ""),
+                }
+            )
+        return board
