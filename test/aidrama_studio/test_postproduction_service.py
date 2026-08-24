@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from dataclasses import replace
+import shutil
+import subprocess
 
 import pytest
 
@@ -101,3 +103,22 @@ def test_failed_post_render_is_recorded(context):
     with pytest.raises(PostProductionServiceError):
         service.render(project.id, plan.id)
     assert service.list_render_attempts(project.id, plan.id)[0].status.value == "FAILED"
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None and not Path("D:/github/MoneyPrinterTurbo/.venv/Lib/site-packages/imageio_ffmpeg/binaries").exists(), reason="ffmpeg unavailable")
+def test_real_post_render_produces_project_scoped_mp4(context):
+    repository, project, service, assembly = _plan(context)
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        import imageio_ffmpeg
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    source = repository.paths.projects / project.id / "base.mp4"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=black:s=160x120:d=0.4", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source)], check=True, capture_output=True)
+    from aidrama_studio.services import FFmpegPostProductionAdapter
+    service.media_adapter = FFmpegPostProductionAdapter(ffmpeg_binary=ffmpeg)
+    plan = service.create_plan(project.id, assembly.id)
+    attempt = service.render(project.id, plan.id)
+    assert attempt.status.value == "SUCCEEDED"
+    output = service.resolve_output_path(project.id, plan.id, attempt.id)
+    assert output is not None and output.is_file() and output.stat().st_size > 0
+    assert attempt.output_relative_path and not Path(attempt.output_relative_path).is_absolute()
