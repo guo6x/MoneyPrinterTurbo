@@ -243,29 +243,69 @@ class CapabilityRegistry:
     """Project-independent registry of capability boundaries."""
 
     def __init__(self, providers: Sequence[object] | None = None):
-        self._providers: dict[CapabilityKind, object] = {}
+        # Keep every provider registered for a capability.  A single selected
+        # provider is still exposed through ``get`` for backwards
+        # compatibility, but registering a second provider must not silently
+        # erase the first one.
+        self._providers: dict[CapabilityKind, list[object]] = {}
+        self._preferred: dict[CapabilityKind, str] = {}
         for provider in providers or ():
             self.register(provider)
 
-    def register(self, provider: object) -> None:
+    def register(self, provider: object, *, preferred: bool = False) -> None:
         capability = getattr(provider, "capability", None)
         if isinstance(capability, str):
             capability = CapabilityKind(capability)
         if not isinstance(capability, CapabilityKind):
             raise ValueError("provider must declare a CapabilityKind")
-        self._providers[capability] = provider
+        providers = self._providers.setdefault(capability, [])
+        provider_name = str(getattr(provider, "provider_name", provider.__class__.__name__))
+        if not any(item is provider for item in providers):
+            providers.append(provider)
+        if preferred or capability not in self._preferred:
+            self._preferred[capability] = provider_name
+
+    def list(self, capability: CapabilityKind | str) -> tuple[object, ...]:
+        """Return all providers for a capability in registration order."""
+
+        return tuple(self._providers.get(CapabilityKind(capability), ()))
+
+    @staticmethod
+    def _available(provider: object) -> bool:
+        try:
+            return bool(provider.status.available)
+        except (AttributeError, TypeError):
+            return False
 
     def get(self, capability: CapabilityKind | str) -> object | None:
-        return self._providers.get(CapabilityKind(capability))
+        kind = CapabilityKind(capability)
+        providers = self._providers.get(kind, [])
+        if not providers:
+            return None
+        preferred_name = self._preferred.get(kind)
+        preferred = next((item for item in providers if str(getattr(item, "provider_name", item.__class__.__name__)) == preferred_name), None)
+        if preferred is not None and self._available(preferred):
+            return preferred
+        # Prefer a configured provider over an unavailable boundary while
+        # retaining deterministic registration order.
+        return next((item for item in providers if self._available(item)), preferred or providers[0])
 
     def status(self) -> dict[str, CapabilityStatus]:
-        return {key.value: value.status for key, value in self._providers.items()}
+        return {key.value: value.status for key, value in ((kind, self.get(kind)) for kind in self._providers) if value is not None}
 
     def public_status(self) -> dict[str, dict[str, object]]:
         return {key: value.public_dict() for key, value in self.status().items()}
 
+    def all_status(self) -> dict[str, tuple[CapabilityStatus, ...]]:
+        """Expose the complete inventory without exposing credentials."""
 
-def default_capability_registry() -> CapabilityRegistry:
+        return {
+            kind.value: tuple(provider.status for provider in providers)
+            for kind, providers in self._providers.items()
+        }
+
+
+def default_capability_registry(*, env: Mapping[str, str] | None = None) -> CapabilityRegistry:
     """Build the product's explicit capability inventory.
 
     Wan and the existing MPT stock runtime are intentionally separate
@@ -274,7 +314,19 @@ def default_capability_registry() -> CapabilityRegistry:
     """
     from .adapters import MPTProductionAdapter, WanProductionAdapter
 
-    wan = RuntimeVideoProvider(WanProductionAdapter(), provider_name="WAN_VIDEO", mode=CapabilityKind.VIDEO_GENERATIVE)
+    if env is None:
+        wan_adapter = WanProductionAdapter()
+    else:
+        from .adapters.wan_video import WanProviderConfig
+
+        wan_adapter = WanProductionAdapter(
+            config=WanProviderConfig(
+                api_key=str(env.get("DASHSCOPE_API_KEY", "")).strip(),
+                base_url=str(env.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")).strip(),
+                model=str(env.get("WAN_VIDEO_MODEL", "wan2.7-i2v-2026-04-25")).strip(),
+            )
+        )
+    wan = RuntimeVideoProvider(wan_adapter, provider_name="WAN_VIDEO", mode=CapabilityKind.VIDEO_GENERATIVE)
     stock = RuntimeVideoProvider(MPTProductionAdapter(), provider_name="MPT_STOCK", mode=CapabilityKind.VIDEO_STOCK)
     return CapabilityRegistry([MPTLLMProvider(), wan, stock, UnavailableImageProvider(), UnavailableVisionProvider()])
 

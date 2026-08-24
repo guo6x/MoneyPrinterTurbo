@@ -122,3 +122,47 @@ def test_real_post_render_produces_project_scoped_mp4(context):
     output = service.resolve_output_path(project.id, plan.id, attempt.id)
     assert output is not None and output.is_file() and output.stat().st_size > 0
     assert attempt.output_relative_path and not Path(attempt.output_relative_path).is_absolute()
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None and not Path("D:/github/MoneyPrinterTurbo/.venv/Lib/site-packages/imageio_ffmpeg/binaries").exists(), reason="ffmpeg unavailable")
+def test_real_post_subtitle_and_bgm_smoke_is_pinned_and_probe_valid(context):
+    """Exercise the real subtitle+BGM FFmpeg path, not a fake media adapter."""
+    repository, project = context
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        import imageio_ffmpeg
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    job, shots = _shots(repository, project, 1)
+    _execution, artifact, _qc, _review = _source(repository, project, job, shots[0], suffix="post-smoke")
+    source = repository.paths.projects / project.id / artifact.path
+    source.parent.mkdir(parents=True, exist_ok=True)
+    generated = subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=1.2", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source)],
+        capture_output=True, text=True, check=False,
+    )
+    assert generated.returncode == 0, generated.stderr[-1000:]
+    from aidrama_studio.services import FinalAssemblyRuntimeService, FinalAssemblyService, PostProductionService
+    from aidrama_studio.services.adapters import MPTFinalAssemblyAdapter
+
+    assembly = FinalAssemblyService(repository).create_assembly(project.id, job.id, freeze=True)
+    runtime = FinalAssemblyRuntimeService(repository, adapter=MPTFinalAssemblyAdapter(project_root=repository.paths.projects / project.id, ffmpeg_binary=ffmpeg))
+    final_attempt = runtime.render(project.id, assembly.id)
+    service = PostProductionService(repository, final_assembly_service=runtime)
+    plan = service.create_plan(project.id, assembly.id)
+    assert plan.source_final_assembly_render_attempt_id == final_attempt.id
+    track = service.build_subtitle_timeline(project.id, "script_001", plan_id=plan.id)
+    bgm_source = repository.paths.projects / project.id / "source-bgm.wav"
+    bgm = subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1.5", "-c:a", "pcm_s16le", str(bgm_source)],
+        capture_output=True, text=True, check=False,
+    )
+    assert bgm.returncode == 0, bgm.stderr[-1000:]
+    music = service.import_bgm(project.id, plan.id, bgm_source)
+    attempt = service.render(project.id, plan.id, subtitle_track_id=track.id, music_track_id=music.id)
+    assert attempt.status.value == "SUCCEEDED"
+    assert attempt.output_relative_path and not Path(attempt.output_relative_path).is_absolute()
+    assert attempt.metadata_json["source_final_assembly_render_attempt_id"] == final_attempt.id
+    assert attempt.metadata_json["sha256"] and len(attempt.metadata_json["sha256"]) == 64
+    assert attempt.metadata_json["probe"]["video_stream"] is True
+    assert attempt.metadata_json["probe"]["audio_stream"] is True
+    assert (repository.paths.projects / project.id / attempt.output_relative_path).is_file()

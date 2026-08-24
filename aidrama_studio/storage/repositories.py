@@ -1103,6 +1103,59 @@ class ProjectRepository:
             rows = connection.execute(query, tuple(args)).fetchall()
         return [self._director_decision_from_row(row) for row in rows]
 
+    def create_producer_recommendation_event(
+        self,
+        *,
+        event_id: str,
+        project_id: str,
+        production_job_id: str | None,
+        action: str,
+        target_id: str | None,
+        metadata: dict[str, object] | None,
+        created_at: str,
+    ) -> dict[str, object]:
+        """Append one durable Producer recommendation observation."""
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, project_id):
+                raise KeyError(f"项目不存在: {project_id}")
+            if production_job_id is not None:
+                job = connection.execute("SELECT project_id FROM production_jobs WHERE id=?", (production_job_id,)).fetchone()
+                if job is None or job["project_id"] != project_id:
+                    raise ValueError("ProductionJob 不属于该项目")
+            connection.execute(
+                "INSERT INTO producer_recommendation_events(id,project_id,production_job_id,action,target_id,metadata_json,created_at) VALUES (?,?,?,?,?,?,?)",
+                (event_id, project_id, production_job_id, action, target_id, json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True), created_at),
+            )
+        return self.get_producer_recommendation_event(event_id)
+
+    def get_producer_recommendation_event(self, event_id: str) -> dict[str, object] | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM producer_recommendation_events WHERE id=?", (event_id,)).fetchone()
+        if row is None:
+            return None
+        return {"id": row["id"], "project_id": row["project_id"], "production_job_id": row["production_job_id"], "action": row["action"], "target_id": row["target_id"], "metadata": json.loads(row["metadata_json"]), "created_at": row["created_at"]}
+
+    def list_producer_recommendation_events(
+        self,
+        project_id: str,
+        *,
+        production_job_id: str | None = None,
+        action: str | None = None,
+        target_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        query = "SELECT * FROM producer_recommendation_events WHERE project_id=?"
+        params: list[object] = [project_id]
+        if production_job_id is not None:
+            query += " AND production_job_id=?"; params.append(production_job_id)
+        if action is not None:
+            query += " AND action=?"; params.append(action)
+        if target_id is not None:
+            query += " AND target_id=?"; params.append(target_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [{"id": row["id"], "project_id": row["project_id"], "production_job_id": row["production_job_id"], "action": row["action"], "target_id": row["target_id"], "metadata": json.loads(row["metadata_json"]), "created_at": row["created_at"]} for row in rows]
+
     @staticmethod
     def _final_assembly_from_row(row) -> FinalAssembly:
         return FinalAssembly(
@@ -1570,19 +1623,6 @@ class ProjectRepository:
         with connect(self.paths.database) as connection:
             rows = connection.execute(query, tuple(params)).fetchall()
         return [self._post_subtitle_from_row(row) for row in rows]
-
-    def update_post_subtitle_track(self, track: SubtitleTrack) -> SubtitleTrack:
-        current = self.get_post_subtitle_track(track.id)
-        if current is None:
-            raise KeyError("SubtitleTrack 不存在")
-        if current.project_id != track.project_id:
-            raise ValueError("SubtitleTrack 不属于该项目")
-        with connect(self.paths.database) as connection:
-            connection.execute(
-                "UPDATE post_subtitle_tracks SET enabled=?,cues_json=?,updated_at=? WHERE id=?",
-                (int(track.enabled), json.dumps([cue.model_dump(mode="json") for cue in track.cues], ensure_ascii=False, sort_keys=True), track.updated_at, track.id),
-            )
-        return self.get_post_subtitle_track(track.id)
 
     def update_post_subtitle_track(self, track: SubtitleTrack) -> SubtitleTrack:
         """Update the editable subtitle projection without changing its source script."""

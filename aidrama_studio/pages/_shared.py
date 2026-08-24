@@ -24,6 +24,10 @@ def current_project_or_stop():
 
             request_navigation("dashboard")
         st.stop()
+    # Keep deep links/reloads project-scoped even when Streamlit's navigation
+    # component rewrites the path without carrying query parameters.
+    if st.query_params.get("project") != project_id:
+        st.query_params["project"] = project_id
     try:
         project = get_project_service().get(project_id)
     except Exception:

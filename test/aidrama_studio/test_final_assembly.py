@@ -184,6 +184,36 @@ def test_multiple_attempts_choose_latest_qualified_and_accepted_review_overrides
     assert latest[0].id != accepted_old[0].id
 
 
+def test_latest_review_decision_wins_over_historical_rejection(context):
+    repository, project = context
+    job, shots = _shots(repository, project, 1)
+    execution, artifact, result, rejected = _source(
+        repository, project, job, shots[0], suffix="review", review=ProductionReviewDecision.REJECTED,
+    )
+    assert rejected is not None
+    approved = repository.create_production_review(
+        ProductionReview(
+            id=uuid4().hex,
+            project_id=project.id,
+            qc_result_id=result.id,
+            decision=ProductionReviewDecision.APPROVED,
+            reviewer="qa-second-pass",
+            created_at="2099-01-01T00:00:00+00:00",
+        )
+    )
+    selected = FinalAssemblyService(repository).select_qualified_source(project.id, job.id, shots[0].id)
+    assert selected.review_id == approved.id
+
+
+def test_obsolete_qc_failure_does_not_block_newer_pass(context):
+    repository, project = context
+    job, shots = _shots(repository, project, 1)
+    _source(repository, project, job, shots[0], suffix="failed", qc_status=ProductionQCStatus.QC_FAILED, created_at="2025-01-01T00:00:01+00:00")
+    newer = _source(repository, project, job, shots[0], suffix="pass", qc_status=ProductionQCStatus.QC_PASS, created_at="2025-01-01T00:00:02+00:00")
+    selected = FinalAssemblyService(repository).select_qualified_source(project.id, job.id, shots[0].id)
+    assert selected.production_execution_id == newer[0].id
+
+
 def test_ready_manifest_is_immutable_and_new_retry_requires_new_assembly(context):
     repository, project = context
     job, shots = _shots(repository, project, 1)

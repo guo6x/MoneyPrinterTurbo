@@ -241,19 +241,20 @@ class FinalAssemblyService:
                 if qc_result.status is not ProductionQCStatus.QC_PASS:
                     last_reason = f"QC result 不是 QC_PASS（当前 {qc_result.status.value}）"
                     continue
-                reviews = self.repository.list_production_reviews(project_id, qc_result.id)
-                rejected = next(
-                    (review for review in reviews if self._review_decision(review) == "REJECTED"),
-                    None,
+                reviews = sorted(
+                    self.repository.list_production_reviews(project_id, qc_result.id),
+                    key=lambda review: (review.created_at, review.id),
                 )
-                if rejected is not None:
+                # Reviews are append-only.  The latest decision for this QC
+                # result is authoritative; an old rejection remains readable
+                # history but must not block a later explicit approval.
+                latest_review = reviews[-1] if reviews else None
+                latest_decision = self._review_decision(latest_review) if latest_review else ""
+                if latest_decision == "REJECTED":
                     last_reason = "human review rejected source"
                     continue
-                accepted = [
-                    review for review in reviews if self._review_decision(review) in {"APPROVED", "ACCEPTED"}
-                ]
-                accepted_review = accepted[-1] if accepted else None
-                selected_review = accepted_review or (reviews[-1] if reviews else None)
+                accepted_review = latest_review if latest_decision in {"APPROVED", "ACCEPTED"} else None
+                selected_review = latest_review
                 source = FinalAssemblySource(
                     production_shot_id=shot.id,
                     production_execution_id=execution.id,

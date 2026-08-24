@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Mapping
 
+from .ai_capabilities import CapabilityKind, CapabilityRegistry, default_capability_registry
+
 
 class ReadinessState(StrEnum):
     READY = "READY"
@@ -50,11 +52,37 @@ def _has_value(values: Mapping[str, object], key: str) -> bool:
 class ProviderReadinessService:
     """Report product capability readiness without exposing credentials."""
 
-    def __init__(self, *, env: Mapping[str, str] | None = None, llm_status=None):
+    def __init__(
+        self,
+        *,
+        env: Mapping[str, str] | None = None,
+        llm_status=None,
+        registry: CapabilityRegistry | None = None,
+    ):
         self._env = env if env is not None else os.environ
         # Injection keeps this service free of import-time config side effects in
         # tests while production uses the existing AIDrama LLM seam.
         self._llm_status = llm_status
+        self._registry = registry
+
+    def _capability_registry(self) -> CapabilityRegistry:
+        # A caller may inject a registry for deterministic tests.  Otherwise
+        # construct the same capability inventory used by Settings and the
+        # runtime boundary.  Construction performs no network calls.
+        return self._registry or default_capability_registry(env=self._env)
+
+    def _from_registry(self, capability: CapabilityKind) -> CapabilityReadiness:
+        provider = self._capability_registry().get(capability)
+        if provider is None:
+            return CapabilityReadiness(capability.value, "未配置", ReadinessState.UNAVAILABLE, "capability boundary unavailable")
+        status = provider.status
+        state = ReadinessState.READY if status.available else ReadinessState.UNAVAILABLE
+        return CapabilityReadiness(
+            capability.value,
+            str(status.provider),
+            state,
+            str(status.reason or ("ready" if status.available else "unavailable")),
+        )
 
     def _llm(self) -> CapabilityReadiness:
         if self._llm_status is not None:
@@ -65,32 +93,19 @@ class ProviderReadinessService:
                 )
             except Exception:
                 return CapabilityReadiness("LLM", "Configured provider", ReadinessState.ERROR, "LLM 配置检查失败")
-        try:
-            from aidrama_studio.services.ai import llm_configuration_status
-
-            ready, detail = llm_configuration_status()
-            return CapabilityReadiness(
-                "LLM", "Configured provider", ReadinessState.READY if ready else ReadinessState.UNAVAILABLE, detail
-            )
-        except Exception:
-            return CapabilityReadiness("LLM", "Configured provider", ReadinessState.ERROR, "LLM 配置检查失败")
+        return self._from_registry(CapabilityKind.LLM)
 
     def _video(self) -> CapabilityReadiness:
-        if _has_value(self._env, "DASHSCOPE_API_KEY"):
-            model = self._env.get("WAN_VIDEO_MODEL", "wan2.7-i2v-2026-04-25").strip()
-            return CapabilityReadiness("VIDEO_GENERATIVE", "Wan / DashScope", ReadinessState.READY, f"Wan {model} 凭据已配置")
-        return CapabilityReadiness("VIDEO_GENERATIVE", "Wan / DashScope", ReadinessState.UNAVAILABLE, "Wan 尚未配置凭据")
+        return self._from_registry(CapabilityKind.VIDEO_GENERATIVE)
 
     def _stock_video(self) -> CapabilityReadiness:
-        return CapabilityReadiness("VIDEO_STOCK", "本地素材运行时", ReadinessState.READY, "已有素材运行时可用")
+        return self._from_registry(CapabilityKind.VIDEO_STOCK)
 
     def _image(self) -> CapabilityReadiness:
-        # No image adapter is implemented in this closure.  An unset/future
-        # provider must remain visibly unavailable rather than appearing ready.
-        return CapabilityReadiness("IMAGE", "未配置", ReadinessState.UNAVAILABLE, "图像生成 Provider 尚未配置")
+        return self._from_registry(CapabilityKind.IMAGE)
 
     def _vision(self) -> CapabilityReadiness:
-        return CapabilityReadiness("VISION", "未配置", ReadinessState.UNAVAILABLE, "视觉分析 Provider 尚未配置")
+        return self._from_registry(CapabilityKind.VISION)
 
     def _tts(self) -> CapabilityReadiness:
         if importlib.util.find_spec("edge_tts") is not None:

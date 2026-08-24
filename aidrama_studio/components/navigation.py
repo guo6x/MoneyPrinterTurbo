@@ -50,11 +50,23 @@ def build_navigation():
     )
     requested = st.session_state.pop("_aidrama_next_page", None)
     if requested in pages:
-        st.switch_page(pages[requested])
+        project_id = st.session_state.get("current_project_id")
+        if project_id:
+            # Keep the selected project in the URL while switching pages so a
+            # browser refresh/cold Streamlit session reconstructs the same
+            # project instead of silently returning to NO PROJECT.
+            st.query_params["project"] = project_id
+        st.switch_page(
+            pages[requested],
+            query_params={"project": project_id} if project_id else None,
+        )
     return navigation
 
 
 def request_navigation(page_key: str) -> None:
+    project_id = st.session_state.get("current_project_id")
+    if project_id:
+        st.query_params["project"] = project_id
     st.session_state["_aidrama_next_page"] = page_key
     st.rerun()
 

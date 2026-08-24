@@ -789,6 +789,26 @@ def _migration_017_post_source_render_attempt(connection: sqlite3.Connection) ->
     connection.execute("CREATE INDEX IF NOT EXISTS idx_post_plans_source_attempt ON post_production_plans(source_final_assembly_render_attempt_id)")
 
 
+def _migration_018_producer_recommendation_events(connection: sqlite3.Connection) -> None:
+    """Persist Producer retry recommendations so read projections are bounded."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS producer_recommendation_events (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            production_job_id TEXT,
+            action TEXT NOT NULL,
+            target_id TEXT,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(production_job_id) REFERENCES production_jobs(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_producer_recommendation_events_scope ON producer_recommendation_events(project_id, production_job_id, action, created_at, id)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -807,6 +827,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (15, _migration_015_reference_asset_repair_completion),
     (16, _migration_016_director_decision_events),
     (17, _migration_017_post_source_render_attempt),
+    (18, _migration_018_producer_recommendation_events),
 )
 
 

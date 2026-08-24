@@ -10,8 +10,15 @@ from aidrama_studio.services import ProjectService
 
 
 def _navigate(page: str) -> None:
+    # ``st.switch_page`` otherwise clears non-embed query parameters. Carry
+    # the selected project explicitly so a subsequent refresh reconstructs the
+    # same project instead of opening a new NO PROJECT session.
+    pages = st.session_state.get("_aidrama_pages", {})
+    project_id = st.session_state.get("current_project_id")
+    target = pages.get(page)
+    if target is not None:
+        st.switch_page(target, query_params={"project": project_id} if project_id else None)
     from aidrama_studio.components.navigation import request_navigation
-
     request_navigation(page)
 
 

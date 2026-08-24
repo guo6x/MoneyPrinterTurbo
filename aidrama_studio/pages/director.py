@@ -126,7 +126,7 @@ def _render_director_console(project) -> None:
     producer = ProducerService()
     try:
         state = director.inspect_project(project.id)
-    except (DirectorServiceError, ProducerServiceError, Exception) as exc:
+    except (DirectorServiceError, ProducerServiceError) as exc:
         st.warning("暂时无法读取导演状态，请检查项目数据后重试。")
         st.caption(str(exc)[:180])
         return
@@ -154,6 +154,12 @@ def _render_director_console(project) -> None:
     action = getattr(recommendation, "action", None) or "REVIEW_PROJECT_STATE"
     reason = getattr(recommendation, "reason", None) or "先运行一次有界的导演检查，获得结构化下一步建议。"
     target_id = getattr(recommendation, "target_id", None)
+    pending_decision = None
+    approved_decision = None
+    if session is not None:
+        session_decisions = director.list_decisions(project.id, session.id)
+        pending_decision = next((item for item in reversed(session_decisions) if item.status.value == "RECOMMENDED"), None)
+        approved_decision = next((item for item in reversed(session_decisions) if item.status.value == "APPROVED"), None)
 
     metric_cols = st.columns(4)
     metric_cols[0].metric("当前阶段", state_label)
@@ -180,6 +186,47 @@ def _render_director_console(project) -> None:
             except Exception as exc:
                 st.warning("导演检查未完成，请先处理当前阻塞项。")
                 st.caption(str(exc)[:180])
+        if pending_decision is not None:
+            st.caption("该建议需要人工确认；批准只记录审核，不会自动批准 Story、Script、资产或调用 Provider。")
+            approve_col, reject_col = st.columns(2)
+            if approve_col.button("确认已处理 / 批准建议", key=f"director-approve-{pending_decision.id}"):
+                try:
+                    director.approve_decision(project.id, pending_decision.id)
+                    st.success("建议已记录为批准，Director 现可继续分析。")
+                    st.rerun()
+                except DirectorServiceError as exc:
+                    st.error(str(exc))
+            if reject_col.button("拒绝建议", key=f"director-reject-{pending_decision.id}"):
+                try:
+                    director.reject_decision(project.id, pending_decision.id)
+                    st.info("建议已拒绝；未执行任何自动动作。")
+                    st.rerun()
+                except DirectorServiceError as exc:
+                    st.error(str(exc))
+        elif approved_decision is not None:
+            complete_col, continue_col = st.columns(2)
+            if complete_col.button("标记已处理 / 完成建议", key=f"director-complete-{approved_decision.id}"):
+                try:
+                    director.complete_decision(project.id, approved_decision.id)
+                    st.success("建议生命周期已完成。")
+                    st.rerun()
+                except DirectorServiceError as exc:
+                    st.error(str(exc))
+            if continue_col.button("继续分析", key=f"director-resume-approved-{project.id}"):
+                try:
+                    director.resume(project.id, session.id)
+                    st.success("Director 已继续并保存新的建议。")
+                    st.rerun()
+                except DirectorServiceError as exc:
+                    st.error(str(exc))
+        elif session is not None and session.status.value == "ACTIVE":
+            if st.button("继续分析", key=f"director-resume-{project.id}"):
+                try:
+                    director.resume(project.id, session.id)
+                    st.success("Director 已继续并保存新的建议。")
+                    st.rerun()
+                except DirectorServiceError as exc:
+                    st.error(str(exc))
 
     blockers = readiness.get("blocked_reasons", []) or []
     with st.container(border=True):

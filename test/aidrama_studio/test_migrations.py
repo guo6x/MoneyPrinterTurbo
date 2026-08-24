@@ -49,6 +49,7 @@ def test_all_aidrama_migrations_apply_in_order_and_create_revision_tables() -> N
         "director_goals",
         "director_decisions",
         "director_decision_events",
+        "producer_recommendation_events",
     } <= tables
 
 
@@ -84,6 +85,7 @@ def test_migrations_are_idempotent_and_do_not_duplicate_schema_records() -> None
         "director_goals",
         "director_decisions",
         "director_decision_events",
+        "producer_recommendation_events",
     ):
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)

@@ -108,7 +108,15 @@ class FFmpegPostProductionAdapter(PostProductionMediaAdapter):
                 gain = request.audio_mix.music_gain * (request.music_track.gain if request.music_track else 1.0)
                 labels.append(f"[{next_index}:a:0]volume={gain}[music]")
                 audio_inputs.append("[music]")
-            labels.append("".join(audio_inputs) + f"amix=inputs={len(audio_inputs)}:duration=first:dropout_transition=2[mix]")
+            raw_mix = "".join(audio_inputs) + f"amix=inputs={len(audio_inputs)}:duration=first:dropout_transition=2[mix_raw]"
+            labels.append(raw_mix)
+            if request.audio_mix.normalize:
+                # ``normalize`` is a real FFmpeg operation, not a persisted
+                # no-op.  Keep it after amix so all source/voice/music inputs
+                # receive the same loudness treatment.
+                labels.append("[mix_raw]loudnorm=I=-16:TP=-1.5:LRA=11[mix]")
+            else:
+                labels.append("[mix_raw]anull[mix]")
             filters.extend(labels)
             audio_map = "[mix]"
         if filters:
@@ -420,6 +428,8 @@ class PostProductionService:
     def resolve_output_path(self, project_id: str, plan_id: str, attempt_id: str | None = None) -> Path | None:
         attempts = self.list_render_attempts(project_id, plan_id)
         attempt = self.repository.get_post_render_attempt(attempt_id) if attempt_id else next((item for item in reversed(attempts) if item.status is PostRenderAttemptStatus.SUCCEEDED), None)
+        if attempt is not None and (attempt.project_id != project_id or attempt.plan_id != plan_id):
+            raise PostProductionServiceError("PostRenderAttempt 不属于该项目或计划")
         if attempt is None or attempt.status is not PostRenderAttemptStatus.SUCCEEDED or not attempt.output_relative_path:
             return None
         return self._resolve_project_relative(project_id, attempt.output_relative_path, suffix=".mp4", must_exist=True)
