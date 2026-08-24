@@ -15,6 +15,7 @@ from aidrama_studio.domain import (
 from aidrama_studio.domain.script import ScriptRevisionStatus
 from aidrama_studio.domain.shot import ShotPlan, ShotRevisionStatus
 from aidrama_studio.domain.reference_asset import ReferenceAsset, ReferenceAssetBinding, ReferenceAssetType, ReferenceAssetVersion, ReferenceBindingType
+from aidrama_studio.domain.production import ProductionAttempt, ProductionAttemptStatus, ProductionJob, ProductionJobStatus, ProductionShot, ProductionShotStatus
 
 from .database import DatabasePaths, connect, initialize_database
 
@@ -516,3 +517,134 @@ class ProjectRepository:
         query += " ORDER BY created_at,id"
         with connect(self.paths.database) as connection: rows = connection.execute(query, args).fetchall()
         return [self._reference_binding_from_row(row) for row in rows]
+
+    @staticmethod
+    def _production_job_from_row(row) -> ProductionJob:
+        return ProductionJob(
+            id=row["id"], project_id=row["project_id"], shot_plan_revision_id=row["shot_plan_revision_id"],
+            status=row["status"], created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _production_shot_from_row(row) -> ProductionShot:
+        return ProductionShot(
+            id=row["id"], production_job_id=row["production_job_id"], shot_id=row["shot_id"],
+            order_index=row["order_index"], status=row["status"], created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _production_attempt_from_row(row) -> ProductionAttempt:
+        return ProductionAttempt(
+            id=row["id"], production_shot_id=row["production_shot_id"], attempt_number=row["attempt_number"],
+            status=row["status"], runtime_adapter=row["runtime_adapter"], runtime_reference=row["runtime_reference"],
+            input_snapshot_json=json.loads(row["input_snapshot_json"]),
+            output_artifact_json=json.loads(row["output_artifact_json"]) if row["output_artifact_json"] else None,
+            error_message=row["error_message"], created_at=row["created_at"],
+        )
+
+    def create_production_job(self, job: ProductionJob) -> ProductionJob:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, job.project_id):
+                raise KeyError(f"项目不存在: {job.project_id}")
+            plan = connection.execute("SELECT project_id FROM shot_plan_revisions WHERE id=?", (job.shot_plan_revision_id,)).fetchone()
+            if plan is None:
+                raise KeyError(f"Shot Plan revision 不存在: {job.shot_plan_revision_id}")
+            if plan["project_id"] != job.project_id:
+                raise ValueError("Shot Plan revision 不属于该项目")
+            connection.execute(
+                "INSERT INTO production_jobs(id,project_id,shot_plan_revision_id,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                (job.id, job.project_id, job.shot_plan_revision_id, job.status.value, job.created_at, job.updated_at),
+            )
+        return self.get_production_job(job.id)
+
+    def get_production_job(self, job_id: str) -> ProductionJob | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM production_jobs WHERE id=?", (job_id,)).fetchone()
+        return self._production_job_from_row(row) if row else None
+
+    def list_production_jobs(self, project_id: str) -> list[ProductionJob]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM production_jobs WHERE project_id=? ORDER BY created_at DESC,id", (project_id,)).fetchall()
+        return [self._production_job_from_row(row) for row in rows]
+
+    def update_production_job_status(self, job_id: str, status: ProductionJobStatus, *, updated_at: str) -> ProductionJob:
+        with connect(self.paths.database) as connection:
+            cursor = connection.execute("UPDATE production_jobs SET status=?,updated_at=? WHERE id=?", (status.value, updated_at, job_id))
+            if cursor.rowcount != 1:
+                raise KeyError(f"ProductionJob 不存在: {job_id}")
+        return self.get_production_job(job_id)
+
+    def create_production_shot(self, shot: ProductionShot) -> ProductionShot:
+        with connect(self.paths.database) as connection:
+            if connection.execute("SELECT 1 FROM production_jobs WHERE id=?", (shot.production_job_id,)).fetchone() is None:
+                raise KeyError(f"ProductionJob 不存在: {shot.production_job_id}")
+            connection.execute(
+                "INSERT INTO production_shots(id,production_job_id,shot_id,order_index,status,created_at) VALUES (?,?,?,?,?,?)",
+                (shot.id, shot.production_job_id, shot.shot_id, shot.order_index, shot.status.value, shot.created_at),
+            )
+        return self.get_production_shot(shot.id)
+
+    def get_production_shot(self, shot_id: str) -> ProductionShot | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM production_shots WHERE id=?", (shot_id,)).fetchone()
+        return self._production_shot_from_row(row) if row else None
+
+    def list_production_shots(self, job_id: str) -> list[ProductionShot]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM production_shots WHERE production_job_id=? ORDER BY order_index,id", (job_id,)).fetchall()
+        return [self._production_shot_from_row(row) for row in rows]
+
+    def update_production_shot_status(self, shot_id: str, status: ProductionShotStatus) -> ProductionShot:
+        with connect(self.paths.database) as connection:
+            cursor = connection.execute("UPDATE production_shots SET status=? WHERE id=?", (status.value, shot_id))
+            if cursor.rowcount != 1:
+                raise KeyError(f"ProductionShot 不存在: {shot_id}")
+        return self.get_production_shot(shot_id)
+
+    def create_production_attempt(self, attempt: ProductionAttempt) -> ProductionAttempt:
+        with connect(self.paths.database) as connection:
+            if connection.execute("SELECT 1 FROM production_shots WHERE id=?", (attempt.production_shot_id,)).fetchone() is None:
+                raise KeyError(f"ProductionShot 不存在: {attempt.production_shot_id}")
+            connection.execute(
+                "INSERT INTO production_attempts(id,production_shot_id,attempt_number,status,runtime_adapter,runtime_reference,input_snapshot_json,output_artifact_json,error_message,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    attempt.id, attempt.production_shot_id, attempt.attempt_number, attempt.status.value,
+                    attempt.runtime_adapter, attempt.runtime_reference,
+                    json.dumps(attempt.input_snapshot_json, ensure_ascii=False, sort_keys=True),
+                    json.dumps(attempt.output_artifact_json, ensure_ascii=False, sort_keys=True) if attempt.output_artifact_json is not None else None,
+                    attempt.error_message, attempt.created_at,
+                ),
+            )
+        return self.get_production_attempt(attempt.id)
+
+    def get_production_attempt(self, attempt_id: str) -> ProductionAttempt | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM production_attempts WHERE id=?", (attempt_id,)).fetchone()
+        return self._production_attempt_from_row(row) if row else None
+
+    def list_production_attempts(self, production_shot_id: str) -> list[ProductionAttempt]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM production_attempts WHERE production_shot_id=? ORDER BY attempt_number", (production_shot_id,)).fetchall()
+        return [self._production_attempt_from_row(row) for row in rows]
+
+    def update_production_attempt(
+        self,
+        attempt_id: str,
+        *,
+        status: ProductionAttemptStatus,
+        runtime_reference: str | None = None,
+        output_artifact_json: dict[str, object] | None = None,
+        error_message: str | None = None,
+    ) -> ProductionAttempt:
+        with connect(self.paths.database) as connection:
+            cursor = connection.execute(
+                "UPDATE production_attempts SET status=?,runtime_reference=?,output_artifact_json=?,error_message=? WHERE id=?",
+                (
+                    status.value, runtime_reference,
+                    json.dumps(output_artifact_json, ensure_ascii=False, sort_keys=True) if output_artifact_json is not None else None,
+                    error_message, attempt_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"ProductionAttempt 不存在: {attempt_id}")
+        return self.get_production_attempt(attempt_id)

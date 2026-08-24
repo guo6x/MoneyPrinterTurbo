@@ -231,6 +231,38 @@ class ReferenceAssetService:
     readiness = calculate_readiness
     get_readiness = calculate_readiness
 
+    def is_binding_ready(
+        self,
+        project_id: str,
+        binding_type: ReferenceBindingType,
+        binding_id: str,
+        story_revision_id: str | None = None,
+    ) -> bool:
+        """Return whether a target has a locked, current, on-disk reference."""
+        self._require_project(project_id)
+        story_revision = story_revision_id and self._story_revision(project_id, story_revision_id)
+        if story_revision is None:
+            story_revision = self.approved_story_revision(project_id)
+        if story_revision is None:
+            return False
+        for binding in self.repository.list_reference_bindings(project_id):
+            if binding.binding_type is not binding_type or binding.binding_id != binding_id:
+                continue
+            version = self.repository.get_reference_asset_version(binding.asset_version_id)
+            if version is None or not self._binding_is_valid(binding, version):
+                continue
+            asset = self.repository.get_reference_asset(version.asset_id)
+            if (
+                asset is not None
+                and asset.current_version_id == version.id
+                and version.metadata.get("source_story_revision_id") == story_revision["id"]
+                and self._version_file_exists(project_id, version.id)
+            ):
+                return True
+        return False
+
+    reference_ready = is_binding_ready
+
     def create_draft_from_version(
         self,
         project_id: str,

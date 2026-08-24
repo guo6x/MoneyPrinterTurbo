@@ -6,6 +6,7 @@ from .script import ScriptService, ScriptServiceError
 from .shot import ShotService, ShotServiceError
 from .reference_assets import ReferenceAssetService, ReferenceAssetServiceError
 from .reference_asset_storage import ReferenceAssetStorageService, ReferenceAssetStorageError
+from .production import ProductionService, ProductionServiceError
 
 __all__ = [
     "DeleteProjectResult",
@@ -18,4 +19,5 @@ __all__ = [
     "ShotService", "ShotServiceError",
     "ReferenceAssetService", "ReferenceAssetServiceError",
     "ReferenceAssetStorageService", "ReferenceAssetStorageError",
+    "ProductionService", "ProductionServiceError",
 ]

@@ -6,6 +6,7 @@ from .story import Character, Location, StoryBeat, StoryBible, StoryRevisionStat
 from .script import InteriorExterior, Scene, ScriptBeat, ScriptBeatType, ScriptRevisionStatus, StructuredScript, TimeOfDay
 from .shot import Blocking, CameraAngle, CameraMovement, Lens, Lighting, RiskLevel, Shot, ShotPlan, ShotSize, ShotStatus, ShotRevisionStatus, Eyeline
 from .reference_asset import ReferenceAsset, ReferenceAssetType, ReferenceAssetVersion, ReferenceAssetBinding, ReferenceBindingType
+from .production import ProductionAttempt, ProductionAttemptStatus, ProductionJob, ProductionJobStatus, ProductionShot, ProductionShotStatus
 
 __all__ = [
     "AspectRatio",
@@ -20,4 +21,5 @@ __all__ = [
     "InteriorExterior", "TimeOfDay", "ScriptBeatType", "ScriptRevisionStatus", "ScriptBeat", "Scene", "StructuredScript",
     "ShotPlan", "Shot", "ShotSize", "CameraAngle", "CameraMovement", "Lens", "Eyeline", "Lighting", "Blocking", "RiskLevel", "ShotStatus", "ShotRevisionStatus",
     "ReferenceAsset", "ReferenceAssetType", "ReferenceAssetVersion", "ReferenceAssetBinding", "ReferenceBindingType",
+    "ProductionJob", "ProductionJobStatus", "ProductionShot", "ProductionShotStatus", "ProductionAttempt", "ProductionAttemptStatus",
 ]

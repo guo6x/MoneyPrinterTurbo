@@ -143,12 +143,67 @@ def _migration_005_reference_assets(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX idx_reference_bindings_target ON reference_asset_bindings(project_id, binding_type, binding_id)")
 
 
+def _migration_006_production_domain(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE production_jobs (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            shot_plan_revision_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('DRAFT', 'READY', 'QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(shot_plan_revision_id) REFERENCES shot_plan_revisions(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE production_shots (
+            id TEXT PRIMARY KEY,
+            production_job_id TEXT NOT NULL,
+            shot_id TEXT NOT NULL,
+            order_index INTEGER NOT NULL CHECK (order_index >= 0),
+            status TEXT NOT NULL CHECK (status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED')),
+            created_at TEXT NOT NULL,
+            UNIQUE(production_job_id, shot_id),
+            UNIQUE(production_job_id, order_index),
+            FOREIGN KEY(production_job_id) REFERENCES production_jobs(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE production_attempts (
+            id TEXT PRIMARY KEY,
+            production_shot_id TEXT NOT NULL,
+            attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+            status TEXT NOT NULL CHECK (status IN ('STARTED', 'FAILED', 'SUCCEEDED', 'CANCELLED')),
+            runtime_adapter TEXT NOT NULL,
+            runtime_reference TEXT,
+            input_snapshot_json TEXT NOT NULL,
+            output_artifact_json TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(production_shot_id, attempt_number),
+            FOREIGN KEY(production_shot_id) REFERENCES production_shots(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute("CREATE INDEX idx_production_jobs_project ON production_jobs(project_id, created_at DESC)")
+    connection.execute("CREATE INDEX idx_production_jobs_status ON production_jobs(project_id, status)")
+    connection.execute("CREATE INDEX idx_production_shots_job ON production_shots(production_job_id, order_index)")
+    connection.execute("CREATE INDEX idx_production_attempts_shot ON production_attempts(production_shot_id, attempt_number)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
     (3, _migration_003_structured_script_revisions),
     (4, _migration_004_shot_plan_revisions),
     (5, _migration_005_reference_assets),
+    (6, _migration_006_production_domain),
 )
 
 
