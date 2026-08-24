@@ -12,7 +12,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from desktop.launcher import DEFAULT_MAIN, PROJECT_ROOT
+# When invoked as ``python desktop/build.py`` Python puts only the desktop
+# directory on sys.path.  Add the repository root before importing the package
+# so the documented direct command works as well as ``python -m desktop.build``.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from desktop.launcher import DEFAULT_MAIN
 
 
 def build_command(*, output_dir: Path | None = None) -> list[str]:
