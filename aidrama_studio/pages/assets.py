@@ -40,15 +40,9 @@ def _asset_status(service, project, binding_type, subject_id, story_revision_id)
 
 
 def _readiness(service, project, subjects, binding_type, story_revision_id):
-    locked = []
-    missing = []
-    for subject in subjects:
-        asset, current, status = _asset_status(service, project, binding_type, subject.id, story_revision_id)
-        if status == "LOCKED":
-            locked.append(subject.id)
-        else:
-            missing.append(subject.name)
-    return len(locked), missing
+    key = "characters" if binding_type is ReferenceBindingType.CHARACTER else "locations"
+    stats = service.calculate_readiness(project.id, story_revision_id)[key]
+    return int(stats["locked"]), list(stats["missing_names"])
 
 
 def _render_card(service, project, subject, binding_type, story_revision_id):
@@ -148,6 +142,18 @@ def _render_workspace(service, storage, project, subject, binding_type, story_re
                     st.rerun()
             else:
                 st.success("LOCKED version · 不可覆盖或删除")
+                if st.button("从 LOCKED version 创建 Draft", key=f"draft-from-locked-{version.id}"):
+                    try:
+                        service.create_draft_from_version(
+                            project.id,
+                            asset.id,
+                            version.id,
+                            source_story_revision_id=story_revision_id,
+                        )
+                        st.success("已创建新的 Draft version")
+                        st.rerun()
+                    except ReferenceAssetServiceError as exc:
+                        st.warning(str(exc))
 
 
 def _render_subject_tab(service, storage, project, subjects, binding_type, story_revision_id):
@@ -178,15 +184,24 @@ def render() -> None:
         st.warning("请先确认 Story Bible。")
         return
     story = story_revision["content"]
-    characters_locked, missing_characters = _readiness(service, project, story.characters, ReferenceBindingType.CHARACTER, story_revision["id"])
-    locations_locked, missing_locations = _readiness(service, project, story.locations, ReferenceBindingType.LOCATION, story_revision["id"])
+    readiness = service.calculate_readiness(project.id, story_revision["id"])
+    character_readiness = readiness["characters"]
+    location_readiness = readiness["locations"]
     st.markdown("## Reference Readiness")
-    metrics = st.columns(5)
-    metrics[0].metric("Characters", len(story.characters))
-    metrics[1].metric("Character locked", characters_locked)
-    metrics[2].metric("Locations", len(story.locations))
-    metrics[3].metric("Location locked", locations_locked)
-    metrics[4].metric("Missing coverage", len(missing_characters) + len(missing_locations))
+    st.markdown("#### Characters")
+    character_metrics = st.columns(4)
+    character_metrics[0].metric("Characters total", character_readiness["total"])
+    character_metrics[1].metric("Characters used", character_readiness["used"])
+    character_metrics[2].metric("Characters locked", character_readiness["locked"])
+    character_metrics[3].metric("Characters missing", character_readiness["missing"])
+    st.markdown("#### Locations")
+    location_metrics = st.columns(4)
+    location_metrics[0].metric("Locations total", location_readiness["total"])
+    location_metrics[1].metric("Locations used", location_readiness["used"])
+    location_metrics[2].metric("Locations locked", location_readiness["locked"])
+    location_metrics[3].metric("Locations missing", location_readiness["missing"])
+    missing_characters = list(character_readiness["missing_names"])
+    missing_locations = list(location_readiness["missing_names"])
     if missing_characters or missing_locations:
         st.caption("Missing: " + ", ".join(missing_characters + missing_locations))
     tabs = st.tabs(["Characters", "Locations", "Styles", "Props"])

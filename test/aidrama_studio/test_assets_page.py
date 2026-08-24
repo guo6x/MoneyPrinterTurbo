@@ -42,6 +42,14 @@ class _FakeService:
         self.calls.append(("current", project_id, asset_id))
         return self.current
 
+    def calculate_readiness(self, project_id, story_revision_id):
+        self.calls.append(("readiness", project_id, story_revision_id))
+        locked = int(self.asset is not None and self.current is not None)
+        return {
+            "characters": {"total": 1, "used": locked, "locked": locked, "missing": 1 - locked, "missing_names": [] if locked else ["Hero"]},
+            "locations": {"total": 1, "used": 0, "locked": 0, "missing": 1, "missing_names": ["Room"]},
+        }
+
     def create_asset(self, project_id, asset_type):
         self.calls.append(("create", project_id, asset_type))
         self.asset = ReferenceAsset(
@@ -118,6 +126,11 @@ class FakeService:
         return None
     def get_current_version(self, project_id, asset_id):
         return None
+    def calculate_readiness(self, project_id, story_revision_id):
+        return {
+            "characters": {"total": 1, "used": 0, "locked": 0, "missing": 1, "missing_names": ["Hero"]},
+            "locations": {"total": 1, "used": 0, "locked": 0, "missing": 1, "missing_names": ["Room"]},
+        }
 
 page.current_project_or_stop = lambda: project
 page.ReferenceAssetService = FakeService
@@ -129,7 +142,8 @@ page.render()
     assert not app.exception
     assert [tab.label for tab in app.tabs] == ["Characters", "Locations", "Styles", "Props"]
     assert [metric.label for metric in app.metric] == [
-        "Characters", "Character locked", "Locations", "Location locked", "Missing coverage"
+        "Characters total", "Characters used", "Characters locked", "Characters missing",
+        "Locations total", "Locations used", "Locations locked", "Locations missing",
     ]
 
 
@@ -147,7 +161,7 @@ def test_readiness_dashboard_is_project_isolated_and_counts_locked_assets():
     )
 
     assert (locked, missing) == (1, [])
-    assert service.calls[0] == ("find", project.id, ReferenceBindingType.CHARACTER, subject.id)
+    assert service.calls[0] == ("readiness", project.id, "story-v1")
     assert all(call[1] == project.id for call in service.calls)
 
 

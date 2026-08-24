@@ -16,6 +16,14 @@ from aidrama_studio.domain import (
     StoryBible,
     StoryRevisionStatus,
     World,
+    ScriptRevisionStatus,
+    StructuredScript,
+    Scene,
+    ScriptBeat,
+    ScriptBeatType,
+    Shot,
+    ShotPlan,
+    ShotRevisionStatus,
 )
 from aidrama_studio.services import ProjectService, ReferenceAssetService, ReferenceAssetServiceError
 from aidrama_studio.services import ReferenceAssetStorageError, ReferenceAssetStorageService
@@ -83,7 +91,7 @@ def test_binding_validation_and_project_isolation(context, paths):
     repository, project = context
     service = ReferenceAssetService(repository)
     asset = service.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
-    version = service.create_version(project.id, asset.id, filename="hero.png", mime_type="image/png", size_bytes=1, sha256=hashlib.sha256(b"x").hexdigest(), storage_path="assets/references/characters/char_001/v1.png")
+    version = service.create_version(project.id, asset.id, filename="hero.png", mime_type="image/png", size_bytes=1, sha256=hashlib.sha256(b"x").hexdigest(), storage_path="assets/references/characters/char_001/v1.png", metadata={"source_story_revision_id": "story_001"})
     binding = service.bind_version(project.id, version.id, ReferenceBindingType.CHARACTER, "char_001")
     assert binding.binding_id == "char_001"
     with pytest.raises(ReferenceAssetServiceError, match="target"):
@@ -154,3 +162,155 @@ def test_import_project_isolation_and_immutable_blob(context):
     with pytest.raises(ReferenceAssetStorageError, match="不属于"):
         storage.import_image(other.id, asset.id, payload, filename="hero.jpg", mime_type="image/jpeg")
     assert path.read_bytes() == before
+
+
+def _create_approved_shot(repository, project):
+    script = StructuredScript(
+        title="Script",
+        scenes=[
+            Scene(
+                id="scene_001",
+                order=1,
+                title="Opening",
+                location_id="loc_001",
+                estimated_duration_seconds=2,
+                beats=[ScriptBeat(id="script_beat_001", order=1, type=ScriptBeatType.ACTION, text="Open")],
+            )
+        ],
+    )
+    repository.create_script_revision(
+        revision_id="script_001", project_id=project.id, version=1,
+        status=ScriptRevisionStatus.APPROVED, source_story_revision_id="story_001",
+        content=script, generation_input=None, created_at="now", updated_at="now",
+    )
+    plan = ShotPlan(
+        title="Shots", source_script_revision_id="script_001",
+        shots=[Shot(id="shot_001", order=1, scene_id="scene_001", duration_seconds=2, visual_intent="Open")],
+    )
+    return repository.create_shot_revision(
+        revision_id="shot_plan_001", project_id=project.id, version=1,
+        status=ShotRevisionStatus.APPROVED, source_script_revision_id="script_001",
+        content=plan, generation_input=None, created_at="now", updated_at="now",
+    )
+
+
+def test_character_location_and_approved_shot_bindings(context):
+    repository, project = context
+    service = ReferenceAssetService(repository)
+    digest = hashlib.sha256(b"binding").hexdigest()
+
+    character_asset = service.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
+    character_version = service.create_version(
+        project.id, character_asset.id, filename="hero.png", mime_type="image/png", size_bytes=7,
+        sha256=digest, storage_path="assets/references/hero.png",
+        metadata={"source_story_revision_id": "story_001"},
+    )
+    character_binding = service.bind_version(project.id, character_version.id, ReferenceBindingType.CHARACTER, "char_001")
+
+    location_asset = service.create_asset(project.id, ReferenceAssetType.LOCATION_REFERENCE)
+    location_version = service.create_version(
+        project.id, location_asset.id, filename="room.png", mime_type="image/png", size_bytes=7,
+        sha256=hashlib.sha256(b"location-binding").hexdigest(), storage_path="assets/references/room.png",
+        metadata={"source_story_revision_id": "story_001"},
+    )
+    location_binding = service.bind_version(project.id, location_version.id, ReferenceBindingType.LOCATION, "loc_001")
+
+    _create_approved_shot(repository, project)
+    shot_asset = service.create_asset(project.id, ReferenceAssetType.PROP_REFERENCE)
+    shot_version = service.create_version(
+        project.id, shot_asset.id, filename="shot.png", mime_type="image/png", size_bytes=7,
+        sha256=hashlib.sha256(b"shot-binding").hexdigest(), storage_path="assets/references/shot.png",
+        metadata={"source_story_revision_id": "story_001"},
+    )
+    shot_binding = service.bind_version(project.id, shot_version.id, ReferenceBindingType.SHOT, "shot_001")
+
+    assert character_binding.binding_type is ReferenceBindingType.CHARACTER
+    assert location_binding.binding_type is ReferenceBindingType.LOCATION
+    assert shot_binding.binding_type is ReferenceBindingType.SHOT
+
+
+def test_binding_rejects_unknown_and_cross_project_targets(context):
+    repository, project = context
+    service = ReferenceAssetService(repository)
+    asset = service.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
+    version = service.create_version(
+        project.id, asset.id, filename="hero.png", mime_type="image/png", size_bytes=7,
+        sha256=hashlib.sha256(b"strict-binding").hexdigest(), storage_path="assets/references/strict.png",
+        metadata={"source_story_revision_id": "story_001"},
+    )
+    with pytest.raises(ReferenceAssetServiceError, match="不存在"):
+        service.bind_version(project.id, version.id, ReferenceBindingType.LOCATION, "missing-location")
+    with pytest.raises(ReferenceAssetServiceError, match="不存在"):
+        service.bind_version(project.id, version.id, ReferenceBindingType.SHOT, "missing-shot")
+    other = ProjectService(repository).create(title="Other")
+    with pytest.raises(ReferenceAssetServiceError, match="不属于"):
+        service.bind_version(other.id, version.id, ReferenceBindingType.CHARACTER, "char_001")
+    with pytest.raises(ReferenceAssetServiceError, match="source"):
+        service.create_version(
+            project.id, asset.id, filename="invalid.png", mime_type="image/png", size_bytes=7,
+            sha256=hashlib.sha256(b"invalid-source").hexdigest(), storage_path="assets/references/invalid.png",
+            metadata={"source_story_revision_id": "missing-story"},
+        )
+    missing_source = service.create_version(
+        project.id, asset.id, filename="missing-source.png", mime_type="image/png", size_bytes=7,
+        sha256=hashlib.sha256(b"missing-source").hexdigest(), storage_path="assets/references/missing-source.png",
+    )
+    with pytest.raises(ReferenceAssetServiceError, match="source"):
+        service.bind_version(project.id, missing_source.id, ReferenceBindingType.CHARACTER, "char_001")
+
+
+def test_readiness_requires_valid_binding_current_source_and_existing_image(context):
+    repository, project = context
+    service = ReferenceAssetService(repository)
+    storage = ReferenceAssetStorageService(service)
+    payload = b"\x89PNG\r\n\x1a\nminimalIEND"
+
+    character_asset = service.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
+    character_version = storage.import_image(
+        project.id, character_asset.id, payload, filename="hero.png", mime_type="image/png",
+        metadata={"source_story_revision_id": "story_001"},
+    )
+    service.activate_version(project.id, character_asset.id, character_version.id)
+    service.bind_version(project.id, character_version.id, ReferenceBindingType.CHARACTER, "char_001")
+
+    location_asset = service.create_asset(project.id, ReferenceAssetType.LOCATION_REFERENCE)
+    location_version = storage.import_image(
+        project.id, location_asset.id, b"\x89PNG\r\n\x1a\nlocationIEND", filename="room.png", mime_type="image/png",
+        metadata={"source_story_revision_id": "story_001"},
+    )
+    service.bind_version(project.id, location_version.id, ReferenceBindingType.LOCATION, "loc_001")
+
+    readiness = service.calculate_readiness(project.id, "story_001")
+    assert readiness["characters"] == {"total": 1, "used": 1, "locked": 1, "missing": 0, "missing_names": []}
+    assert readiness["locations"] == {"total": 1, "used": 1, "locked": 0, "missing": 1, "missing_names": ["Room"]}
+
+    (repository.paths.projects / project.id / character_version.storage_path).unlink()
+    assert service.calculate_readiness(project.id, "story_001")["characters"]["locked"] == 0
+
+
+def test_outdated_version_is_detected_and_can_be_cloned_as_draft(context):
+    repository, project = context
+    old_story = repository.get_story_revision("story_001")["content"]
+    repository.create_story_revision(
+        revision_id="story_old", project_id=project.id, version=2,
+        status=StoryRevisionStatus.SUPERSEDED, content=old_story,
+        generation_input=None, created_at="old", updated_at="old",
+    )
+    service = ReferenceAssetService(repository)
+    storage = ReferenceAssetStorageService(service)
+    asset = service.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
+    version = storage.import_image(
+        project.id, asset.id, b"\x89PNG\r\n\x1a\noldIEND", filename="old.png", mime_type="image/png",
+        metadata={"source_story_revision_id": "story_old"},
+    )
+    service.activate_version(project.id, asset.id, version.id)
+    service.bind_version(project.id, version.id, ReferenceBindingType.CHARACTER, "char_001")
+
+    assert service.is_version_outdated(project.id, version.id) is True
+    assert service.calculate_readiness(project.id)["characters"]["missing"] == 1
+
+    draft = service.create_draft_from_version(project.id, asset.id, version.id, source_story_revision_id="story_001")
+    assert draft.version_number == 2
+    assert draft.metadata["derived_from_version_id"] == version.id
+    assert any(binding.asset_version_id == draft.id for binding in service.list_bindings(project.id, draft.id))
+    assert service.get_current_version(project.id, asset.id).id == version.id
