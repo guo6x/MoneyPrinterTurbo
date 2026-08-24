@@ -121,6 +121,21 @@ def test_primary_action_uses_resume_and_cancellation_services(monkeypatch):
     assert calls == ["cancel"]
 
 
+def test_interrupted_primary_action_invokes_resume(monkeypatch):
+    calls = []
+
+    class Orchestrator:
+        def resume_job(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    monkeypatch.setattr(page.st, "button", lambda label, **kwargs: label == "继续制作")
+    monkeypatch.setattr(page.st, "rerun", lambda: None)
+    page._render_primary_action(
+        Orchestrator(), None, SimpleNamespace(id="project-1"), _job("CANCELLED"), {"ready": True}, {"completed_shots": 2}
+    )
+    assert calls and calls[0][0][0] == "project-1" and calls[0][0][1] == "job-1"
+
+
 def test_blocked_primary_action_is_disabled(monkeypatch):
     calls = []
     monkeypatch.setattr(page.st, "button", lambda label, **kwargs: calls.append((label, kwargs.get("disabled"))) or False)
