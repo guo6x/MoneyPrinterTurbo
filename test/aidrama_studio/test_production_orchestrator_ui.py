@@ -95,6 +95,64 @@ page._render_shot_board(Production(), Execution(), QC(), project, job, {'total_s
     assert any("人审拒绝" in item.value for item in app.warning)
 
 
+def test_runtime_failed_shot_renders_sanitized_reason():
+    app = AppTest.from_string(
+        """
+from types import SimpleNamespace
+from aidrama_studio.pages import production as page
+project = SimpleNamespace(id='project-1')
+job = SimpleNamespace(id='job-1', status='FAILED')
+shot = SimpleNamespace(id='ps-1', shot_id='shot-1', order_index=1, status='FAILED')
+snapshot = SimpleNamespace(shot_parameters={'shot-1': {}}, story_revision_id='story', script_revision_id='script', shot_plan_revision_id='plan')
+execution = SimpleNamespace(id='ex-1', status='FAILED', input_snapshot=snapshot)
+event = SimpleNamespace(event_type='FAILED', payload_json={'error': 'adapter unavailable'}, created_at='now')
+class Production:
+    def get_shot_board(self, project_id, job_id):
+        return [{'production_shot': shot, 'scene_id': 'scene-1', 'scene_name': 'Scene', 'description': 'desc'}]
+class Execution:
+    def list_executions(self, project_id, job_id):
+        return [execution]
+    def list_events(self, project_id, execution_id):
+        return [event]
+class QC:
+    def list_results(self, project_id, execution_id):
+        return []
+page._render_shot_board(Production(), Execution(), QC(), project, job, {'total_shots': 1, 'completed_shots': 0, 'failed_shots': 1, 'pending_shots': 0, 'percent_complete': 0, 'current_shot_id': 'shot-1'})
+"""
+    ).run()
+    assert not app.exception
+    assert any("镜头制作失败" in item.value and "adapter unavailable" in item.value for item in app.error)
+
+
+def test_completed_qc_pass_shot_renders_pass_state():
+    app = AppTest.from_string(
+        """
+from types import SimpleNamespace
+from aidrama_studio.pages import production as page
+project = SimpleNamespace(id='project-1')
+job = SimpleNamespace(id='job-1', status='RUNNING')
+shot = SimpleNamespace(id='ps-1', shot_id='shot-1', order_index=1, status='SUCCEEDED')
+snapshot = SimpleNamespace(shot_parameters={'shot-1': {}}, story_revision_id='story', script_revision_id='script', shot_plan_revision_id='plan')
+execution = SimpleNamespace(id='ex-1', status='SUCCEEDED', input_snapshot=snapshot)
+result = SimpleNamespace(id='qc-1', status='QC_PASS', summary_json={'passed': 1, 'failed': 0, 'skipped': 0})
+class Production:
+    def get_shot_board(self, project_id, job_id):
+        return [{'production_shot': shot, 'scene_id': 'scene-1', 'scene_name': 'Scene', 'description': 'desc'}]
+class Execution:
+    def list_executions(self, project_id, job_id):
+        return [execution]
+class QC:
+    def list_results(self, project_id, execution_id):
+        return [result]
+    def list_reviews(self, project_id, result_id):
+        return []
+page._render_shot_board(Production(), Execution(), QC(), project, job, {'total_shots': 1, 'completed_shots': 1, 'failed_shots': 0, 'pending_shots': 0, 'percent_complete': 100, 'current_shot_id': None})
+"""
+    ).run()
+    assert not app.exception
+    assert any("QC通过" in item.value for item in app.markdown)
+
+
 def test_primary_action_uses_resume_and_cancellation_services(monkeypatch):
     project = SimpleNamespace(id="project-1")
     job = _job("RUNNING")
