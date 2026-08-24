@@ -145,6 +145,17 @@ class MPTProductionAdapter(ProductionRuntimeAdapter):
         raw = self._runtime.get_status(runtime_reference)
         return self.map_status(raw)
 
+    def get_result(self, runtime_reference: str):
+        """Return optional runtime result metadata without touching AIDrama storage."""
+        if self._runtime is None:
+            raise NotImplementedError("MPT runtime client is not configured")
+        getter = getattr(self._runtime, "get_result", None) or getattr(self._runtime, "get_artifacts", None)
+        if not callable(getter):
+            return None
+        return getter(runtime_reference)
+
+    get_artifacts = get_result
+
     @classmethod
     def map_status(cls, raw: Any) -> str:
         if isinstance(raw, Mapping):

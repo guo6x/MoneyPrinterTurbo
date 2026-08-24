@@ -8,7 +8,8 @@ from .reference_assets import ReferenceAssetService, ReferenceAssetServiceError
 from .reference_asset_storage import ReferenceAssetStorageService, ReferenceAssetStorageError
 from .production import ProductionService, ProductionServiceError
 from .production_execution import ProductionExecutionService, ProductionExecutionServiceError
-from .production_worker import ProductionWorker
+from .production_worker import ProductionWorker, ProductionWorkerError
+from .production_artifact_storage import ProductionArtifactStorageError, ProductionArtifactStorageService
 from .adapters import MPTAdapterError, MPTInputMapper, MPTProductionAdapter, MockProductionAdapter, ProductionRuntimeAdapter, RuntimeEvent, RuntimeSubmission
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "ReferenceAssetService", "ReferenceAssetServiceError",
     "ReferenceAssetStorageService", "ReferenceAssetStorageError",
     "ProductionService", "ProductionServiceError",
-    "ProductionExecutionService", "ProductionExecutionServiceError", "ProductionWorker",
+    "ProductionExecutionService", "ProductionExecutionServiceError", "ProductionWorker", "ProductionWorkerError",
+    "ProductionArtifactStorageService", "ProductionArtifactStorageError",
     "ProductionRuntimeAdapter", "RuntimeSubmission", "RuntimeEvent", "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
 ]

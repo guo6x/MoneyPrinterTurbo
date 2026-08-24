@@ -83,7 +83,7 @@ class ProductionExecutionService:
         self,
         project_id: str,
         production_job_id: str,
-        worker_type: str = "placeholder",
+        worker_type: str = "mpt",
     ) -> ProductionExecution:
         """Validate and enqueue a job, creating a new immutable execution."""
         self._require_project(project_id)
@@ -206,18 +206,21 @@ class ProductionExecutionService:
         project_id: str,
         execution_id: str,
         adapter: ProductionRuntimeAdapter,
+        *,
+        input_snapshot: ProductionInputSnapshot | None = None,
     ) -> ProductionExecution:
         """Validate and submit an immutable snapshot to a runtime adapter."""
         execution, _ = self._get_execution(project_id, execution_id)
         if execution.status is not ProductionExecutionStatus.QUEUED:
             raise ProductionExecutionServiceError("只有 QUEUED execution 可以提交到 runtime")
-        if execution.input_snapshot is None:
+        runtime_snapshot = input_snapshot or execution.input_snapshot
+        if runtime_snapshot is None:
             raise ProductionExecutionServiceError("execution 缺少 immutable input snapshot")
         try:
-            accepted = adapter.validate(execution.input_snapshot)
+            accepted = adapter.validate(runtime_snapshot)
             if accepted is False:
                 raise ProductionExecutionServiceError("runtime adapter 拒绝 input snapshot")
-            submission = adapter.submit(execution.input_snapshot)
+            submission = adapter.submit(runtime_snapshot)
             runtime_reference = self._submission_reference(submission)
         except ProductionExecutionServiceError:
             raise
