@@ -167,3 +167,39 @@ def test_producer_qc_retry_recommendation_budget_is_durable(context):
     exhausted = service.recommendations(project.id, job.id)[0]
     assert exhausted.action == "STOP_AND_REVIEW"
     assert len(repository.list_producer_recommendation_events(project.id, production_job_id=job.id, action="RETRY_QC")) == 2
+
+
+@pytest.mark.parametrize(
+    ("goal", "expected_action", "expected_status"),
+    [
+        (DirectorGoalKind.COMPLETE_PRODUCTION, "RESUME_PRODUCTION", DirectorSessionStatus.BLOCKED),
+        (DirectorGoalKind.RESOLVE_QC_BLOCKER, "GOAL_COMPLETE", DirectorSessionStatus.COMPLETED),
+        (DirectorGoalKind.MAKE_FINAL_ASSEMBLY_READY, "RESUME_PRODUCTION", DirectorSessionStatus.BLOCKED),
+        (DirectorGoalKind.COMPLETE_POST_PRODUCTION, "MAKE_FINAL_ASSEMBLY_READY", DirectorSessionStatus.BLOCKED),
+    ],
+)
+def test_director_production_qc_final_and_post_goals_have_distinct_semantics(context, goal, expected_action, expected_status):
+    repository, project = context
+    job = _ready_job(repository, project)
+    from aidrama_studio.services import ProductionService
+
+    ProductionService(repository).create_production_shots(project.id, job.id)
+    service = DirectorService(repository)
+    session = service.start_session(project.id, goal, max_steps=1)
+    decision = service.run(project.id, session.id)
+    assert decision.recommendation.action == expected_action
+    assert service.get_session(project.id, session.id).status is expected_status
+
+
+def test_pending_current_shots_do_not_recommend_final_assembly(context):
+    repository, project = context
+    job = _ready_job(repository, project)
+    from aidrama_studio.services import ProductionService
+
+    ProductionService(repository).create_production_shots(project.id, job.id)
+    producer = ProducerService(repository)
+    assert producer.recommendations(project.id, job.id)[0].action == "START_PRODUCTION"
+    director = DirectorService(repository)
+    session = director.start_session(project.id, DirectorGoalKind.MAKE_FINAL_ASSEMBLY_READY, max_steps=1)
+    decision = director.run(project.id, session.id)
+    assert decision.recommendation.action == "RESUME_PRODUCTION"

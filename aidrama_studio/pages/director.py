@@ -12,7 +12,14 @@ if str(_PROJECT_ROOT) not in sys.path:
 import streamlit as st
 from aidrama_studio.components.page_header import page_header
 from aidrama_studio.pages._shared import current_project_or_stop
-from aidrama_studio.services import ScriptService, DirectorService, DirectorServiceError, ProducerService, ProducerServiceError
+from aidrama_studio.services import (
+    ScriptService,
+    DirectorService,
+    DirectorServiceError,
+    ProducerService,
+    ProducerServiceError,
+    ShotServiceError,
+)
 from aidrama_studio.domain import ShotStatus, DirectorGoalKind
 
 def _shot_service():
@@ -31,6 +38,20 @@ def _value(obj, key, default=""):
 
 def _status(obj):
     return getattr(_value(obj, "status", "DRAFT"), "value", _value(obj, "status", "DRAFT"))
+
+
+_DECISION_STATUS_LABELS = {
+    "RECOMMENDED": "待人工处理",
+    "APPROVED": "已批准",
+    "REJECTED": "已拒绝",
+    "COMPLETED": "已完成",
+}
+
+
+def _decision_status_label(decision) -> str:
+    status = _value(decision, "status", "RECOMMENDED")
+    value = getattr(status, "value", status)
+    return _DECISION_STATUS_LABELS.get(str(value), str(value))
 
 def _editor(service, project, plan):
     pid = _value(plan, "id", "plan"); shots = _value(plan, "shots", []) or []
@@ -77,7 +98,7 @@ def _editor(service, project, plan):
                         setattr(existing, field, [str(x).strip() for x in values if str(x).strip()])
                 service.save_draft(project.id, canonical, revision_id=pid)
                 st.toast("Shot Plan Draft 已保存")
-            except Exception as exc:
+            except (ShotServiceError, ValueError, KeyError) as exc:
                 st.error(f"保存失败：{exc}")
 
 
@@ -110,7 +131,7 @@ def _render_shot_plan(project) -> None:
     for rev in (_call(service, "list_revisions", project.id) or plans): st.caption(f"v{_value(rev, 'version', '—')} · {_status(rev)}")
     if _status(plan) == "DRAFT" and st.button("Approve Shot Plan", key=f"approve-{current}"):
         try: _call(service, "approve_plan", current) or _call(service, "approve_revision", current); st.success("Shot Plan 已批准"); st.rerun()
-        except Exception as exc: st.error(str(exc))
+        except (ShotServiceError, ValueError, KeyError) as exc: st.error(str(exc))
 
 
 def _render_director_console(project) -> None:
@@ -135,8 +156,9 @@ def _render_director_console(project) -> None:
     readiness = state.get("readiness") or {}
     try:
         producer_recommendations = producer.recommendations(project.id)
-    except Exception:
+    except ProducerServiceError as exc:
         producer_recommendations = []
+        st.caption(f"Producer 建议暂不可用：{str(exc)[:180]}")
 
     # A durable session is created only by explicit user action; no provider
     # call is implied by showing this page.
@@ -156,8 +178,10 @@ def _render_director_console(project) -> None:
     target_id = getattr(recommendation, "target_id", None)
     pending_decision = None
     approved_decision = None
+    latest_decision = None
     if session is not None:
         session_decisions = director.list_decisions(project.id, session.id)
+        latest_decision = session_decisions[-1] if session_decisions else None
         pending_decision = next((item for item in reversed(session_decisions) if item.status.value == "RECOMMENDED"), None)
         approved_decision = next((item for item in reversed(session_decisions) if item.status.value == "APPROVED"), None)
 
@@ -174,6 +198,16 @@ def _render_director_console(project) -> None:
         if target_id:
             st.caption(f"目标：{target_id}")
         st.info("导演建议不会绕过 Story、Script、Shot Plan、资产锁定或人审批准 gates。")
+        if latest_decision is not None:
+            latest_status = _decision_status_label(latest_decision)
+            if latest_decision.status.value == "APPROVED":
+                st.success("最近建议已批准：批准只记录人工审核，不会自动执行建议；你可以标记完成或继续分析。")
+            elif latest_decision.status.value == "REJECTED":
+                st.warning("最近建议已拒绝：未执行任何自动动作；你可以继续分析当前项目。")
+            elif latest_decision.status.value == "COMPLETED":
+                st.success("最近建议已完成：Director 可以继续分析当前项目。")
+            else:
+                st.caption(f"最近建议状态：{latest_status}，需要人工处理后才能继续。")
         if st.button("分析当前项目", type="primary", key=f"director-run-{project.id}"):
             try:
                 if session is None:
@@ -183,7 +217,7 @@ def _render_director_console(project) -> None:
                 st.session_state[f"director-last-action-{project.id}"] = decision.recommendation.action
                 st.success("导演决策已保存，可在下方查看。")
                 st.rerun()
-            except Exception as exc:
+            except (DirectorServiceError, ValueError, KeyError) as exc:
                 st.warning("导演检查未完成，请先处理当前阻塞项。")
                 st.caption(str(exc)[:180])
         if pending_decision is not None:
@@ -254,7 +288,7 @@ def _render_director_console(project) -> None:
         else:
             for decision in reversed(director.list_decisions(project.id, session.id)[-10:]):
                 rec = decision.recommendation
-                st.markdown(f"**{rec.action}** · {decision.project_state}")
+                st.markdown(f"**{rec.action}** · {_decision_status_label(decision)} · {decision.project_state}")
                 st.caption(rec.reason[:220])
 
 

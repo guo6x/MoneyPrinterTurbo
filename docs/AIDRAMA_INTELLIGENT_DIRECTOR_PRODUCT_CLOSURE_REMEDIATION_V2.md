@@ -11,6 +11,9 @@ generation, or a new product domain.
   immutable; transitions are append-only `director_decision_events`.
 - Approval and rejection are review records only. They do not approve Story,
   Script, Shot Plan, references, call a provider, or spend generation credits.
+- The Director console renders the latest approval/rejection/completion state
+  in user-facing language and includes that state in decision history, so a
+  handled recommendation is visibly resumable.
 - A blocked Director session becomes resumable after a decision is handled.
   Cold restart reconstructs the effective decision status from the event
   history. Bounded goal segments remain limited by `max_steps`; an explicit
@@ -114,6 +117,9 @@ The forward migrations are:
 Migration 014 is not rewritten as the only upgrade path. Fresh databases and
 databases already recorded through 014 both advance idempotently to the same
 latest schema. Legacy tables remain intact for historical safety.
+The migration suite also exercises a database with versions 001–014 already
+recorded, multi-image legacy sets, deterministic locked-version selection, and
+a second initialization with no duplicate canonical rows.
 
 ## Desktop lifecycle and build architecture
 
@@ -146,6 +152,24 @@ No live external model call is required for this remediation. LLM, image,
 video and Vision live gates remain truthful according to local credentials and
 configuration. In particular, no Seedance, GPT Image, Gemini/GPT Vision,
 automatic provider fallback, or paid regeneration is introduced.
+
+## Validation evidence
+
+- The complete `test/aidrama_studio` suite passes, including Director UI
+  approval-state rendering and the database-already-at-014 migration upgrade
+  case.
+- The full project suite has no new failures: the only failure remains the
+  historical `test_worker_logs_are_available_without_streamlit_session_state`
+  Windows `\\` versus `/` path-separator assertion.
+- Python compilation, `git diff --check`, and a diff secret scan pass. AIDrama
+  and the original MPT Streamlit entrypoints both reach `/_stcore/health`, and
+  `python -m desktop.launcher --smoke` starts and stops cleanly.
+- Chrome validation at 1920×1080 and 1366×768 covered Dashboard, Story /
+  Structured Script, Assets, Director, Production, QC Review, PostProduction,
+  and Settings. The selected project query survives navigation, no page has
+  horizontal overflow, and Director approval state is visible after reload.
+  Temporary screenshots are kept under `.tmp/aidrama-v2-browser/` and are not
+  source artifacts.
 
 ## Remaining non-blocking limitations
 

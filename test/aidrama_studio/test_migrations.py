@@ -155,3 +155,50 @@ def test_migration_015_preserves_every_legacy_image_and_is_idempotent() -> None:
     before = connection.execute("SELECT COUNT(*) FROM reference_asset_versions").fetchone()[0]
     _migration_015_reference_asset_repair_completion(connection)
     assert connection.execute("SELECT COUNT(*) FROM reference_asset_versions").fetchone()[0] == before
+
+
+def test_upgrade_from_database_already_marked_014_runs_forward_repair() -> None:
+    """A real 014 database receives 015+ without rewriting applied history."""
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    for version, migration in MIGRATIONS[:14]:
+        migration(connection)
+    connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    connection.executemany(
+        "INSERT INTO schema_migrations VALUES (?,?)",
+        [(version, "2026-01-01") for version in range(1, 15)],
+    )
+    connection.execute(
+        "INSERT INTO projects VALUES (?,?,?,?,?,?,?,?)",
+        ("p014", "Legacy 014", None, "DRAFT", "16:9", 60, "2026-01-01", "2026-01-01"),
+    )
+    connection.execute(
+        "CREATE TABLE reference_asset_sets (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, subject_type TEXT NOT NULL, subject_id TEXT NOT NULL, version INTEGER NOT NULL, source_story_revision_id TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "CREATE TABLE reference_asset_images (id TEXT PRIMARY KEY, asset_set_id TEXT NOT NULL, sha256 TEXT, relative_path TEXT, original_filename TEXT, media_type TEXT, size_bytes INTEGER, created_at TEXT NOT NULL)"
+    )
+    connection.executemany(
+        "INSERT INTO reference_asset_sets VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            ("s1", "p014", "CHARACTER", "char-1", 1, None, "DRAFT", "2026-01-01", "2026-01-01"),
+            ("s2", "p014", "CHARACTER", "char-1", 2, None, "LOCKED", "2026-01-02", "2026-01-02"),
+        ],
+    )
+    connection.executemany(
+        "INSERT INTO reference_asset_images VALUES (?,?,?,?,?,?,?,?)",
+        [
+            ("i1", "s2", "1" * 64, "references/one.png", "one.png", "image/png", 10, "2026-01-02"),
+            ("i2", "s2", "2" * 64, "references/two.png", "two.png", "image/png", 11, "2026-01-02"),
+        ],
+    )
+
+    assert apply_migrations(connection) == len(MIGRATIONS) - 14
+    assert [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [
+        version for version, _ in MIGRATIONS
+    ]
+    assert connection.execute("SELECT COUNT(*) FROM reference_asset_versions").fetchone()[0] == 2
+    assert connection.execute("SELECT COUNT(*) FROM reference_asset_bindings").fetchone()[0] == 2
+    assert connection.execute("SELECT current_version_id FROM reference_assets WHERE project_id='p014'").fetchone()[0] is not None
+    assert apply_migrations(connection) == 0
+    assert connection.execute("SELECT COUNT(*) FROM reference_asset_versions").fetchone()[0] == 2
