@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from aidrama_studio.domain import (
@@ -19,6 +19,7 @@ from aidrama_studio.domain.production import ProductionAttempt, ProductionAttemp
 from aidrama_studio.domain.production_execution import ProductionArtifact, ProductionEvent, ProductionEventType, ProductionExecution, ProductionExecutionStatus
 from aidrama_studio.domain.production_snapshot import ProductionInputSnapshot
 from aidrama_studio.domain.production_qc import ProductionQCMetric, ProductionQCResult, ProductionReview
+from aidrama_studio.domain.final_assembly import FinalAssembly, FinalAssemblyItem, FinalAssemblyStatus
 
 from .database import DatabasePaths, connect, initialize_database
 
@@ -894,3 +895,204 @@ class ProjectRepository:
         with connect(self.paths.database) as connection:
             rows = connection.execute(query, tuple(params)).fetchall()
         return [self._production_review_from_row(row) for row in rows]
+
+    @staticmethod
+    def _final_assembly_from_row(row) -> FinalAssembly:
+        return FinalAssembly(
+            id=row["id"],
+            project_id=row["project_id"],
+            production_job_id=row["production_job_id"],
+            status=row["status"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _final_assembly_item_from_row(row) -> FinalAssemblyItem:
+        return FinalAssemblyItem(
+            id=row["id"],
+            final_assembly_id=row["final_assembly_id"],
+            order_index=row["order_index"],
+            production_shot_id=row["production_shot_id"],
+            production_execution_id=row["production_execution_id"],
+            production_artifact_id=row["production_artifact_id"],
+            qc_result_id=row["qc_result_id"],
+            review_id=row["review_id"],
+            source_path=row["source_path"],
+            created_at=row["created_at"],
+        )
+
+    def create_final_assembly(self, assembly: FinalAssembly) -> FinalAssembly:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, assembly.project_id):
+                raise KeyError(f"项目不存在: {assembly.project_id}")
+            job = connection.execute(
+                "SELECT project_id FROM production_jobs WHERE id=?", (assembly.production_job_id,)
+            ).fetchone()
+            if job is None:
+                raise KeyError(f"ProductionJob 不存在: {assembly.production_job_id}")
+            if job["project_id"] != assembly.project_id:
+                raise ValueError("ProductionJob 不属于该项目")
+            connection.execute(
+                "INSERT INTO final_assemblies(id,project_id,production_job_id,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                (
+                    assembly.id,
+                    assembly.project_id,
+                    assembly.production_job_id,
+                    assembly.status.value,
+                    assembly.created_at,
+                    assembly.updated_at,
+                ),
+            )
+        return self.get_final_assembly(assembly.id)
+
+    def get_final_assembly(self, assembly_id: str) -> FinalAssembly | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM final_assemblies WHERE id=?", (assembly_id,)).fetchone()
+        return self._final_assembly_from_row(row) if row else None
+
+    def list_final_assemblies(self, project_id: str, production_job_id: str | None = None) -> list[FinalAssembly]:
+        query = "SELECT * FROM final_assemblies WHERE project_id=?"
+        params: list[object] = [project_id]
+        if production_job_id is not None:
+            query += " AND production_job_id=?"
+            params.append(production_job_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [self._final_assembly_from_row(row) for row in rows]
+
+    def update_final_assembly_status(
+        self,
+        assembly_id: str,
+        status: FinalAssemblyStatus,
+        *,
+        updated_at: str,
+    ) -> FinalAssembly:
+        current = self.get_final_assembly(assembly_id)
+        if current is None:
+            raise KeyError(f"FinalAssembly 不存在: {assembly_id}")
+        if current.status is FinalAssemblyStatus.READY and status is not FinalAssemblyStatus.READY:
+            raise ValueError("READY FinalAssembly 不可修改")
+        with connect(self.paths.database) as connection:
+            connection.execute(
+                "UPDATE final_assemblies SET status=?,updated_at=? WHERE id=?",
+                (status.value, updated_at, assembly_id),
+            )
+        return self.get_final_assembly(assembly_id)
+
+    def create_final_assembly_item(self, item: FinalAssemblyItem) -> FinalAssemblyItem:
+        """Insert one item after validating every provenance edge.
+
+        The service performs physical-file checks; this repository enforces
+        durable project/job/execution/artifact/QC/review identity checks so
+        direct callers cannot create a cross-project manifest row.
+        """
+        with connect(self.paths.database) as connection:
+            assembly = connection.execute(
+                "SELECT project_id,production_job_id,status FROM final_assemblies WHERE id=?",
+                (item.final_assembly_id,),
+            ).fetchone()
+            if assembly is None:
+                raise KeyError(f"FinalAssembly 不存在: {item.final_assembly_id}")
+            if assembly["status"] != FinalAssemblyStatus.DRAFT.value:
+                raise ValueError("READY 或非 DRAFT FinalAssembly 不可添加 item")
+
+            shot = connection.execute(
+                """
+                SELECT ps.id
+                FROM production_shots ps
+                JOIN production_jobs pj ON pj.id=ps.production_job_id
+                WHERE ps.id=? AND ps.production_job_id=? AND pj.project_id=?
+                """,
+                (item.production_shot_id, assembly["production_job_id"], assembly["project_id"]),
+            ).fetchone()
+            if shot is None:
+                raise ValueError("ProductionShot 不属于该 FinalAssembly 项目或 ProductionJob")
+
+            execution = connection.execute(
+                """
+                SELECT pe.id
+                FROM production_executions pe
+                JOIN production_jobs pj ON pj.id=pe.production_job_id
+                WHERE pe.id=? AND pe.production_job_id=? AND pj.project_id=?
+                """,
+                (item.production_execution_id, assembly["production_job_id"], assembly["project_id"]),
+            ).fetchone()
+            if execution is None:
+                raise ValueError("ProductionExecution 不属于该 FinalAssembly 项目或 ProductionJob")
+
+            artifact = connection.execute(
+                "SELECT execution_id,path FROM production_artifacts WHERE id=?", (item.production_artifact_id,)
+            ).fetchone()
+            if artifact is None or artifact["execution_id"] != item.production_execution_id:
+                raise ValueError("ProductionArtifact 不属于该 ProductionExecution")
+            if artifact["path"] != item.source_path:
+                raise ValueError("FinalAssembly source_path 必须与 ProductionArtifact path 一致")
+
+            qc = connection.execute(
+                "SELECT project_id,execution_id,artifact_id FROM production_qc_results WHERE id=?",
+                (item.qc_result_id,),
+            ).fetchone()
+            if (
+                qc is None
+                or qc["project_id"] != assembly["project_id"]
+                or qc["execution_id"] != item.production_execution_id
+                or qc["artifact_id"] != item.production_artifact_id
+            ):
+                raise ValueError("ProductionQCResult 不属于该 artifact/project")
+
+            if item.review_id is not None:
+                review = connection.execute(
+                    "SELECT project_id,qc_result_id FROM production_reviews WHERE id=?", (item.review_id,)
+                ).fetchone()
+                if (
+                    review is None
+                    or review["project_id"] != assembly["project_id"]
+                    or review["qc_result_id"] != item.qc_result_id
+                ):
+                    raise ValueError("ProductionReview 不属于该 QCResult/project")
+
+            normalized = item.source_path.replace("\\", "/")
+            if (
+                not normalized
+                or normalized.startswith("/")
+                or PureWindowsPath(item.source_path).drive
+                or any(part in {"", ".", ".."} for part in PurePosixPath(normalized).parts)
+            ):
+                raise ValueError("FinalAssembly source_path 必须是项目相对路径")
+            connection.execute(
+                """
+                INSERT INTO final_assembly_items(
+                    id,final_assembly_id,order_index,production_shot_id,
+                    production_execution_id,production_artifact_id,qc_result_id,
+                    review_id,source_path,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    item.id,
+                    item.final_assembly_id,
+                    item.order_index,
+                    item.production_shot_id,
+                    item.production_execution_id,
+                    item.production_artifact_id,
+                    item.qc_result_id,
+                    item.review_id,
+                    normalized,
+                    item.created_at,
+                ),
+            )
+        return self.get_final_assembly_item(item.id)
+
+    def get_final_assembly_item(self, item_id: str) -> FinalAssemblyItem | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM final_assembly_items WHERE id=?", (item_id,)).fetchone()
+        return self._final_assembly_item_from_row(row) if row else None
+
+    def list_final_assembly_items(self, assembly_id: str) -> list[FinalAssemblyItem]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(
+                "SELECT * FROM final_assembly_items WHERE final_assembly_id=? ORDER BY order_index,id",
+                (assembly_id,),
+            ).fetchall()
+        return [self._final_assembly_item_from_row(row) for row in rows]

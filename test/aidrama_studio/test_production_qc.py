@@ -131,6 +131,6 @@ def test_qc_migration_is_applied_and_idempotent(context):
     from aidrama_studio.storage.database import connect
     with connect(repository.paths.database) as connection:
         versions = [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")]
-        assert versions[-1] == 9
+        assert versions[-1] == 10
         for table in ("production_qc_results", "production_qc_metrics", "production_reviews"):
             assert connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()

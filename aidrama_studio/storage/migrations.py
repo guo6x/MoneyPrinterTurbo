@@ -303,6 +303,52 @@ def _migration_009_production_qc(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX idx_production_reviews_result ON production_reviews(qc_result_id, created_at DESC)")
 
 
+def _migration_010_final_assembly_manifest(connection: sqlite3.Connection) -> None:
+    """Persist only the immutable identities selected for final assembly."""
+    connection.execute(
+        """
+        CREATE TABLE final_assemblies (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            production_job_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('DRAFT', 'READY', 'ASSEMBLING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(production_job_id) REFERENCES production_jobs(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE final_assembly_items (
+            id TEXT PRIMARY KEY,
+            final_assembly_id TEXT NOT NULL,
+            order_index INTEGER NOT NULL CHECK (order_index >= 0),
+            production_shot_id TEXT NOT NULL,
+            production_execution_id TEXT NOT NULL,
+            production_artifact_id TEXT NOT NULL,
+            qc_result_id TEXT NOT NULL,
+            review_id TEXT,
+            source_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(final_assembly_id, order_index),
+            UNIQUE(final_assembly_id, production_shot_id),
+            FOREIGN KEY(final_assembly_id) REFERENCES final_assemblies(id) ON DELETE CASCADE,
+            FOREIGN KEY(production_shot_id) REFERENCES production_shots(id) ON DELETE RESTRICT,
+            FOREIGN KEY(production_execution_id) REFERENCES production_executions(id) ON DELETE RESTRICT,
+            FOREIGN KEY(production_artifact_id) REFERENCES production_artifacts(id) ON DELETE RESTRICT,
+            FOREIGN KEY(qc_result_id) REFERENCES production_qc_results(id) ON DELETE RESTRICT,
+            FOREIGN KEY(review_id) REFERENCES production_reviews(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute("CREATE INDEX idx_final_assemblies_project ON final_assemblies(project_id, created_at DESC, id)")
+    connection.execute("CREATE INDEX idx_final_assemblies_job ON final_assemblies(production_job_id, created_at DESC, id)")
+    connection.execute("CREATE INDEX idx_final_assembly_items_assembly ON final_assembly_items(final_assembly_id, order_index, id)")
+    connection.execute("CREATE INDEX idx_final_assembly_items_sources ON final_assembly_items(production_shot_id, production_execution_id)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -313,6 +359,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (7, _migration_007_production_execution_queue),
     (8, _migration_008_production_input_snapshots),
     (9, _migration_009_production_qc),
+    (10, _migration_010_final_assembly_manifest),
 )
 
 
