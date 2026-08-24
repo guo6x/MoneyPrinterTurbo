@@ -95,3 +95,19 @@ class DirectorDecision(BaseModel):
     recommendation: DirectorRecommendation
     state_snapshot: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(min_length=1, max_length=80)
+
+
+class DirectorDecisionEvent(BaseModel):
+    """Append-only lifecycle transition for one immutable recommendation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(min_length=1, max_length=64)
+    decision_id: str = Field(min_length=1, max_length=64)
+    session_id: str = Field(min_length=1, max_length=64)
+    project_id: str = Field(min_length=1, max_length=64)
+    from_status: DirectorDecisionStatus
+    to_status: DirectorDecisionStatus
+    event_type: str = Field(min_length=1, max_length=80)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(min_length=1, max_length=80)

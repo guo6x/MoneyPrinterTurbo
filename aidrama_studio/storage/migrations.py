@@ -625,6 +625,170 @@ def _migration_014_reference_asset_schema_repair(connection: sqlite3.Connection)
             connection.execute("INSERT OR IGNORE INTO reference_asset_bindings(id,project_id,asset_version_id,binding_type,binding_id,created_at) VALUES (?,?,?,?,?,?)", (binding_id, row["project_id"], str(image["id"]), binding_type, row["subject_id"], image["created_at"]))
 
 
+def _migration_015_reference_asset_repair_completion(connection: sqlite3.Connection) -> None:
+    """Complete legacy reference repair without rewriting migration 014.
+
+    Early reference-set databases can contain more than one image for a set.
+    Migration 014 intentionally repaired the schema conservatively, but its
+    first release projected only one image.  This forward migration walks all
+    legacy rows and appends every recoverable image to the canonical immutable
+    version history.  It is safe on fresh databases, databases already marked
+    through 014, and repeated initialization because all identities and
+    bindings are deterministic/``INSERT OR IGNORE``.
+    """
+    legacy_sets = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='reference_asset_sets'"
+    ).fetchone()
+    if not legacy_sets:
+        return
+    legacy_images = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='reference_asset_images'"
+    ).fetchone()
+    if not legacy_images:
+        return
+
+    set_rows = connection.execute(
+        "SELECT * FROM reference_asset_sets ORDER BY project_id, subject_type, subject_id, version, id"
+    ).fetchall()
+    image_columns = {row[1] for row in connection.execute("PRAGMA table_info(reference_asset_images)")}
+    set_column = next((name for name in ("asset_set_id", "reference_asset_set_id", "set_id") if name in image_columns), None)
+    if set_column is None:
+        return
+    image_rows = connection.execute(
+        f"SELECT * FROM reference_asset_images ORDER BY {set_column}, id"
+    ).fetchall()
+    images_by_set: dict[str, list[sqlite3.Row]] = {}
+    for image in image_rows:
+        images_by_set.setdefault(str(image[set_column]), []).append(image)
+
+    def value(row: sqlite3.Row, name: str, default: object = None) -> object:
+        return row[name] if name in row.keys() else default
+
+    def safe_sha(image: sqlite3.Row, project_id: str) -> str:
+        raw = str(value(image, "sha256", "") or "").lower()
+        if len(raw) == 64 and all(char in "0123456789abcdef" for char in raw):
+            return raw
+        return hashlib.sha256(("legacy:" + project_id + ":" + str(value(image, "id", ""))).encode()).hexdigest()
+
+    def safe_path(image: sqlite3.Row, version_id: str) -> str:
+        raw = str(value(image, "relative_path", "") or "").replace("\\", "/").strip()
+        parts = raw.split("/")
+        if not raw or raw.startswith("/") or "://" in raw or any(part in {"", ".", ".."} for part in parts):
+            return "legacy/reference/" + version_id + ".bin"
+        return "/".join(parts)
+
+    grouped: dict[tuple[str, str, str], str] = {}
+    locked_candidates: dict[str, tuple[int, str, str]] = {}
+    for set_row in set_rows:
+        project_id = str(set_row["project_id"])
+        subject_type = str(set_row["subject_type"])
+        subject_id = str(set_row["subject_id"])
+        key = (project_id, subject_type, subject_id)
+        asset_id = grouped.setdefault(
+            key, "legacy-" + hashlib.sha256("|".join(key).encode()).hexdigest()[:32]
+        )
+        asset_type = {
+            "CHARACTER": "CHARACTER_REFERENCE", "LOCATION": "LOCATION_REFERENCE",
+            "STYLE": "STYLE_REFERENCE", "PROP": "PROP_REFERENCE",
+        }.get(subject_type.upper(), "PROP_REFERENCE")
+        created_at = str(value(set_row, "created_at", "1970-01-01T00:00:00Z"))
+        updated_at = str(value(set_row, "updated_at", created_at))
+        connection.execute(
+            "INSERT OR IGNORE INTO reference_assets(id,project_id,asset_type,created_at,updated_at) VALUES (?,?,?,?,?)",
+            (asset_id, project_id, asset_type, created_at, updated_at),
+        )
+        existing_max = connection.execute(
+            "SELECT COALESCE(MAX(version_number),0) FROM reference_asset_versions WHERE asset_id=?", (asset_id,)
+        ).fetchone()[0]
+        legacy_version = max(1, int(value(set_row, "version", 1) or 1))
+        set_images = images_by_set.get(str(set_row["id"]), [])
+        for image_index, image in enumerate(set_images):
+            image_id = str(value(image, "id", ""))
+            raw_existing = connection.execute(
+                "SELECT id,asset_id,version_number FROM reference_asset_versions WHERE id=?", (image_id,)
+            ).fetchone()
+            version_id = image_id if raw_existing is not None and raw_existing[1] == asset_id else (
+                "legacy-v2-" + hashlib.sha256((asset_id + "|" + image_id).encode()).hexdigest()[:32]
+            )
+            existing = connection.execute(
+                "SELECT version_number FROM reference_asset_versions WHERE id=?", (version_id,)
+            ).fetchone()
+            if existing is None:
+                existing_max += 1
+                version_number = max(legacy_version + image_index, existing_max)
+                metadata = {
+                    "source_story_revision_id": value(set_row, "source_story_revision_id"),
+                    "legacy_subject_type": subject_type,
+                    "legacy_subject_id": subject_id,
+                    "legacy_set_id": str(set_row["id"]),
+                    "legacy_version": legacy_version,
+                    "legacy_status": str(value(set_row, "status", "DRAFT")),
+                    "legacy_image_id": image_id,
+                }
+                connection.execute(
+                    "INSERT OR IGNORE INTO reference_asset_versions(id,asset_id,project_id,version_number,filename,mime_type,size_bytes,sha256,storage_path,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        version_id, asset_id, project_id, version_number,
+                        str(value(image, "original_filename", "reference") or "reference"),
+                        str(value(image, "media_type", "application/octet-stream") or "application/octet-stream"),
+                        max(0, int(value(image, "size_bytes", 0) or 0)), safe_sha(image, project_id),
+                        safe_path(image, version_id), json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                        str(value(image, "created_at", created_at)),
+                    ),
+                )
+            else:
+                version_number = int(existing[0])
+            binding_type = {"CHARACTER": "CHARACTER", "LOCATION": "LOCATION", "SHOT": "SHOT"}.get(subject_type.upper())
+            if binding_type:
+                binding_id = "legacy-binding-v2-" + hashlib.sha256((asset_id + "|" + version_id + "|" + subject_id).encode()).hexdigest()[:24]
+                connection.execute(
+                    "INSERT OR IGNORE INTO reference_asset_bindings(id,project_id,asset_version_id,binding_type,binding_id,created_at) VALUES (?,?,?,?,?,?)",
+                    (binding_id, project_id, version_id, binding_type, subject_id, str(value(image, "created_at", created_at))),
+                )
+            if str(value(set_row, "status", "DRAFT")).upper() == "LOCKED":
+                candidate = (legacy_version, str(set_row["id"]), version_id)
+                current = locked_candidates.get(asset_id)
+                if current is None or candidate[:2] >= current[:2]:
+                    locked_candidates[asset_id] = candidate
+    for asset_id, candidate in locked_candidates.items():
+        connection.execute("UPDATE reference_assets SET current_version_id=?, updated_at=updated_at WHERE id=?", (candidate[2], asset_id))
+
+
+def _migration_016_director_decision_events(connection: sqlite3.Connection) -> None:
+    """Persist append-only Director decision lifecycle transitions."""
+    connection.execute(
+        """
+        CREATE TABLE director_decision_events (
+            id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            from_status TEXT NOT NULL CHECK (from_status IN ('RECOMMENDED', 'APPROVED', 'COMPLETED', 'REJECTED')),
+            to_status TEXT NOT NULL CHECK (to_status IN ('RECOMMENDED', 'APPROVED', 'COMPLETED', 'REJECTED')),
+            event_type TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(decision_id) REFERENCES director_decisions(id) ON DELETE CASCADE,
+            FOREIGN KEY(session_id) REFERENCES director_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute("CREATE INDEX idx_director_decision_events_decision ON director_decision_events(decision_id, created_at, id)")
+    connection.execute("CREATE INDEX idx_director_decision_events_project ON director_decision_events(project_id, created_at, id)")
+
+
+def _migration_017_post_source_render_attempt(connection: sqlite3.Connection) -> None:
+    """Pin the exact FinalAssembly render attempt used by post production."""
+    plan_columns = {row[1] for row in connection.execute("PRAGMA table_info(post_production_plans)")}
+    if "source_final_assembly_render_attempt_id" not in plan_columns:
+        connection.execute("ALTER TABLE post_production_plans ADD COLUMN source_final_assembly_render_attempt_id TEXT")
+    attempt_columns = {row[1] for row in connection.execute("PRAGMA table_info(post_render_attempts)")}
+    if "source_final_assembly_render_attempt_id" not in attempt_columns:
+        connection.execute("ALTER TABLE post_render_attempts ADD COLUMN source_final_assembly_render_attempt_id TEXT")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_post_plans_source_attempt ON post_production_plans(source_final_assembly_render_attempt_id)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -640,10 +804,19 @@ MIGRATIONS: tuple[Migration, ...] = (
     (12, _migration_012_post_production),
     (13, _migration_013_director_state),
     (14, _migration_014_reference_asset_schema_repair),
+    (15, _migration_015_reference_asset_repair_completion),
+    (16, _migration_016_director_decision_events),
+    (17, _migration_017_post_source_render_attempt),
 )
 
 
 def apply_migrations(connection: sqlite3.Connection) -> int:
+    # The application connector uses sqlite3.Row, while migration unit tests
+    # and older callers may pass a bare sqlite3.connect() tuple-row handle.
+    # Legacy repair needs named columns; normalize the connection once without
+    # changing tuple-style positional access (sqlite3.Row supports both).
+    if connection.row_factory is None:
+        connection.row_factory = sqlite3.Row
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS schema_migrations (

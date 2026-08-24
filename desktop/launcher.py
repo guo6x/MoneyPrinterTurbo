@@ -55,7 +55,7 @@ class LauncherConfig:
     streamlit_module: str = "streamlit"
 
     def __post_init__(self) -> None:
-        validate_loopback_host(self.host)
+        object.__setattr__(self, "host", validate_loopback_host(self.host))
         if not 0 <= int(self.preferred_port) <= 65535:
             raise ValueError("preferred_port must be between 0 and 65535")
         if int(self.port_attempts) < 1:
@@ -67,7 +67,7 @@ class LauncherConfig:
 def is_port_available(host: str, port: int) -> bool:
     """Return whether a TCP port can be bound on the loopback interface."""
 
-    validate_loopback_host(host)
+    host = validate_loopback_host(host)
     with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM) as probe:
         try:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -80,7 +80,7 @@ def is_port_available(host: str, port: int) -> bool:
 def select_safe_port(host: str = "127.0.0.1", preferred_port: int = 8501, attempts: int = 20) -> int:
     """Select a currently free loopback port, preferring Streamlit's default."""
 
-    validate_loopback_host(host)
+    host = validate_loopback_host(host)
     preferred_port = int(preferred_port)
     if preferred_port and is_port_available(host, preferred_port):
         return preferred_port
@@ -100,15 +100,21 @@ def select_safe_port(host: str = "127.0.0.1", preferred_port: int = 8501, attemp
 def build_streamlit_command(config: LauncherConfig, port: int) -> list[str]:
     """Build the explicit local Streamlit command used by the launcher."""
 
-    validate_loopback_host(config.host)
+    host = validate_loopback_host(config.host)
+    # A PyInstaller executable is not a Python interpreter and cannot execute
+    # ``-m streamlit`` directly.  The frozen launcher includes Streamlit, so it
+    # can re-enter itself in a dedicated child mode while preserving the same
+    # explicit script/loopback arguments used by source checkouts.
+    if getattr(sys, "frozen", False):
+        interpreter = [config.python_executable, "--streamlit-child"]
+    else:
+        interpreter = [config.python_executable, "-m", config.streamlit_module]
     return [
-        config.python_executable,
-        "-m",
-        config.streamlit_module,
+        *interpreter,
         "run",
         str(Path(config.main_path).resolve()),
         "--server.address",
-        config.host,
+        host,
         "--server.port",
         str(int(port)),
         "--server.headless",
@@ -119,7 +125,7 @@ def build_streamlit_command(config: LauncherConfig, port: int) -> list[str]:
 
 
 def health_url(host: str, port: int) -> str:
-    validate_loopback_host(host)
+    host = validate_loopback_host(host)
     display_host = "[::1]" if host == "::1" else host
     return f"http://{display_host}:{int(port)}/_stcore/health"
 
@@ -179,17 +185,44 @@ class DesktopLauncher:
         except OSError as exc:
             raise DesktopLaunchError(f"无法启动 AIDrama 本地服务：{exc}") from exc
         self.port = port
-        self.url = f"http://{self.config.host}:{port}"
-        if not wait_for_health(
-            health_url(self.config.host, port),
-            timeout=self.config.startup_timeout,
-            interval=self.config.health_interval,
-        ):
+        display_host = "[::1]" if self.config.host == "::1" else self.config.host
+        self.url = f"http://{display_host}:{port}"
+        try:
+            healthy = wait_for_health(
+                health_url(self.config.host, port),
+                timeout=self.config.startup_timeout,
+                interval=self.config.health_interval,
+            )
+        except BaseException:
+            # ``start`` is also a public API used by smoke checks.  Ensure a
+            # child cannot survive an interrupted health probe even when the
+            # caller does not enter ``run`` (whose ``finally`` is a second
+            # line of defence).
+            self.stop()
+            raise
+        if not healthy:
             return_code = self._process.poll()
             self.stop()
             suffix = f"（进程退出码 {return_code}）" if return_code is not None else ""
             raise DesktopLaunchError(f"AIDrama 本地服务未在限定时间内就绪{suffix}")
         return self.url
+
+    def _wait_for_browser_session(self) -> None:
+        """Keep a browser-fallback child alive until it exits or is interrupted.
+
+        Opening a browser is asynchronous and returns immediately.  The
+        launcher therefore must remain the owner of the local Streamlit child
+        instead of returning into ``finally`` and terminating it.  Polling the
+        child also lets a crashed/closed child end the fallback naturally.
+        ``KeyboardInterrupt`` is intentionally handled by :meth:`run` so this
+        helper remains useful in tests with a deterministic fake clock.
+        """
+
+        while True:
+            process = self.process
+            if process is None or process.poll() is not None:
+                return
+            time.sleep(max(0.05, float(self.config.health_interval)))
 
     def stop(self) -> None:
         process, self._process = self._process, None
@@ -228,13 +261,13 @@ class DesktopLauncher:
     def run(self, *, browser_fallback: bool = False) -> int:
         try:
             self.start()
-            self.open_window(prefer_webview=not browser_fallback)
-            if browser_fallback:
-                # Keep the server available for a browser session until Ctrl-C
-                # or until Streamlit exits. This is also useful on dev machines
-                # where optional PyWebView is intentionally not installed.
-                while self.process is not None and self.process.poll() is None:
-                    time.sleep(0.5)
+            window_mode = self.open_window(prefer_webview=not browser_fallback)
+            # ``open_window`` transparently falls back when PyWebView is not
+            # installed or cannot initialize.  Handle that result exactly like
+            # an explicit ``--browser`` invocation; otherwise ``finally``
+            # would immediately stop the healthy local service.
+            if window_mode == "browser-fallback":
+                self._wait_for_browser_session()
             return 0
         except KeyboardInterrupt:
             return 0
@@ -255,8 +288,32 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _run_streamlit_child(argv: Sequence[str]) -> int:
+    """Run Streamlit from a frozen launcher child process.
+
+    This path is only selected by the explicit ``--streamlit-child`` marker
+    emitted by :func:`build_streamlit_command` in a PyInstaller bundle.  It is
+    lazy so normal source launches do not import Streamlit in the shell
+    process, and it keeps the desktop executable as the sole package entry
+    point.
+    """
+
+    from streamlit.web.cli import main as streamlit_main
+
+    previous_argv = sys.argv
+    try:
+        sys.argv = ["streamlit", *argv]
+        result = streamlit_main()
+        return int(result or 0)
+    finally:
+        sys.argv = previous_argv
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == "--streamlit-child":
+        return _run_streamlit_child(raw_argv[1:])
+    args = _parse_args(raw_argv)
     launcher = DesktopLauncher(
         LauncherConfig(host=args.host, preferred_port=args.port, startup_timeout=args.startup_timeout)
     )

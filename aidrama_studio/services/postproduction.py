@@ -23,6 +23,7 @@ from aidrama_studio.domain import (
     PostProductionPlan,
     PostRenderAttempt,
     PostRenderAttemptStatus,
+    FinalAssemblyRenderAttemptStatus,
     SubtitleCue,
     SubtitleTrack,
     VoiceTrack,
@@ -128,6 +129,12 @@ class FFmpegPostProductionAdapter(PostProductionMediaAdapter):
             raise PostProductionServiceError("post render 输出为空")
         return {"size_bytes": request.output_path.stat().st_size, "runtime": "ffmpeg", "inputs": len(extra_inputs) + 1}
 
+    def probe_output(self, output_path: Path) -> dict[str, object]:
+        """Reuse the existing media probe seam for post-output validation."""
+        from aidrama_studio.services.adapters.final_assembly_runtime import MPTFinalAssemblyAdapter
+
+        return MPTFinalAssemblyAdapter(ffmpeg_binary=self.ffmpeg_binary).probe_output(Path(output_path))
+
     @staticmethod
     def _resolve_ffmpeg() -> str:
         from app.utils.utils import get_ffmpeg_binary
@@ -168,8 +175,14 @@ class PostProductionService:
         assembly = self.repository.get_final_assembly(source_final_assembly_id)
         if assembly is None or assembly.project_id != project_id:
             raise PostProductionServiceError("FinalAssembly 不属于该项目")
+        pinned_attempt_id: str | None = None
+        latest_attempt = getattr(self.final_assembly_service, "latest_successful_attempt", None)
+        if callable(latest_attempt):
+            attempt = latest_attempt(project_id, source_final_assembly_id)
+            if attempt is not None:
+                pinned_attempt_id = attempt.id
         now = _now()
-        return self.repository.create_post_plan(PostProductionPlan(id=plan_id or uuid4().hex, project_id=project_id, source_final_assembly_id=source_final_assembly_id, subtitle_enabled=subtitle_enabled, audio_mix=audio_mix or AudioMixConfig(), created_at=now, updated_at=now))
+        return self.repository.create_post_plan(PostProductionPlan(id=plan_id or uuid4().hex, project_id=project_id, source_final_assembly_id=source_final_assembly_id, source_final_assembly_render_attempt_id=pinned_attempt_id, subtitle_enabled=subtitle_enabled, audio_mix=audio_mix or AudioMixConfig(), created_at=now, updated_at=now))
 
     create_post_plan = create_plan
     create_post_production = create_plan
@@ -340,11 +353,12 @@ class PostProductionService:
     # Rendering ---------------------------------------------------------
     def render(self, project_id: str, plan_id: str, *, subtitle_track_id: str | None = None, music_track_id: str | None = None, voice_track_id: str | None = None) -> PostRenderAttempt:
         plan = self.get_plan(project_id, plan_id)
+        plan = self._ensure_source_attempt_pinned(project_id, plan)
         attempt_number = max((item.attempt_number for item in self.repository.list_post_render_attempts(project_id, plan_id)), default=0) + 1
-        attempt = self.repository.create_post_render_attempt(PostRenderAttempt(id=uuid4().hex, project_id=project_id, plan_id=plan_id, source_final_assembly_id=plan.source_final_assembly_id, attempt_number=attempt_number, adapter_name=getattr(self.media_adapter, "name", self.media_adapter.__class__.__name__), created_at=_now()))
+        attempt = self.repository.create_post_render_attempt(PostRenderAttempt(id=uuid4().hex, project_id=project_id, plan_id=plan_id, source_final_assembly_id=plan.source_final_assembly_id, source_final_assembly_render_attempt_id=plan.source_final_assembly_render_attempt_id, attempt_number=attempt_number, adapter_name=getattr(self.media_adapter, "name", self.media_adapter.__class__.__name__), created_at=_now()))
         temporary: Path | None = None
         try:
-            source = self.final_assembly_service.resolve_output_path(project_id, plan.source_final_assembly_id)
+            source = self._resolve_final_source(project_id, plan)
             if source is None or not Path(source).is_file():
                 raise PostProductionServiceError("FinalAssembly 成片输出不存在")
             source = Path(source).resolve()
@@ -356,6 +370,7 @@ class PostProductionService:
             subtitle_path = self._subtitle_path(project_id, plan, subtitle_track_id)
             music = self._music_track(project_id, plan_id, music_track_id)
             voice = self._voice_track(project_id, plan_id, voice_track_id)
+            self._validate_supported_music_parameters(music)
             self.repository.update_post_render_attempt(attempt.id, status=PostRenderAttemptStatus.RUNNING, started_at=_now(), metadata_json={"project_id": project_id, "plan_id": plan_id, "source_final_assembly_id": plan.source_final_assembly_id})
             render_result = self.media_adapter.render(
                 PostRenderRequest(
@@ -369,8 +384,12 @@ class PostProductionService:
                 )
             )
             metadata = self._sanitize_metadata(dict(render_result), project_id)
-            self._validate_output(temporary)
+            probe = self._validate_output(temporary, require_audio=bool(music or voice))
             metadata.update({"size_bytes": temporary.stat().st_size, "sha256": self._sha256(temporary), "source_final_assembly_id": plan.source_final_assembly_id})
+            if plan.source_final_assembly_render_attempt_id:
+                metadata["source_final_assembly_render_attempt_id"] = plan.source_final_assembly_render_attempt_id
+            if probe:
+                metadata["probe"] = probe
             os.rename(temporary, output)
             temporary = None
             return self.repository.update_post_render_attempt(attempt.id, status=PostRenderAttemptStatus.SUCCEEDED, output_relative_path=relative, metadata_json=metadata, finished_at=_now())
@@ -404,6 +423,30 @@ class PostProductionService:
         if attempt is None or attempt.status is not PostRenderAttemptStatus.SUCCEEDED or not attempt.output_relative_path:
             return None
         return self._resolve_project_relative(project_id, attempt.output_relative_path, suffix=".mp4", must_exist=True)
+
+    def _ensure_source_attempt_pinned(self, project_id: str, plan: PostProductionPlan) -> PostProductionPlan:
+        if plan.source_final_assembly_render_attempt_id:
+            attempt = self.repository.get_final_assembly_render_attempt(plan.source_final_assembly_render_attempt_id)
+            if attempt is None or attempt.final_assembly_id != plan.source_final_assembly_id or attempt.status is not FinalAssemblyRenderAttemptStatus.SUCCEEDED:
+                raise PostProductionServiceError("PostProductionPlan 的 source render attempt 不再可用")
+            return plan
+        latest = getattr(self.final_assembly_service, "latest_successful_attempt", None)
+        candidate = latest(project_id, plan.source_final_assembly_id) if callable(latest) else None
+        if candidate is None:
+            # Compatibility for a pre-017 draft plan whose injected resolver
+            # already owns a source path.  Once a real FinalAssembly attempt
+            # exists, the plan is pinned before rendering and cannot drift.
+            return plan
+        return self.repository.pin_post_plan_source_attempt(project_id, plan.id, candidate.id)
+
+    def _resolve_final_source(self, project_id: str, plan: PostProductionPlan) -> Path | None:
+        resolver = self.final_assembly_service.resolve_output_path
+        if plan.source_final_assembly_render_attempt_id:
+            try:
+                return resolver(project_id, plan.source_final_assembly_id, plan.source_final_assembly_render_attempt_id)
+            except TypeError as exc:
+                raise PostProductionServiceError("FinalAssembly resolver 不支持冻结的 render attempt") from exc
+        return resolver(project_id, plan.source_final_assembly_id)
 
     # Validation helpers ------------------------------------------------
     def _require_project(self, project_id: str) -> None:
@@ -480,14 +523,43 @@ class PostProductionService:
         output.parent.mkdir(parents=True, exist_ok=True)
         return output, PurePosixPath("post", plan_id, "attempts", attempt_id, "final.mp4").as_posix()
 
-    @staticmethod
-    def _validate_output(path: Path) -> None:
+    def _validate_output(self, path: Path, *, require_audio: bool = False) -> dict[str, object]:
         if not path.is_file() or path.stat().st_size <= 0:
             raise PostProductionServiceError("post output 为空")
         with path.open("rb") as handle:
             header = handle.read(128)
         if b"ftyp" not in header:
             raise PostProductionServiceError("post output 不是有效 MP4")
+        probe_fn = getattr(self.media_adapter, "probe_output", None)
+        if callable(probe_fn):
+            try:
+                probed = dict(probe_fn(path))
+            except Exception as exc:
+                raise PostProductionServiceError(f"post output probe 失败: {exc}") from exc
+            if not probed.get("video_stream") or float(probed.get("duration_seconds", 0) or 0) <= 0:
+                raise PostProductionServiceError("post output 缺少有效 video stream/duration")
+            if not isinstance(probed.get("width"), int) or not isinstance(probed.get("height"), int) or probed["width"] <= 0 or probed["height"] <= 0:
+                raise PostProductionServiceError("post output dimensions 无效")
+            if require_audio and not probed.get("audio_stream"):
+                raise PostProductionServiceError("post output 缺少预期 audio stream")
+            return probed
+        return {}
+
+    @staticmethod
+    def _validate_supported_music_parameters(music: MusicTrack | None) -> None:
+        if music is None:
+            return
+        unsupported = []
+        if music.start_seconds != 0:
+            unsupported.append("start_seconds")
+        if music.end_seconds is not None:
+            unsupported.append("end_seconds")
+        if music.fade_in_seconds != 0:
+            unsupported.append("fade_in_seconds")
+        if music.fade_out_seconds != 0:
+            unsupported.append("fade_out_seconds")
+        if unsupported:
+            raise PostProductionServiceError("当前 FFmpeg seam 尚未应用 MusicTrack 参数: " + ", ".join(unsupported))
 
     @staticmethod
     def _sha256(path: Path) -> str:

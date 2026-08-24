@@ -14,6 +14,7 @@ from .final_assembly import FinalAssembly, FinalAssemblyItem, FinalAssemblyManif
 from .post_production import AudioMixConfig, BGMTrack, MusicTrack, PostProductionPlan, PostProductionProject, PostRenderAttempt, PostRenderAttemptStatus, SubtitleCue, SubtitleItem, SubtitleTrack, VoiceTrack
 from .director import (
     DirectorDecision,
+    DirectorDecisionEvent,
     DirectorDecisionStatus,
     DirectorGoal,
     DirectorGoalKind,
@@ -46,5 +47,6 @@ __all__ = [
     "AudioMixConfig", "MusicTrack", "BGMTrack", "PostProductionPlan", "PostProductionProject", "PostRenderAttempt", "PostRenderAttemptStatus", "SubtitleCue", "SubtitleItem", "SubtitleTrack", "VoiceTrack",
     "DirectorSession", "DirectorSessionStatus", "DirectorGoal", "DirectorGoalKind", "DirectorGoalStatus",
     "DirectorDecision", "DirectorDecisionStatus", "DirectorRecommendation",
+    "DirectorDecisionEvent",
     "ProducerPolicy", "ProducerRecommendation", "ProductionProgress",
 ]

@@ -8,6 +8,7 @@ than installing packages or silently producing an incomplete artifact.
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,14 +20,45 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from desktop.launcher import DEFAULT_MAIN
+
+
+# The executable is a shell around the local Streamlit service.  Freezing the
+# Streamlit page itself would bypass the loopback/health/WebView lifecycle and
+# produce a binary that cannot perform the documented desktop startup flow.
+DESKTOP_ENTRYPOINT = PROJECT_ROOT / "desktop" / "launcher.py"
+
+
+def _add_data(source: Path, destination: str) -> list[str]:
+    """Return a platform-correct PyInstaller ``--add-data`` pair."""
+
+    # PyInstaller uses ``;`` on Windows and ``:`` on POSIX, matching
+    # ``os.pathsep``.  Keeping this in one helper makes the build definition
+    # inspectable and avoids shell quoting differences.
+    return ["--add-data", f"{source}{os.pathsep}{destination}"]
+
+
+def runtime_data_args() -> list[str]:
+    """Data files needed by the Streamlit child at runtime.
+
+    ``Main.py`` is intentionally shipped as data because the launcher invokes
+    Streamlit with an explicit script path.  The package's Python modules are
+    collected separately below; these entries cover the files loaded through
+    ``Path(__file__)`` and the replaceable product mark.
+    """
+
+    package_root = PROJECT_ROOT / "aidrama_studio"
+    return [
+        *_add_data(package_root / "Main.py", "aidrama_studio"),
+        *_add_data(package_root / "styles.css", "aidrama_studio"),
+        *_add_data(package_root / "assets", "aidrama_studio/assets"),
+    ]
 
 
 def build_command(*, output_dir: Path | None = None) -> list[str]:
     if importlib.util.find_spec("PyInstaller") is None:
         raise RuntimeError("PyInstaller is not installed; install only the optional desktop build tool to package AIDrama")
     destination = output_dir or PROJECT_ROOT / "dist"
-    return [
+    command = [
         sys.executable,
         "-m",
         "PyInstaller",
@@ -35,8 +67,28 @@ def build_command(*, output_dir: Path | None = None) -> list[str]:
         "AIDramaStudio",
         "--distpath",
         str(destination),
-        str(DEFAULT_MAIN),
+        "--paths",
+        str(PROJECT_ROOT),
+        # Streamlit and the product services load package resources and a few
+        # modules dynamically.  Collecting these namespaces keeps the frozen
+        # shell faithful to the source launcher without changing application
+        # architecture or adding runtime dependencies.
+        "--collect-all",
+        "streamlit",
+        "--collect-submodules",
+        "aidrama_studio",
+        "--collect-submodules",
+        "app",
+        "--collect-submodules",
+        "moviepy",
+        "--hidden-import",
+        "app.services.video",
+        "--hidden-import",
+        "app.utils.utils",
     ]
+    command.extend(runtime_data_args())
+    command.append(str(DESKTOP_ENTRYPOINT))
+    return command
 
 
 def main() -> int:

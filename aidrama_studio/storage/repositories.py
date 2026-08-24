@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -38,6 +39,7 @@ from aidrama_studio.domain.post_production import (
 )
 from aidrama_studio.domain.director import (
     DirectorDecision,
+    DirectorDecisionEvent,
     DirectorDecisionStatus,
     DirectorGoal,
     DirectorGoalKind,
@@ -945,14 +947,29 @@ class ProjectRepository:
             created_at=row["created_at"], finished_at=row["finished_at"],
         )
 
-    @staticmethod
-    def _director_decision_from_row(row) -> DirectorDecision:
+    def _director_decision_from_row(self, row) -> DirectorDecision:
+        status = DirectorDecisionStatus(row["status"])
+        # The recommendation row is immutable.  Its effective status is the
+        # latest append-only lifecycle event, if any.
+        try:
+            event = self._connection_event_row(row["id"])
+        except sqlite3.OperationalError:
+            event = None
+        if event is not None:
+            status = DirectorDecisionStatus(event["to_status"])
         return DirectorDecision(
             id=row["id"], session_id=row["session_id"], project_id=row["project_id"], goal_id=row["goal_id"],
-            status=DirectorDecisionStatus(row["status"]), project_state=row["project_state"],
+            status=status, project_state=row["project_state"],
             recommendation=DirectorRecommendation.model_validate(json.loads(row["recommendation_json"])),
             state_snapshot=json.loads(row["state_snapshot_json"]), created_at=row["created_at"],
         )
+
+    def _connection_event_row(self, decision_id: str):
+        with connect(self.paths.database) as connection:
+            return connection.execute(
+                "SELECT to_status FROM director_decision_events WHERE decision_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                (decision_id,),
+            ).fetchone()
 
     def create_director_session(self, session: DirectorSession) -> DirectorSession:
         with connect(self.paths.database) as connection:
@@ -1033,6 +1050,43 @@ class ProjectRepository:
                  json.dumps(decision.state_snapshot, ensure_ascii=False, sort_keys=True), decision.created_at),
             )
         return self.get_director_decision(decision.id)
+
+    def create_director_decision_event(self, event: DirectorDecisionEvent) -> DirectorDecisionEvent:
+        """Append one validated lifecycle transition; never edits history."""
+        with connect(self.paths.database) as connection:
+            decision = connection.execute(
+                "SELECT session_id,project_id,status FROM director_decisions WHERE id=?", (event.decision_id,)
+            ).fetchone()
+            session = connection.execute(
+                "SELECT project_id FROM director_sessions WHERE id=?", (event.session_id,)
+            ).fetchone()
+            if decision is None or decision["session_id"] != event.session_id or decision["project_id"] != event.project_id:
+                raise ValueError("DirectorDecisionEvent decision provenance 不属于该 session/project")
+            if session is None or session["project_id"] != event.project_id:
+                raise ValueError("DirectorDecisionEvent session 不属于该项目")
+            latest = connection.execute(
+                "SELECT to_status FROM director_decision_events WHERE decision_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                (event.decision_id,),
+            ).fetchone()
+            current = latest["to_status"] if latest is not None else decision["status"]
+            if current != event.from_status.value:
+                raise ValueError(f"DirectorDecisionEvent transition 无效: expected {current}, got {event.from_status.value}")
+            connection.execute(
+                "INSERT INTO director_decision_events(id,decision_id,session_id,project_id,from_status,to_status,event_type,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (event.id, event.decision_id, event.session_id, event.project_id, event.from_status.value, event.to_status.value, event.event_type, json.dumps(event.metadata, ensure_ascii=False, sort_keys=True), event.created_at),
+            )
+        return event
+
+    def list_director_decision_events(self, project_id: str, decision_id: str | None = None) -> list[DirectorDecisionEvent]:
+        query = "SELECT * FROM director_decision_events WHERE project_id=?"
+        params: list[object] = [project_id]
+        if decision_id is not None:
+            query += " AND decision_id=?"
+            params.append(decision_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [DirectorDecisionEvent(id=row["id"], decision_id=row["decision_id"], session_id=row["session_id"], project_id=row["project_id"], from_status=DirectorDecisionStatus(row["from_status"]), to_status=DirectorDecisionStatus(row["to_status"]), event_type=row["event_type"], metadata=json.loads(row["metadata_json"]), created_at=row["created_at"]) for row in rows]
 
     def get_director_decision(self, decision_id: str) -> DirectorDecision | None:
         with connect(self.paths.database) as connection:
@@ -1365,6 +1419,7 @@ class ProjectRepository:
         return PostProductionPlan(
             id=row["id"], project_id=row["project_id"],
             source_final_assembly_id=row["source_final_assembly_id"],
+            source_final_assembly_render_attempt_id=row["source_final_assembly_render_attempt_id"] if "source_final_assembly_render_attempt_id" in row.keys() else None,
             subtitle_enabled=bool(row["subtitle_enabled"]),
             audio_mix=AudioMixConfig.model_validate(json.loads(row["audio_mix_json"])),
             created_at=row["created_at"], updated_at=row["updated_at"],
@@ -1402,7 +1457,9 @@ class ProjectRepository:
     def _post_attempt_from_row(row) -> PostRenderAttempt:
         return PostRenderAttempt(
             id=row["id"], project_id=row["project_id"], plan_id=row["plan_id"],
-            source_final_assembly_id=row["source_final_assembly_id"], attempt_number=row["attempt_number"],
+            source_final_assembly_id=row["source_final_assembly_id"],
+            source_final_assembly_render_attempt_id=row["source_final_assembly_render_attempt_id"] if "source_final_assembly_render_attempt_id" in row.keys() else None,
+            attempt_number=row["attempt_number"],
             status=PostRenderAttemptStatus(row["status"]), adapter_name=row["adapter_name"],
             output_relative_path=row["output_relative_path"], metadata_json=json.loads(row["metadata_json"]),
             error_message=row["error_message"], started_at=row["started_at"], finished_at=row["finished_at"],
@@ -1421,8 +1478,8 @@ class ProjectRepository:
             if assembly["project_id"] != plan.project_id:
                 raise ValueError("FinalAssembly 不属于该项目")
             connection.execute(
-                "INSERT INTO post_production_plans(id,project_id,source_final_assembly_id,subtitle_enabled,audio_mix_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-                (plan.id, plan.project_id, plan.source_final_assembly_id, int(plan.subtitle_enabled),
+                "INSERT INTO post_production_plans(id,project_id,source_final_assembly_id,source_final_assembly_render_attempt_id,subtitle_enabled,audio_mix_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (plan.id, plan.project_id, plan.source_final_assembly_id, plan.source_final_assembly_render_attempt_id, int(plan.subtitle_enabled),
                  json.dumps(plan.audio_mix.model_dump(mode="json"), ensure_ascii=False, sort_keys=True), plan.created_at, plan.updated_at),
             )
         return self.get_post_plan(plan.id)
@@ -1449,6 +1506,36 @@ class ProjectRepository:
                 (int(plan.subtitle_enabled), json.dumps(plan.audio_mix.model_dump(mode="json"), ensure_ascii=False, sort_keys=True), plan.updated_at, plan.id),
             )
         return self.get_post_plan(plan.id)
+
+    def pin_post_plan_source_attempt(self, project_id: str, plan_id: str, attempt_id: str) -> PostProductionPlan:
+        """Freeze a plan to one successful FinalAssembly render attempt.
+
+        The write is monotonic: a plan may be pinned once, and a later render
+        attempt can only be selected by creating a new plan explicitly.
+        """
+        with connect(self.paths.database) as connection:
+            plan = connection.execute(
+                "SELECT project_id,source_final_assembly_id,source_final_assembly_render_attempt_id FROM post_production_plans WHERE id=?",
+                (plan_id,),
+            ).fetchone()
+            if plan is None or plan["project_id"] != project_id:
+                raise ValueError("PostProductionPlan 不属于该项目")
+            attempt = connection.execute(
+                "SELECT id,final_assembly_id,status FROM final_assembly_render_attempts WHERE id=?",
+                (attempt_id,),
+            ).fetchone()
+            if attempt is None or attempt["final_assembly_id"] != plan["source_final_assembly_id"]:
+                raise ValueError("FinalAssemblyRenderAttempt 不属于该 PostProductionPlan")
+            if attempt["status"] != "SUCCEEDED":
+                raise ValueError("PostProductionPlan 只能绑定成功的 FinalAssemblyRenderAttempt")
+            existing = plan["source_final_assembly_render_attempt_id"]
+            if existing is not None and existing != attempt_id:
+                raise ValueError("PostProductionPlan 的 source render attempt 已冻结")
+            connection.execute(
+                "UPDATE post_production_plans SET source_final_assembly_render_attempt_id=?,updated_at=? WHERE id=?",
+                (attempt_id, connection.execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')").fetchone()[0], plan_id),
+            )
+        return self.get_post_plan(plan_id)
 
     def create_post_subtitle_track(self, track: SubtitleTrack) -> SubtitleTrack:
         with connect(self.paths.database) as connection:
@@ -1565,12 +1652,12 @@ class ProjectRepository:
 
     def create_post_render_attempt(self, attempt: PostRenderAttempt) -> PostRenderAttempt:
         with connect(self.paths.database) as connection:
-            plan = connection.execute("SELECT project_id,source_final_assembly_id FROM post_production_plans WHERE id=?", (attempt.plan_id,)).fetchone()
-            if plan is None or plan["project_id"] != attempt.project_id or plan["source_final_assembly_id"] != attempt.source_final_assembly_id:
+            plan = connection.execute("SELECT project_id,source_final_assembly_id,source_final_assembly_render_attempt_id FROM post_production_plans WHERE id=?", (attempt.plan_id,)).fetchone()
+            if plan is None or plan["project_id"] != attempt.project_id or plan["source_final_assembly_id"] != attempt.source_final_assembly_id or plan["source_final_assembly_render_attempt_id"] != attempt.source_final_assembly_render_attempt_id:
                 raise ValueError("PostRenderAttempt provenance 不属于该项目/plan")
             connection.execute(
-                "INSERT INTO post_render_attempts(id,project_id,plan_id,source_final_assembly_id,attempt_number,status,adapter_name,output_relative_path,metadata_json,error_message,started_at,finished_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (attempt.id, attempt.project_id, attempt.plan_id, attempt.source_final_assembly_id, attempt.attempt_number, attempt.status.value, attempt.adapter_name, attempt.output_relative_path, json.dumps(attempt.metadata_json, ensure_ascii=False, sort_keys=True), attempt.error_message, attempt.started_at, attempt.finished_at, attempt.created_at),
+                "INSERT INTO post_render_attempts(id,project_id,plan_id,source_final_assembly_id,source_final_assembly_render_attempt_id,attempt_number,status,adapter_name,output_relative_path,metadata_json,error_message,started_at,finished_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (attempt.id, attempt.project_id, attempt.plan_id, attempt.source_final_assembly_id, attempt.source_final_assembly_render_attempt_id, attempt.attempt_number, attempt.status.value, attempt.adapter_name, attempt.output_relative_path, json.dumps(attempt.metadata_json, ensure_ascii=False, sort_keys=True), attempt.error_message, attempt.started_at, attempt.finished_at, attempt.created_at),
             )
         return self.get_post_render_attempt(attempt.id)
 

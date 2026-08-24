@@ -108,6 +108,10 @@ class PostProductionPlan(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     project_id: str = Field(min_length=1, max_length=80)
     source_final_assembly_id: str = Field(min_length=1, max_length=80)
+    # Frozen at plan creation (or at the first render for legacy plans that
+    # predate migration 017).  A later FinalAssembly retry must never silently
+    # replace the media input for this plan.
+    source_final_assembly_render_attempt_id: str | None = Field(default=None, max_length=80)
     subtitle_enabled: bool = True
     audio_mix: AudioMixConfig = Field(default_factory=AudioMixConfig)
     created_at: str = Field(min_length=1, max_length=80)
@@ -121,6 +125,7 @@ class PostRenderAttempt(BaseModel):
     project_id: str = Field(min_length=1, max_length=80)
     plan_id: str = Field(min_length=1, max_length=80)
     source_final_assembly_id: str = Field(min_length=1, max_length=80)
+    source_final_assembly_render_attempt_id: str | None = Field(default=None, max_length=80)
     attempt_number: int = Field(ge=1)
     status: PostRenderAttemptStatus = PostRenderAttemptStatus.PENDING
     adapter_name: str = Field(min_length=1, max_length=120)

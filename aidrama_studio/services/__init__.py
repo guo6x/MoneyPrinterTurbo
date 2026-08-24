@@ -17,6 +17,7 @@ from .final_assembly_runtime import FinalAssemblyRenderService, FinalAssemblyRun
 from .postproduction import FFmpegPostProductionAdapter, PostProductionMediaAdapter, PostProductionService, PostProductionServiceError, PostRenderRequest, PostRenderService
 from .director import DirectorService, DirectorServiceError
 from .producer import ProducerService, ProducerServiceError
+from .current_state import CurrentProductionState, CurrentProductionStateService
 from .vision_qc import VisionQCResult, VisionQCService
 from .provider_readiness import ProviderReadinessService, CapabilityReadiness, ReadinessState
 from .ai_capabilities import (
@@ -75,6 +76,7 @@ __all__ = [
     "FinalAssemblyRuntimeService", "FinalAssemblyRenderService", "FinalAssemblyRuntimeServiceError",
     "PostProductionService", "PostRenderService", "PostProductionServiceError", "PostProductionMediaAdapter", "FFmpegPostProductionAdapter", "PostRenderRequest",
     "DirectorService", "DirectorServiceError", "ProducerService", "ProducerServiceError",
+    "CurrentProductionState", "CurrentProductionStateService",
     "VisionQCResult", "VisionQCService",
     "ProviderReadinessService", "CapabilityReadiness", "ReadinessState",
     "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",
