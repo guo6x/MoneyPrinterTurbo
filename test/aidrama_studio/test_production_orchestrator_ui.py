@@ -29,6 +29,44 @@ def test_director_console_has_required_user_facing_sections():
     assert "生成视频" not in source
 
 
+def test_default_flow_precedes_technical_job_controls():
+    source = Path(page.__file__).read_text(encoding="utf-8")
+    readiness = source.index("_render_readiness_console(readiness)")
+    primary = source.index("_render_primary_action(", readiness)
+    board = source.index("_render_shot_board(", primary)
+    advanced = source.index('st.expander("高级信息 / 调试信息"', board)
+    assert readiness < primary < board < advanced
+
+
+def test_ready_page_keeps_job_controls_collapsed_and_primary_director_action():
+    app = AppTest.from_string(
+        """
+from types import SimpleNamespace
+from aidrama_studio.pages import production as page
+project = SimpleNamespace(id='project-1', title='Ready project')
+class Production:
+    def validate_job_readiness(self, project_id, revision_id=None):
+        return {'ready': True, 'blocked_reasons': [], 'shot_count': 3, 'story_bible_approved': True, 'structured_script_approved': True, 'shot_plan_approved': True, 'character_reference_coverage': '1/1', 'location_reference_coverage': '1/1'}
+    def list_jobs(self, project_id):
+        return []
+    def create_production_job(self, project_id):
+        return SimpleNamespace(id='job-created', status='READY', shot_plan_revision_id='plan')
+class Execution:
+    def __init__(self, **kwargs):
+        pass
+page.current_project_or_stop = lambda: project
+page.ProductionService = Production
+page.ProductionExecutionService = Execution
+page.render()
+"""
+    ).run()
+    assert not app.exception
+    assert any(button.label == "开始整剧制作" and not button.disabled for button in app.button)
+    assert app.expander and app.expander[0].label == "高级信息 / 调试信息"
+    source = Path(page.__file__).read_text(encoding="utf-8")
+    assert 'expanded=bool(st.session_state.get(advanced_key))' in source
+
+
 def test_multishot_board_orders_by_canonical_order_and_renders_statuses():
     app = AppTest.from_string(
         """
@@ -192,6 +230,26 @@ def test_interrupted_primary_action_invokes_resume(monkeypatch):
         Orchestrator(), None, SimpleNamespace(id="project-1"), _job("CANCELLED"), {"ready": True}, {"completed_shots": 2}
     )
     assert calls and calls[0][0][0] == "project-1" and calls[0][0][1] == "job-1"
+
+
+def test_ready_primary_action_creates_job_then_runs_canonical_orchestrator(monkeypatch):
+    calls = []
+    job = _job("READY")
+
+    class Orchestrator:
+        def run_job(self, *args, **kwargs):
+            calls.append(("run", args))
+
+    def ensure_job():
+        calls.append(("create",))
+        return job
+
+    monkeypatch.setattr(page.st, "button", lambda label, **kwargs: label == "开始整剧制作")
+    monkeypatch.setattr(page.st, "rerun", lambda: None)
+    page._render_primary_action(
+        Orchestrator(), None, SimpleNamespace(id="project-1"), None, {"ready": True}, {}, ensure_job=ensure_job
+    )
+    assert calls == [("create",), ("run", ("project-1", "job-1"))]
 
 
 def test_blocked_primary_action_is_disabled(monkeypatch):

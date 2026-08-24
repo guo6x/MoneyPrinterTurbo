@@ -358,11 +358,11 @@ def _render_readiness_console(readiness: Mapping[str, object]) -> None:
     st.markdown("### 制作准备度")
     st.markdown("项目 → 制作准备 → 镜头生产 → QC → 完成")
     status_col, story_col = st.columns(2)
-    status_col.metric("状态", "READY" if ready else "BLOCKED")
-    story_col.metric("Story Bible", "已确认" if _readiness_check(readiness, "story_bible_approved", ("story bible", "story_bible")) else "未确认")
+    status_col.metric("状态", "已就绪" if ready else "未就绪")
+    story_col.metric("故事设定", "已确认" if _readiness_check(readiness, "story_bible_approved", ("story bible", "story_bible")) else "未确认")
     script_col, plan_col = st.columns(2)
-    script_col.metric("Structured Script", "已确认" if _readiness_check(readiness, "structured_script_approved", ("structured script", "script")) else "未确认")
-    plan_col.metric("Shot Plan", "已确认" if _readiness_check(readiness, "shot_plan_approved", ("shot plan", "shot_plan")) else "未确认")
+    script_col.metric("结构化剧本", "已确认" if _readiness_check(readiness, "structured_script_approved", ("structured script", "script")) else "未确认")
+    plan_col.metric("分镜方案", "已确认" if _readiness_check(readiness, "shot_plan_approved", ("shot plan", "shot_plan")) else "未确认")
 
     character_coverage = readiness.get("character_reference_coverage")
     location_coverage = readiness.get("location_reference_coverage")
@@ -551,13 +551,21 @@ class _UnavailableOrchestrator:
     cancel_job = run_job
 
 
-def _orchestrator_action(orchestrator, action: str, project, job) -> None:
+def _orchestrator_action(orchestrator, action: str, project, job=None, *, ensure_job=None) -> None:
     try:
         if action == "start":
+            if job is None:
+                job = ensure_job() if callable(ensure_job) else None
+            if job is None:
+                raise ProductionOrchestratorError("无法创建 ProductionJob")
             orchestrator.run_job(project.id, _value(job, "id"))
         elif action == "resume":
+            if job is None:
+                raise ProductionOrchestratorError("继续制作需要一个已存在的 ProductionJob")
             orchestrator.resume_job(project.id, _value(job, "id"))
         elif action == "cancel":
+            if job is None:
+                raise ProductionOrchestratorError("停止制作需要一个正在运行的 ProductionJob")
             orchestrator.cancel_job(project.id, _value(job, "id"), reason="user")
     except (ProductionOrchestratorError, ProductionServiceError, ProductionExecutionServiceError, NotImplementedError) as exc:
         st.error(f"Production action unavailable: {exc}")
@@ -565,21 +573,21 @@ def _orchestrator_action(orchestrator, action: str, project, job) -> None:
     st.rerun()
 
 
-def _render_primary_action(orchestrator, production_service, project, job, readiness, progress) -> None:
-    status = _job_status(job)
+def _render_primary_action(orchestrator, production_service, project, job, readiness, progress, *, ensure_job=None) -> None:
+    status = _job_status(job) if job is not None else ("READY" if readiness.get("ready") else "DRAFT")
     ready = bool(readiness.get("ready"))
     if not ready:
-        st.button("开始整剧制作", type="primary", disabled=True, key=f"start-blocked-{_value(job, 'id')}")
+        st.button("开始整剧制作", type="primary", disabled=True, key=f"start-blocked-{project.id}")
         return
     if status in {"QUEUED", "RUNNING"}:
         cols = st.columns(2)
-        if cols[0].button("刷新制作状态", key=f"refresh-job-{_value(job, 'id')}"):
+        if cols[0].button("刷新制作状态", key=f"refresh-job-{_value(job, 'id', project.id)}"):
             try:
                 progress = orchestrator.get_job_progress(project.id, _value(job, "id"))
             except Exception:
                 pass
             st.rerun()
-        if cols[1].button("停止制作", key=f"cancel-job-{_value(job, 'id')}"):
+        if cols[1].button("停止制作", key=f"cancel-job-{_value(job, 'id', project.id)}"):
             _orchestrator_action(orchestrator, "cancel", project, job)
         return
     if status == "SUCCEEDED":
@@ -589,8 +597,32 @@ def _render_primary_action(orchestrator, production_service, project, job, readi
         st.error("制作失败，当前不会自动重新生成或重试。请查看失败镜头与高级信息。")
         return
     label = "继续制作" if status == "CANCELLED" or int(progress.get("completed_shots", 0) or 0) > 0 else "开始整剧制作"
-    if st.button(label, type="primary", key=f"primary-production-{_value(job, 'id')}"):
-        _orchestrator_action(orchestrator, "resume" if label == "继续制作" else "start", project, job)
+    if st.button(label, type="primary", key=f"primary-production-{_value(job, 'id', project.id)}"):
+        _orchestrator_action(
+            orchestrator,
+            "resume" if label == "继续制作" else "start",
+            project,
+            job,
+            ensure_job=ensure_job,
+        )
+
+
+def _select_default_job(project_id: str, jobs: list[object]):
+    """Choose an active/latest job without making its identity part of UX."""
+    if not jobs:
+        return None
+    selected_id = st.session_state.get(f"production-job-select-{project_id}")
+    if selected_id:
+        selected = next((job for job in jobs if str(_value(job, "id")) == str(selected_id)), None)
+        if selected is not None:
+            return selected
+    active = [job for job in jobs if _job_status(job) in {"QUEUED", "RUNNING"}]
+    return active[0] if active else jobs[-1]
+
+
+def _render_empty_shot_board(readiness: Mapping[str, object]) -> None:
+    st.markdown("### 镜头生产")
+    st.caption(f"总镜头 · {int(readiness.get('shot_count') or 0)} · 制作开始后将显示每个镜头的进度、QC 与人审状态。")
 
 
 def render() -> None:
@@ -610,59 +642,78 @@ def render() -> None:
     # Legacy label retained for discoverability: Production Readiness Check.
     _render_readiness_console(readiness)
 
-    st.markdown("## Production Jobs")
-    if st.button(
-        "Create Production Job",
-        type="primary",
-        disabled=not bool(readiness.get("ready")),
-        key=f"create-production-job-{project.id}",
-    ):
-        _create_job(production_service, project)
-
-    if not jobs:
-        st.info("当前项目还没有 Production Job。")
-        return
-
-    job_options = {str(_value(job, "id")): job for job in jobs}
-    selected_job_id = st.selectbox(
-        "选择 Production Job",
-        list(job_options),
-        key=f"production-job-select-{project.id}",
-        format_func=lambda job_id: f"{_status_value(job_options[job_id])} · {job_id[:10]}",
-    )
-    selected_job = job_options[selected_job_id]
+    selected_job = _select_default_job(project.id, jobs)
+    job_readiness = readiness
     try:
-        job_readiness = production_service.validate_job_readiness(project.id, _value(selected_job, "shot_plan_revision_id"))
-        # Materialize the canonical ProductionShot rows through the service so
-        # a READY job has a visible board before the first runtime starts. This
-        # is idempotent and does not move orchestration decisions into the UI.
-        ensure_shots = getattr(production_service, "create_production_shots", None)
-        if bool(job_readiness.get("ready")) and callable(ensure_shots):
-            ensure_shots(project.id, _value(selected_job, "id"))
-        if hasattr(production_service, "repository"):
+        if selected_job is not None:
+            job_readiness = production_service.validate_job_readiness(project.id, _value(selected_job, "shot_plan_revision_id"))
+            # Materialize canonical ProductionShot rows through the service so
+            # a READY job has a visible board before the first runtime starts.
+            ensure_shots = getattr(production_service, "create_production_shots", None)
+            if bool(job_readiness.get("ready")) and callable(ensure_shots):
+                ensure_shots(project.id, _value(selected_job, "id"))
+        if selected_job is not None and hasattr(production_service, "repository"):
             progress = _make_orchestrator(production_service, execution_service, qc_service).get_job_progress(project.id, selected_job.id)
         else:
-            progress = {"total_shots": job_readiness.get("shot_count", 0), "completed_shots": 0, "percent_complete": 0}
+            progress = {
+                "total_shots": job_readiness.get("shot_count", 0),
+                "completed_shots": 0,
+                "failed_shots": 0,
+                "pending_shots": job_readiness.get("shot_count", 0),
+                "percent_complete": 0,
+                "current_shot_id": None,
+            }
     except (ProductionServiceError, ProductionExecutionServiceError) as exc:
-        progress = {"total_shots": job_readiness.get("shot_count", 0), "completed_shots": 0, "percent_complete": 0}
-    _render_job_row(selected_job, job_readiness)
+        st.warning(f"制作进度暂不可用：{exc}")
+        progress = {"total_shots": job_readiness.get("shot_count", 0), "completed_shots": 0, "failed_shots": 0, "pending_shots": job_readiness.get("shot_count", 0), "percent_complete": 0, "current_shot_id": None}
 
-    # Orchestration is intentionally kept out of this page.  Construction is
-    # cheap and no runtime is submitted until the explicit primary CTA.
+    # Orchestration remains canonical; the page only supplies an existing job
+    # or asks ProductionService to create one at the moment of the CTA.
     orchestrator = _make_orchestrator(production_service, execution_service, qc_service) if hasattr(production_service, "repository") else _UnavailableOrchestrator()
-    _render_primary_action(orchestrator, production_service, project, selected_job, job_readiness, progress)
-    try:
-        _render_shot_board(production_service, execution_service, qc_service, project, selected_job, progress)
-    except (ProductionServiceError, ProductionExecutionServiceError) as exc:
-        st.warning(f"镜头 Board 暂不可用：{exc}")
+
+    def ensure_job():
+        if selected_job is not None:
+            return selected_job
+        return production_service.create_production_job(project.id)
+
+    _render_primary_action(orchestrator, production_service, project, selected_job, job_readiness, progress, ensure_job=ensure_job)
+    if selected_job is not None:
+        try:
+            _render_shot_board(production_service, execution_service, qc_service, project, selected_job, progress)
+        except (ProductionServiceError, ProductionExecutionServiceError) as exc:
+            st.warning(f"镜头生产暂不可用：{exc}")
+    else:
+        _render_empty_shot_board(job_readiness)
 
     # Keep low-level IDs, events and artifact metadata available without
     # overwhelming the default director view.
-    with st.expander("高级信息 / 调试信息", expanded=bool(st.session_state.get(f"production-advanced-{selected_job.id}"))):
+    advanced_key = f"production-advanced-{project.id}"
+    with st.expander("高级信息 / 调试信息", expanded=bool(st.session_state.get(advanced_key))):
         st.caption("Submit Execution is delegated to ProductionOrchestrator; execution details remain available here.")
-        st.caption(f"ProductionJob ID · {selected_job.id}")
+        st.markdown("#### Production Jobs")
+        if st.button(
+            "Create Production Job",
+            disabled=not bool(readiness.get("ready")),
+            key=f"create-production-job-{project.id}",
+        ):
+            _create_job(production_service, project)
+        if not jobs:
+            st.info("当前项目还没有 Production Job。开始整剧制作会自动创建。")
+            return
+
+        job_options = {str(_value(job, "id")): job for job in jobs}
+        selected_job_id = st.selectbox(
+            "选择 Production Job",
+            list(job_options),
+            index=list(job_options).index(str(_value(selected_job, "id"))) if selected_job is not None else 0,
+            key=f"production-job-select-{project.id}",
+            format_func=lambda job_id: f"{_status_value(job_options[job_id])} · {job_id[:10]}",
+        )
+        diagnostic_job = job_options[selected_job_id]
+        _render_job_row(diagnostic_job, production_service.validate_job_readiness(project.id, _value(diagnostic_job, "shot_plan_revision_id")))
+        st.caption(f"ProductionJob ID · {diagnostic_job.id}")
         try:
-            executions = execution_service.list_executions(project.id, selected_job.id)
+            executions = execution_service.list_executions(project.id, diagnostic_job.id)
         except ProductionExecutionServiceError as exc:
             st.warning(str(exc))
             executions = []
@@ -673,7 +724,7 @@ def render() -> None:
             selected_execution_id = st.selectbox(
                 "选择 Execution",
                 list(execution_options),
-                key=f"production-execution-select-{selected_job.id}",
+                key=f"production-execution-select-{diagnostic_job.id}",
                 format_func=lambda execution_id: f"{_status_value(execution_options[execution_id])} · {execution_id[:10]}",
             )
             st.caption(f"Execution ID · {selected_execution_id}")
