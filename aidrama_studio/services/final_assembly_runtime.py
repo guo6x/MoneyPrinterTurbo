@@ -264,6 +264,13 @@ class FinalAssemblyRuntimeService:
             raise FinalAssemblyRuntimeServiceError("final output 缺少 video stream")
         if not isinstance(metadata.get("size_bytes"), int) or int(metadata["size_bytes"]) <= 0:
             raise FinalAssemblyRuntimeServiceError("final output 为空")
+        if (
+            not isinstance(metadata.get("width"), int)
+            or not isinstance(metadata.get("height"), int)
+            or int(metadata["width"]) <= 0
+            or int(metadata["height"]) <= 0
+        ):
+            raise FinalAssemblyRuntimeServiceError("final output dimensions 无效")
         actual = FinalAssemblyRuntimeService._duration(metadata)
         if actual <= 0:
             raise FinalAssemblyRuntimeServiceError("final output duration 无效")
