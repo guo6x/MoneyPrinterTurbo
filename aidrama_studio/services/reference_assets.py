@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from aidrama_studio.domain import (
@@ -94,3 +95,31 @@ class ReferenceAssetService:
     def list_bindings(self, project_id: str, version_id: str | None = None):
         self._require_project(project_id)
         return self.repository.list_reference_bindings(project_id, asset_version_id=version_id)
+
+    def list_assets(self, project_id: str) -> list[ReferenceAsset]:
+        self._require_project(project_id)
+        return self.repository.list_reference_assets(project_id)
+
+    def approved_story_revision(self, project_id: str):
+        self._require_project(project_id)
+        revisions = self.repository.list_story_revisions(project_id)
+        return next((revision for revision in revisions if revision["status"].value == "APPROVED"), None)
+
+    def find_asset_for_binding(self, project_id: str, binding_type: ReferenceBindingType, binding_id: str) -> ReferenceAsset | None:
+        for asset in self.list_assets(project_id):
+            for version in self.repository.list_reference_asset_versions(asset.id):
+                if any(binding.binding_type is binding_type and binding.binding_id == binding_id for binding in self.repository.list_reference_bindings(project_id, asset_version_id=version.id)):
+                    return asset
+        return None
+
+    def resolve_version_path(self, project_id: str, version_id: str) -> Path:
+        """Resolve an imported image inside the project's isolated storage root."""
+        self._require_project(project_id)
+        version = self.repository.get_reference_asset_version(version_id)
+        if version is None or version.project_id != project_id:
+            raise ReferenceAssetServiceError("version 不属于该项目")
+        project_root = (self.repository.paths.projects / project_id).resolve()
+        image_path = (project_root / version.storage_path).resolve()
+        if project_root not in image_path.parents:
+            raise ReferenceAssetServiceError("Reference image 路径不属于该项目")
+        return image_path
