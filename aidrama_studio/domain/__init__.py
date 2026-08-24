@@ -10,7 +10,7 @@ from .production import ProductionAttempt, ProductionAttemptStatus, ProductionJo
 from .production_execution import ProductionArtifact, ProductionEvent, ProductionEventType, ProductionExecution, ProductionExecutionStatus
 from .production_qc import ProductionQCMetric, ProductionQCMetricStatus, ProductionQCResult, ProductionQCStatus, ProductionReview, ProductionReviewDecision
 from .production_snapshot import FrozenDict, ProductionInputSnapshot
-from .final_assembly import FinalAssembly, FinalAssemblyItem, FinalAssemblyManifest, FinalAssemblyReadiness, FinalAssemblySource, FinalAssemblyStatus
+from .final_assembly import FinalAssembly, FinalAssemblyItem, FinalAssemblyManifest, FinalAssemblyReadiness, FinalAssemblySource, FinalAssemblyStatus, FinalAssemblyRenderAttempt, FinalAssemblyRenderAttemptStatus
 
 __all__ = [
     "AspectRatio",
@@ -30,4 +30,5 @@ __all__ = [
     "ProductionQCResult", "ProductionQCStatus", "ProductionQCMetric", "ProductionQCMetricStatus", "ProductionReview", "ProductionReviewDecision",
     "FrozenDict", "ProductionInputSnapshot",
     "FinalAssembly", "FinalAssemblyItem", "FinalAssemblyManifest", "FinalAssemblyReadiness", "FinalAssemblySource", "FinalAssemblyStatus",
+    "FinalAssemblyRenderAttempt", "FinalAssemblyRenderAttemptStatus",
 ]

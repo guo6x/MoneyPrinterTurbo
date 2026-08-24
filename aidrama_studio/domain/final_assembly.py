@@ -23,6 +23,16 @@ class FinalAssemblyStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class FinalAssemblyRenderAttemptStatus(str, Enum):
+    """Durable state for one fallible final-render attempt."""
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
 class FinalAssembly(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -125,3 +135,25 @@ class FinalAssemblyReadiness(BaseModel):
         if key == "ready":
             return self.ready
         return getattr(self, key, default)
+
+
+class FinalAssemblyRenderAttempt(BaseModel):
+    """Append-only history record for a final assembly render.
+
+    The manifest remains the source of truth for inputs.  This record only
+    describes the runtime attempt and the immutable output it produced.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=64)
+    final_assembly_id: str = Field(min_length=1, max_length=64)
+    attempt_number: int = Field(ge=1)
+    status: FinalAssemblyRenderAttemptStatus = FinalAssemblyRenderAttemptStatus.PENDING
+    adapter_name: str = Field(min_length=1, max_length=120)
+    output_relative_path: str | None = Field(default=None, max_length=1000)
+    metadata_json: dict[str, object] = Field(default_factory=dict)
+    error_message: str | None = Field(default=None, max_length=4000)
+    started_at: str | None = Field(default=None, max_length=80)
+    finished_at: str | None = Field(default=None, max_length=80)
+    created_at: str = Field(min_length=1, max_length=80)

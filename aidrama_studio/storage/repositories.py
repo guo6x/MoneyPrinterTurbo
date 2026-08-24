@@ -19,7 +19,13 @@ from aidrama_studio.domain.production import ProductionAttempt, ProductionAttemp
 from aidrama_studio.domain.production_execution import ProductionArtifact, ProductionEvent, ProductionEventType, ProductionExecution, ProductionExecutionStatus
 from aidrama_studio.domain.production_snapshot import ProductionInputSnapshot
 from aidrama_studio.domain.production_qc import ProductionQCMetric, ProductionQCResult, ProductionReview
-from aidrama_studio.domain.final_assembly import FinalAssembly, FinalAssemblyItem, FinalAssemblyStatus
+from aidrama_studio.domain.final_assembly import (
+    FinalAssembly,
+    FinalAssemblyItem,
+    FinalAssemblyStatus,
+    FinalAssemblyRenderAttempt,
+    FinalAssemblyRenderAttemptStatus,
+)
 
 from .database import DatabasePaths, connect, initialize_database
 
@@ -972,14 +978,121 @@ class ProjectRepository:
         current = self.get_final_assembly(assembly_id)
         if current is None:
             raise KeyError(f"FinalAssembly 不存在: {assembly_id}")
-        if current.status is FinalAssemblyStatus.READY and status is not FinalAssemblyStatus.READY:
-            raise ValueError("READY FinalAssembly 不可修改")
+        # READY item rows stay immutable, while the aggregate lifecycle may
+        # advance through ASSEMBLING/SUCCEEDED/FAILED/CANCELLED.  Once frozen,
+        # an assembly can never be reverted to DRAFT; a retry may re-enter
+        # ASSEMBLING without changing any item row.
+        if current.status is FinalAssemblyStatus.DRAFT and status not in {
+            FinalAssemblyStatus.DRAFT,
+            FinalAssemblyStatus.READY,
+        }:
+            raise ValueError("DRAFT FinalAssembly 必须先 freeze")
+        if current.status is not FinalAssemblyStatus.DRAFT and status is FinalAssemblyStatus.DRAFT:
+            raise ValueError("已 freeze 的 FinalAssembly 不可回退到 DRAFT")
         with connect(self.paths.database) as connection:
             connection.execute(
                 "UPDATE final_assemblies SET status=?,updated_at=? WHERE id=?",
                 (status.value, updated_at, assembly_id),
             )
         return self.get_final_assembly(assembly_id)
+
+    @staticmethod
+    def _final_assembly_render_attempt_from_row(row) -> FinalAssemblyRenderAttempt:
+        return FinalAssemblyRenderAttempt(
+            id=row["id"],
+            final_assembly_id=row["final_assembly_id"],
+            attempt_number=row["attempt_number"],
+            status=row["status"],
+            adapter_name=row["adapter_name"],
+            output_relative_path=row["output_relative_path"],
+            metadata_json=json.loads(row["metadata_json"]),
+            error_message=row["error_message"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            created_at=row["created_at"],
+        )
+
+    def create_final_assembly_render_attempt(self, attempt: FinalAssemblyRenderAttempt) -> FinalAssemblyRenderAttempt:
+        with connect(self.paths.database) as connection:
+            assembly = connection.execute(
+                "SELECT project_id FROM final_assemblies WHERE id=?", (attempt.final_assembly_id,)
+            ).fetchone()
+            if assembly is None:
+                raise KeyError(f"FinalAssembly 不存在: {attempt.final_assembly_id}")
+            connection.execute(
+                """
+                INSERT INTO final_assembly_render_attempts(
+                    id,final_assembly_id,attempt_number,status,adapter_name,
+                    output_relative_path,metadata_json,error_message,started_at,
+                    finished_at,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    attempt.id,
+                    attempt.final_assembly_id,
+                    attempt.attempt_number,
+                    attempt.status.value,
+                    attempt.adapter_name,
+                    attempt.output_relative_path,
+                    json.dumps(attempt.metadata_json, ensure_ascii=False, sort_keys=True),
+                    attempt.error_message,
+                    attempt.started_at,
+                    attempt.finished_at,
+                    attempt.created_at,
+                ),
+            )
+        return self.get_final_assembly_render_attempt(attempt.id)
+
+    def get_final_assembly_render_attempt(self, attempt_id: str) -> FinalAssemblyRenderAttempt | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM final_assembly_render_attempts WHERE id=?", (attempt_id,)
+            ).fetchone()
+        return self._final_assembly_render_attempt_from_row(row) if row else None
+
+    def list_final_assembly_render_attempts(self, assembly_id: str) -> list[FinalAssemblyRenderAttempt]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(
+                "SELECT * FROM final_assembly_render_attempts WHERE final_assembly_id=? "
+                "ORDER BY attempt_number,id", (assembly_id,)
+            ).fetchall()
+        return [self._final_assembly_render_attempt_from_row(row) for row in rows]
+
+    def update_final_assembly_render_attempt(
+        self,
+        attempt_id: str,
+        *,
+        status: FinalAssemblyRenderAttemptStatus,
+        output_relative_path: str | None = None,
+        metadata_json: dict[str, object] | None = None,
+        error_message: str | None = None,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+    ) -> FinalAssemblyRenderAttempt:
+        current = self.get_final_assembly_render_attempt(attempt_id)
+        if current is None:
+            raise KeyError(f"FinalAssemblyRenderAttempt 不存在: {attempt_id}")
+        with connect(self.paths.database) as connection:
+            connection.execute(
+                """
+                UPDATE final_assembly_render_attempts
+                SET status=?, output_relative_path=COALESCE(?,output_relative_path),
+                    metadata_json=?, error_message=COALESCE(?,error_message),
+                    started_at=COALESCE(?,started_at), finished_at=COALESCE(?,finished_at)
+                WHERE id=?
+                """,
+                (
+                    status.value,
+                    output_relative_path,
+                    json.dumps(metadata_json if metadata_json is not None else current.metadata_json,
+                               ensure_ascii=False, sort_keys=True),
+                    error_message,
+                    started_at,
+                    finished_at,
+                    attempt_id,
+                ),
+            )
+        return self.get_final_assembly_render_attempt(attempt_id)
 
     def create_final_assembly_item(self, item: FinalAssemblyItem) -> FinalAssemblyItem:
         """Insert one item after validating every provenance edge.

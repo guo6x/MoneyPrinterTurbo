@@ -349,6 +349,33 @@ def _migration_010_final_assembly_manifest(connection: sqlite3.Connection) -> No
     connection.execute("CREATE INDEX idx_final_assembly_items_sources ON final_assembly_items(production_shot_id, production_execution_id)")
 
 
+def _migration_011_final_assembly_render_attempts(connection: sqlite3.Connection) -> None:
+    """Keep fallible render history separate from the immutable manifest."""
+    connection.execute(
+        """
+        CREATE TABLE final_assembly_render_attempts (
+            id TEXT PRIMARY KEY,
+            final_assembly_id TEXT NOT NULL,
+            attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+            status TEXT NOT NULL CHECK (status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
+            adapter_name TEXT NOT NULL,
+            output_relative_path TEXT,
+            metadata_json TEXT NOT NULL,
+            error_message TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(final_assembly_id, attempt_number),
+            FOREIGN KEY(final_assembly_id) REFERENCES final_assemblies(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_final_assembly_render_attempts_assembly "
+        "ON final_assembly_render_attempts(final_assembly_id, attempt_number)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -360,6 +387,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (8, _migration_008_production_input_snapshots),
     (9, _migration_009_production_qc),
     (10, _migration_010_final_assembly_manifest),
+    (11, _migration_011_final_assembly_render_attempts),
 )
 
 
