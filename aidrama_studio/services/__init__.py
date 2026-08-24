@@ -20,6 +20,10 @@ from .producer import ProducerService, ProducerServiceError
 from .runtime_foundation import AIInvocationService, GenerationBriefCompiler, OutputProfileService, RuntimeFoundationError, RuntimePlanService
 from .creative_intake import CreativeIntakeError, CreativeIntakeService, DocumentIngestionService, IntakeAnalyzer, SourcePackService
 from .reference_profiles import ReferenceProfileService, ReferenceProfileServiceError
+from .provider_profiles import DurationPlan, ProviderProfileError, ProviderProfileService, ReferenceTrace
+from .background_runner import BackgroundProductionRunner, BackgroundRunnerError, SingleInstanceGuard
+from .credentials import CredentialReadinessService, CredentialStoreError, WindowsCredentialStore
+from .project_archive import ProjectArchiveError, ProjectArchiveService
 from .current_state import CurrentProductionState, CurrentProductionStateService
 from .vision_qc import VisionQCResult, VisionQCService
 from .provider_readiness import ProviderReadinessService, CapabilityReadiness, ReadinessState
@@ -32,12 +36,15 @@ from .ai_capabilities import (
     ImageGenerationProvider,
     VideoGenerationProvider,
     VisionAnalysisProvider,
+    TTSProvider,
+    TTSResult,
     ImageCandidate,
     VisionAnalysis,
     MPTLLMProvider,
     RuntimeVideoProvider,
     UnavailableImageProvider,
     UnavailableVisionProvider,
+    UnavailableTTSProvider,
     DeterministicMockVisionProvider,
     default_capability_registry,
 )
@@ -58,6 +65,10 @@ from .adapters import (
     WanReferenceResolver,
     WanReferenceSelection,
     WanVideoClient,
+    SeedanceAdapterError,
+    SeedanceInputMapper,
+    SeedanceProductionAdapter,
+    SeedanceProviderConfig,
 )
 
 __all__ = [
@@ -83,16 +94,21 @@ __all__ = [
     "OutputProfileService", "GenerationBriefCompiler", "RuntimePlanService", "AIInvocationService", "RuntimeFoundationError",
     "CreativeIntakeService", "CreativeIntakeError", "SourcePackService", "DocumentIngestionService", "IntakeAnalyzer",
     "ReferenceProfileService", "ReferenceProfileServiceError",
+    "ProviderProfileService", "ProviderProfileError", "DurationPlan", "ReferenceTrace",
+    "BackgroundProductionRunner", "BackgroundRunnerError", "SingleInstanceGuard",
+    "WindowsCredentialStore", "CredentialStoreError", "CredentialReadinessService",
+    "ProjectArchiveService", "ProjectArchiveError",
     "VisionQCResult", "VisionQCService",
     "ProviderReadinessService", "CapabilityReadiness", "ReadinessState",
     "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",
-    "LLMProvider", "ImageGenerationProvider", "VideoGenerationProvider", "VisionAnalysisProvider",
-    "ImageCandidate", "VisionAnalysis", "MPTLLMProvider", "RuntimeVideoProvider",
-    "UnavailableImageProvider", "UnavailableVisionProvider", "DeterministicMockVisionProvider",
+    "LLMProvider", "ImageGenerationProvider", "VideoGenerationProvider", "VisionAnalysisProvider", "TTSProvider",
+    "ImageCandidate", "VisionAnalysis", "TTSResult", "MPTLLMProvider", "RuntimeVideoProvider",
+    "UnavailableImageProvider", "UnavailableVisionProvider", "UnavailableTTSProvider", "DeterministicMockVisionProvider",
     "default_capability_registry",
     "ProductionOrchestrator", "ProductionOrchestratorError",
     "ProductionRuntimeAdapter", "RuntimeSubmission", "RuntimeEvent", "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
     "WanAdapterError", "WanInputMapper", "WanProductionAdapter", "WanPromptMapper",
     "WanProviderConfig", "WanProviderHTTPError", "WanReferenceResolver",
     "WanReferenceSelection", "WanVideoClient",
+    "SeedanceAdapterError", "SeedanceInputMapper", "SeedanceProductionAdapter", "SeedanceProviderConfig",
 ]

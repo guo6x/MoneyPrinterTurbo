@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from aidrama_studio.domain import ProductionJob, ProductionShot, ProductionShotStatus
+from aidrama_studio.domain import ProductionJob, ProductionShot, ProductionShotStatus, ProjectStatus, ShotRevisionStatus, ScriptRevisionStatus, StoryRevisionStatus
 from aidrama_studio.storage.repositories import ProjectRepository
 
 from .final_assembly import FinalAssemblyService, FinalAssemblyServiceError
@@ -98,6 +98,26 @@ class CurrentProductionStateService:
             final_readiness=final_readiness,
             post_production_ready=post_ready,
         )
+
+    def workflow_stage(self, project_id: str) -> ProjectStatus:
+        """Derive product progress; it is not a user-editable competing truth."""
+        if self.repository.get_project(project_id) is None:
+            raise ValueError("项目不存在")
+        current_job = self.select_job(project_id)
+        if current_job is not None and self._post_ready(project_id, current_job.id):
+            return ProjectStatus.COMPLETED
+        state = self.derive(project_id)
+        if state.job is not None and state.production_complete:
+            if state.final_readiness is not None and state.final_readiness.ready:
+                return ProjectStatus.POSTPRODUCTION
+            return ProjectStatus.REVIEW
+        if state.job is not None:
+            return ProjectStatus.PRODUCTION
+        if self.repository.list_shot_revisions(project_id):
+            return ProjectStatus.PREPRODUCTION
+        if self.repository.list_script_revisions(project_id):
+            return ProjectStatus.STORY
+        return ProjectStatus.DRAFT
 
     def _post_ready(self, project_id: str, current_job_id: str) -> bool:
         """Require post output to belong to the current production chain.

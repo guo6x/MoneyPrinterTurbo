@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -196,9 +197,14 @@ class ProductionQCService:
 
         is_video = media_type.startswith("video/") or Path(artifact.path).suffix.lower() in {".mp4", ".webm", ".mov", ".mkv"}
         if is_video:
-            checks.extend(self._video_checks(metadata))
-            checks.extend(self._visual_checks(metadata))
-            checks.append(self._audio_check(metadata))
+            # Media facts come from the physical bytes. Metadata remains
+            # traceability/request context only and cannot turn a corrupt
+            # file into a QC pass.
+            probed = self._probe_video(artifact_path) if exists and size > 0 else {}
+            checks.extend(self._video_checks(probed))
+            checks.extend(self._visual_checks(artifact_path, probed))
+            audio_required = metadata.get("audio_required") is True
+            checks.append(self._audio_check(probed, required=audio_required))
         else:
             checks.extend([
                 self._skipped("video_duration", "VIDEO", "非视频 artifact，跳过"),
@@ -224,24 +230,57 @@ class ProductionQCService:
             self._check("video_codec", "VIDEO", codec_ok, {"codec": codec or ""}, "codec metadata 有效" if codec_ok else "codec metadata 缺失"),
         ]
 
-    def _visual_checks(self, metadata: Mapping[str, object]) -> list[dict[str, object]]:
-        black = self._flagged(metadata, "black_frame_detected", "black_frame", "black_frames", "black_frame_ratio")
-        static = self._flagged(metadata, "static_frame_detected", "static_frame", "static_frames", "static_frame_ratio")
-        motion_score = metadata.get("motion_score")
-        if isinstance(motion_score, (int, float)) and not isinstance(motion_score, bool) and motion_score <= 0:
-            static = True
+    def _visual_checks(self, path: Path, metadata: Mapping[str, object]) -> list[dict[str, object]]:
+        if not metadata.get("video_stream"):
+            return [
+                self._check("black_frame", "VISUAL", False, {"probe": "unavailable"}, "无法从真实媒体探测黑帧"),
+                self._check("static_frame", "VISUAL", False, {"probe": "unavailable"}, "无法从真实媒体探测静帧"),
+            ]
+        black = bool(metadata.get("black_frame_detected"))
+        static = bool(metadata.get("static_frame_detected"))
         return [
             self._check("black_frame", "VISUAL", not black, {"detected": black}, "未检测到黑帧" if not black else "检测到黑帧"),
             self._check("static_frame", "VISUAL", not static, {"detected": static}, "未检测到静帧" if not static else "检测到静帧"),
         ]
 
     @staticmethod
-    def _audio_check(metadata: Mapping[str, object]) -> dict[str, object]:
+    def _audio_check(metadata: Mapping[str, object], *, required: bool = False) -> dict[str, object]:
         value = metadata.get("audio_stream", metadata.get("has_audio", metadata.get("audio_streams")))
         passed = value is True or (isinstance(value, Mapping) and bool(value.get("present"))) or (
             isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
         )
+        if not required:
+            return ProductionQCService._skipped("audio_stream", "AUDIO", "当前镜头 audio strategy 不要求独立 audio stream")
         return ProductionQCService._check("audio_stream", "AUDIO", passed, {"present": bool(value) if value is not None else False}, "audio stream 存在" if passed else "audio stream 缺失")
+
+    @classmethod
+    def _probe_video(cls, path: Path) -> dict[str, object]:
+        """Probe physical media with FFmpeg, never by trusting DB metadata."""
+        try:
+            from app.utils.utils import get_ffmpeg_binary
+
+            binary = get_ffmpeg_binary()
+            completed = subprocess.run(
+                [binary, "-hide_banner", "-i", str(path), "-vf", "blackdetect=d=0:pix_th=0.98,freezedetect=n=0.003:d=0.5", "-an", "-f", "null", "-"],
+                capture_output=True, text=True, check=False, timeout=90,
+            )
+        except Exception:
+            return {}
+        text = f"{completed.stderr or ''}\n{completed.stdout or ''}"
+        duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+        stream_match = re.search(r"Video:\s*([^,\s]+).*?(\d{2,5})x(\d{2,5})", text, re.IGNORECASE)
+        if not duration_match or not stream_match:
+            return {}
+        hours, minutes, seconds = duration_match.groups()
+        codec, width, height = stream_match.groups()
+        return {
+            "duration_seconds": int(hours) * 3600 + int(minutes) * 60 + float(seconds),
+            "width": int(width), "height": int(height), "resolution": f"{width}x{height}",
+            "codec": codec, "video_stream": True,
+            "audio_stream": bool(re.search(r"Stream #\S+.*?Audio:", text, re.IGNORECASE)),
+            "black_frame_detected": bool(re.search(r"black_start", text)),
+            "static_frame_detected": bool(re.search(r"freeze_start", text)),
+        }
 
     @staticmethod
     def _traceability_check(execution, artifact: ProductionArtifact, metadata: Mapping[str, object]) -> dict[str, object]:

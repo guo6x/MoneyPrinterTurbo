@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from aidrama_studio.domain import DirectorDecisionStatus, DirectorGoalKind, DirectorGoalStatus, DirectorSessionStatus, ProductionJobStatus, ProductionQCStatus, ProductionReviewDecision, ProductionShotStatus
+from aidrama_studio.domain import DirectorDecisionStatus, DirectorGoalKind, DirectorGoalStatus, DirectorSessionStatus, ProductionJobStatus, ProductionQCResult, ProductionQCStatus, ProductionReviewDecision, ProductionShotStatus
 from aidrama_studio.services import (
     CapabilityKind,
     CapabilityRegistry,
@@ -90,16 +90,23 @@ def test_director_approval_rejection_resume_and_append_only_history(context):
     assert service.get_session(project.id, session.id).status is DirectorSessionStatus.BLOCKED
     approved = service.approve_decision(project.id, first.id)
     assert approved.status is DirectorDecisionStatus.APPROVED
-    assert service.get_session(project.id, session.id).status is DirectorSessionStatus.ACTIVE
+    # Approval is review-only.  The canonical action has not happened yet,
+    # so the Director remains blocked until the user performs it and calls
+    # complete_decision() after canonical truth is re-inspected.
+    assert service.get_session(project.id, session.id).status is DirectorSessionStatus.BLOCKED
     cold = DirectorService(ProjectRepository(repository.paths))
     assert cold.repository.get_director_decision(first.id).status is DirectorDecisionStatus.APPROVED
-    second = cold.resume(project.id, session.id)
-    assert second.id != first.id
+    with pytest.raises(DirectorServiceError, match="等待人工处理"):
+        cold.resume(project.id, session.id)
     assert cold.repository.get_director_decision(first.id).recommendation == first.recommendation
     assert len(cold.list_decision_events(project.id, first.id)) == 1
+    # Rejection of a fresh recommendation is what unblocks a new bounded
+    # segment; it does not mutate the original recommendation.
+    second_session = cold.start_session(project.id, DirectorGoalKind.MAKE_PRODUCTION_READY, max_steps=1)
+    second = cold.run(project.id, second_session.id)
     rejected = cold.reject_decision(project.id, second.id)
     assert rejected.status is DirectorDecisionStatus.REJECTED
-    assert cold.get_session(project.id, session.id).status is DirectorSessionStatus.ACTIVE
+    assert cold.get_session(project.id, second_session.id).status is DirectorSessionStatus.ACTIVE
     assert cold.list_decision_events(project.id, second.id)[0].metadata["reason"] == ""
 
 
@@ -122,10 +129,10 @@ def test_director_block_gate_and_max_steps_require_explicit_resume_segment(conte
     with pytest.raises(DirectorServiceError, match="等待人工处理"):
         service.resume(project.id, session.id)
     service.approve_decision(project.id, first.id)
-    with pytest.raises(DirectorServiceError, match="max_steps"):
+    with pytest.raises(DirectorServiceError):
         service.run(project.id, session.id)
-    second = service.resume(project.id, session.id)
-    assert second.id != first.id
+    with pytest.raises(DirectorServiceError):
+        service.resume(project.id, session.id)
 
 
 @pytest.mark.parametrize(
@@ -179,9 +186,21 @@ def test_producer_qc_retry_recommendation_budget_is_durable(context):
     service = ProducerService(repository)
     assert service.recommendations(project.id, job.id)[0].action == "RETRY_QC"
     assert service.recommendations(project.id, job.id)[0].action == "RETRY_QC"
+    # Persist two actual retry results; only now is the retry budget consumed.
+    for index in range(2):
+        repository.create_production_qc_result(
+            ProductionQCResult(
+                id=f"qc-retry-{index}",
+                project_id=project.id,
+                execution_id=repository.list_production_executions(job.id)[0].id,
+                artifact_id=repository.list_production_artifacts(repository.list_production_executions(job.id)[0].id)[0].id,
+                status=ProductionQCStatus.QC_FAILED,
+                created_at=f"2026-01-01T00:00:0{index + 1}+00:00",
+            )
+        )
     exhausted = service.recommendations(project.id, job.id)[0]
     assert exhausted.action == "STOP_AND_REVIEW"
-    assert len(repository.list_producer_recommendation_events(project.id, production_job_id=job.id, action="RETRY_QC")) == 2
+    assert len(repository.list_producer_recommendation_events(project.id, production_job_id=job.id, action="RETRY_QC")) == 0
 
 
 @pytest.mark.parametrize(

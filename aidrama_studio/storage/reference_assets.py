@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import os
+from uuid import uuid4
 import re
 from pathlib import Path
 
@@ -49,6 +52,20 @@ def validate_image_input(data: bytes, filename: str, mime_type: str) -> tuple[st
         valid_signature = payload.startswith(b"RIFF") and payload[8:12] == b"WEBP"
     if not valid_signature:
         raise ValueError("image signature does not match the declared format")
+    # Signature checks alone are insufficient: decode the payload with the
+    # installed image parser and enforce its pixel safety limit.
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(payload)) as image:
+            image.verify()
+            width, height = image.size
+            if width <= 0 or height <= 0 or width * height > 40_000_000:
+                raise ValueError("image dimensions exceed safety limit")
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("image bytes cannot be decoded") from exc
     return safe_name, normalized_mime, expected[1]
 
 
@@ -67,9 +84,17 @@ def reference_blob_path(projects_root: Path, project_id: str, asset_id: str, dig
 
 def store_immutable_blob(target: Path, data: bytes) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}-{uuid4().hex}")
     try:
-        with target.open("xb") as handle:
+        with temporary.open("xb") as handle:
             handle.write(bytes(data))
+            handle.flush()
+            os.fsync(handle.fileno())
+        if target.exists():
+            temporary.unlink(missing_ok=True)
+            return
+        os.replace(temporary, target)
     except FileExistsError:
-        # Hash-derived names are immutable and collision-safe; never overwrite.
-        return
+        # A concurrent writer may have created the same hash-derived target;
+        # never overwrite the immutable winner.
+        temporary.unlink(missing_ok=True)

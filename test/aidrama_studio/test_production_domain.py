@@ -31,6 +31,7 @@ from aidrama_studio.services import (
 )
 from aidrama_studio.storage.database import DatabasePaths
 from aidrama_studio.storage.repositories import ProjectRepository
+from test.aidrama_studio.image_fixtures import png_bytes
 
 
 @pytest.fixture
@@ -80,7 +81,8 @@ def context(tmp_path: Path):
     return repository, project
 
 
-def _reference(repository, project, asset_type, binding_type, binding_id, *, source="story_001", payload=b"\x89PNG\r\n\x1a\nreference-IEND"):
+def _reference(repository, project, asset_type, binding_type, binding_id, *, source="story_001", payload=None):
+    payload = payload or png_bytes()
     service = ReferenceAssetService(repository)
     storage = ReferenceAssetStorageService(service)
     asset = service.create_asset(project.id, asset_type)
@@ -104,8 +106,8 @@ def test_production_job_creation_and_missing_reference_readiness(context):
     assert any("character reference" in reason for reason in readiness["blocked_reasons"])
     assert any("location reference" in reason for reason in readiness["blocked_reasons"])
 
-    _reference(repository, project, ReferenceAssetType.CHARACTER_REFERENCE, ReferenceBindingType.CHARACTER, "char_001", payload=b"\x89PNG\r\n\x1a\nhero-IEND")
-    _reference(repository, project, ReferenceAssetType.LOCATION_REFERENCE, ReferenceBindingType.LOCATION, "loc_001", payload=b"\x89PNG\r\n\x1a\nroom-IEND")
+    _reference(repository, project, ReferenceAssetType.CHARACTER_REFERENCE, ReferenceBindingType.CHARACTER, "char_001", payload=png_bytes(color="blue"))
+    _reference(repository, project, ReferenceAssetType.LOCATION_REFERENCE, ReferenceBindingType.LOCATION, "loc_001", payload=png_bytes(color="green"))
     ready = service.validate_job_readiness(project.id, "shot_001")
     assert ready["ready"] is True
     ready_job = service.create_production_job(project.id, "shot_001")
@@ -134,8 +136,8 @@ def test_outdated_reference_blocks_production_readiness(context):
         revision_id="story_old", project_id=project.id, version=2, status=StoryRevisionStatus.SUPERSEDED,
         content=story, generation_input=None, created_at="old", updated_at="old",
     )
-    _reference(repository, project, ReferenceAssetType.CHARACTER_REFERENCE, ReferenceBindingType.CHARACTER, "char_001", source="story_old", payload=b"\x89PNG\r\n\x1a\nold-hero-IEND")
-    _reference(repository, project, ReferenceAssetType.LOCATION_REFERENCE, ReferenceBindingType.LOCATION, "loc_001", source="story_old", payload=b"\x89PNG\r\n\x1a\nold-room-IEND")
+    _reference(repository, project, ReferenceAssetType.CHARACTER_REFERENCE, ReferenceBindingType.CHARACTER, "char_001", source="story_old", payload=png_bytes(color="blue"))
+    _reference(repository, project, ReferenceAssetType.LOCATION_REFERENCE, ReferenceBindingType.LOCATION, "loc_001", source="story_old", payload=png_bytes(color="green"))
     readiness = ProductionService(repository).calculate_production_readiness(project.id, "shot_001")
     assert readiness["ready"] is False
     assert any("reference" in reason for reason in readiness["blocked_reasons"])
@@ -143,8 +145,8 @@ def test_outdated_reference_blocks_production_readiness(context):
 
 def test_production_shots_attempt_numbering_retry_and_immutable_history(context):
     repository, project = context
-    _reference(repository, project, ReferenceAssetType.CHARACTER_REFERENCE, ReferenceBindingType.CHARACTER, "char_001", payload=b"\x89PNG\r\n\x1a\nhero-attempt-IEND")
-    _reference(repository, project, ReferenceAssetType.LOCATION_REFERENCE, ReferenceBindingType.LOCATION, "loc_001", payload=b"\x89PNG\r\n\x1a\nroom-attempt-IEND")
+    _reference(repository, project, ReferenceAssetType.CHARACTER_REFERENCE, ReferenceBindingType.CHARACTER, "char_001", payload=png_bytes(color="purple"))
+    _reference(repository, project, ReferenceAssetType.LOCATION_REFERENCE, ReferenceBindingType.LOCATION, "loc_001", payload=png_bytes(color="yellow"))
     service = ProductionService(repository)
     job = service.create_production_job(project.id, "shot_001")
     shots = service.create_production_shots(project.id, job.id)
@@ -167,8 +169,8 @@ def test_production_shots_attempt_numbering_retry_and_immutable_history(context)
 
 def test_production_shot_project_isolation(context):
     repository, project = context
-    _reference(repository, project, ReferenceAssetType.CHARACTER_REFERENCE, ReferenceBindingType.CHARACTER, "char_001", payload=b"\x89PNG\r\n\x1a\nhero-isolation-IEND")
-    _reference(repository, project, ReferenceAssetType.LOCATION_REFERENCE, ReferenceBindingType.LOCATION, "loc_001", payload=b"\x89PNG\r\n\x1a\nroom-isolation-IEND")
+    _reference(repository, project, ReferenceAssetType.CHARACTER_REFERENCE, ReferenceBindingType.CHARACTER, "char_001", payload=png_bytes(color="orange"))
+    _reference(repository, project, ReferenceAssetType.LOCATION_REFERENCE, ReferenceBindingType.LOCATION, "loc_001", payload=png_bytes(color="cyan"))
     service = ProductionService(repository)
     job = service.create_production_job(project.id, "shot_001")
     shot = service.create_production_shots(project.id, job.id)[0]

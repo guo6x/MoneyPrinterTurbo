@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -23,7 +26,17 @@ def _artifact_context(context, *, create_file: bool = True, **overrides):
     target = repository.paths.projects / project.id / relative_path
     if create_file:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"valid-video")
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        source = f"color=c=black:s=160x120:d=1" if overrides.get("black_frame_detected") else "testsrc=size=160x120:rate=25:d=1"
+        completed = subprocess.run(
+            [ffmpeg, "-y", "-f", "lavfi", "-i", source, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(target)],
+            capture_output=True, text=True, check=False,
+        )
+        if completed.returncode != 0:
+            pytest.fail(completed.stderr[-1000:])
     metadata = {
         "execution_id": execution.id,
         "shot_id": "shot_001",
@@ -34,7 +47,7 @@ def _artifact_context(context, *, create_file: bool = True, **overrides):
         "codec": "h264",
         "black_frame_detected": False,
         "static_frame_detected": False,
-        "audio_stream": True,
+        "audio_required": False,
     }
     metadata.update(overrides)
     artifact = execution_service.record_artifact(project.id, execution.id, "video", relative_path, metadata)
@@ -72,7 +85,7 @@ def test_missing_artifact_fails_without_crashing_and_writes_report(context):
     assert next(metric for metric in metrics if metric.metric_name == "artifact_exists").status.value == "FAIL"
 
 
-def test_invalid_video_metadata_fails(context):
+def test_invalid_video_metadata_does_not_override_real_probe(context):
     repository, project, execution, artifact = _artifact_context(
         context,
         duration_seconds=0,
@@ -82,9 +95,9 @@ def test_invalid_video_metadata_fails(context):
 
     result = ProductionQCService(repository).run_qc(project.id, execution.id, artifact.id)
 
-    assert result.status is ProductionQCStatus.QC_FAILED
+    assert result.status is ProductionQCStatus.QC_PASS
     failed_names = {metric.metric_name for metric in ProductionQCService(repository).list_metrics(project.id, result.id) if metric.status.value == "FAIL"}
-    assert {"video_duration", "video_resolution", "video_codec"}.issubset(failed_names)
+    assert not ({"video_duration", "video_resolution", "video_codec"} & failed_names)
 
 
 def test_black_frame_detection_fails(context):
@@ -97,8 +110,8 @@ def test_black_frame_detection_fails(context):
     assert metric.status.value == "FAIL"
 
 
-def test_missing_audio_stream_fails(context):
-    repository, project, execution, artifact = _artifact_context(context, audio_stream=False)
+def test_missing_audio_stream_fails_when_shot_requires_audio(context):
+    repository, project, execution, artifact = _artifact_context(context, audio_required=True)
 
     result = ProductionQCService(repository).run_qc(project.id, execution.id, artifact.id)
 
@@ -113,7 +126,15 @@ def test_qc_retry_creates_history_and_review_is_project_scoped(context):
     first = service.run_qc(project.id, execution.id, artifact.id)
     target = repository.paths.projects / project.id / artifact.path
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(b"valid-video")
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        import imageio_ffmpeg
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    completed = subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=25:d=1", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(target)],
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0
     second = service.retry_qc(project.id, execution.id, artifact.id)
 
     assert first.id != second.id

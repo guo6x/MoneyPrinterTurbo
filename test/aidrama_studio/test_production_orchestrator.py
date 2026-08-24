@@ -42,6 +42,8 @@ from aidrama_studio.services import (
 from aidrama_studio.services.adapters import MockProductionAdapter
 from aidrama_studio.storage.database import DatabasePaths
 from aidrama_studio.storage.repositories import ProjectRepository
+from test.aidrama_studio.image_fixtures import png_bytes
+from test.aidrama_studio.video_fixtures import mp4_bytes
 
 
 class MultiShotAdapter(MockProductionAdapter):
@@ -63,7 +65,7 @@ class MultiShotAdapter(MockProductionAdapter):
                 artifacts=[
                     {
                         "artifact_type": "video",
-                        "content": b"multi-shot-output",
+                        "content": mp4_bytes(),
                         "filename": f"{shot_id}.mp4",
                         "metadata": {
                             "mime_type": "video/mp4",
@@ -71,6 +73,7 @@ class MultiShotAdapter(MockProductionAdapter):
                             "resolution": {"width": 1280, "height": 720},
                             "codec": "h264",
                             "audio_stream": shot_id not in self.bad_qc_shots,
+                            "audio_required": shot_id in self.bad_qc_shots,
                             "black_frame_detected": False,
                             "static_frame_detected": False,
                         },
@@ -135,7 +138,7 @@ def context(tmp_path: Path):
     ):
         asset = reference_service.create_asset(project.id, asset_type)
         version = storage.import_image(
-            project.id, asset.id, b"\x89PNG\r\n\x1a\nreference-IEND", filename=f"{name}.png", mime_type="image/png",
+            project.id, asset.id, png_bytes(), filename=f"{name}.png", mime_type="image/png",
             metadata={"source_story_revision_id": "story_001"},
         )
         reference_service.activate_version(project.id, asset.id, version.id)

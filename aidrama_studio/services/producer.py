@@ -158,7 +158,10 @@ class ProducerService:
             return [ProducerRecommendation("START_PRODUCTION", "生产前置条件已满足，可创建 Production Job", requires_human_approval=True)]
         if state.qc_blockers:
             target = state.qc_blockers[0]
-            used = len(self.repository.list_producer_recommendation_events(state.project_id, production_job_id=state.job.id, action="RETRY_QC", target_id=target))
+            # A page read is only a projection.  The retry budget is derived
+            # from persisted QC results produced by an executed retry, never
+            # from recommendation observations/events.
+            used = self._qc_retry_count(state.project_id, state.job.id, target)
             if used < self.policy.max_qc_retry_recommendations:
                 return [ProducerRecommendation("RETRY_QC", "当前镜头 QC 未通过，可在预算内人工重试", target_id=target, requires_human_approval=True, metadata={"recommendations_used": used, "recommendation_budget": self.policy.max_qc_retry_recommendations, "automatic_retry_enabled": self.policy.automatic_retry_enabled})]
             return [ProducerRecommendation("STOP_AND_REVIEW", "该镜头已达到 QC 重试建议预算", target_id=target, requires_human_approval=True, metadata={"recommendations_used": used, "recommendation_budget": self.policy.max_qc_retry_recommendations})]

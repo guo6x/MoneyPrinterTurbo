@@ -1023,6 +1023,97 @@ def _migration_021_reference_profiles(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_reference_profile_items_order ON reference_profile_items(profile_id, order_index)")
 
 
+def _migration_022_runtime_operations(connection: sqlite3.Connection) -> None:
+    """Durable provider profiles, task idempotency and local vision evidence."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS provider_capability_profiles (
+            id TEXT PRIMARY KEY,
+            project_id TEXT,
+            capability TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            profile_json TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_provider_profiles_scope ON provider_capability_profiles(project_id, capability, enabled, updated_at DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS provider_tasks (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            execution_id TEXT,
+            capability TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            provider_task_id TEXT,
+            state TEXT NOT NULL,
+            request_summary_json TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            submitted_at TEXT,
+            last_polled_at TEXT,
+            next_poll_at TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(project_id, idempotency_key),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_provider_tasks_state ON provider_tasks(project_id, state, next_poll_at, updated_at)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_provider_tasks_provider_id ON provider_tasks(provider_id, provider_task_id)")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vision_frame_manifests (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            execution_id TEXT NOT NULL,
+            artifact_id TEXT,
+            frame_count INTEGER NOT NULL,
+            samples_json TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id) ON DELETE CASCADE,
+            FOREIGN KEY(artifact_id) REFERENCES production_artifacts(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_vision_frame_manifests_scope ON vision_frame_manifests(project_id, execution_id, created_at DESC)")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vision_analysis_results (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            execution_id TEXT NOT NULL,
+            artifact_id TEXT,
+            frame_manifest_id TEXT,
+            provider_id TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            metrics_json TEXT NOT NULL,
+            reference_comparison_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id) ON DELETE CASCADE,
+            FOREIGN KEY(artifact_id) REFERENCES production_artifacts(id) ON DELETE SET NULL,
+            FOREIGN KEY(frame_manifest_id) REFERENCES vision_frame_manifests(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_vision_analysis_scope ON vision_analysis_results(project_id, execution_id, created_at DESC)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1045,6 +1136,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (19, _migration_019_runtime_foundation),
     (20, _migration_020_creative_intake),
     (21, _migration_021_reference_profiles),
+    (22, _migration_022_runtime_operations),
 )
 
 

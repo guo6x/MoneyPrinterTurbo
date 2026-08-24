@@ -14,6 +14,7 @@ from .wan_video import (
     WanReferenceSelection,
     WanVideoClient,
 )
+from .seedance_video import SeedanceAdapterError, SeedanceInputMapper, SeedanceProductionAdapter, SeedanceProviderConfig
 from .final_assembly_runtime import (
     FinalAssemblyRenderRequest,
     FinalAssemblyRuntimeAdapter,
@@ -27,5 +28,6 @@ __all__ = [
     "WanAdapterError", "WanInputMapper", "WanProductionAdapter", "WanPromptMapper",
     "WanProviderConfig", "WanProviderHTTPError", "WanReferenceResolver",
     "WanReferenceSelection", "WanVideoClient",
+    "SeedanceAdapterError", "SeedanceInputMapper", "SeedanceProductionAdapter", "SeedanceProviderConfig",
     "FinalAssemblyRenderRequest", "FinalAssemblyRuntimeAdapter", "FinalAssemblyRuntimeError", "MPTFinalAssemblyAdapter",
 ]

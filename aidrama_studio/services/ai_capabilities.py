@@ -30,6 +30,7 @@ class CapabilityKind(str, Enum):
     VIDEO_GENERATIVE = "VIDEO_GENERATIVE"
     VIDEO_STOCK = "VIDEO_STOCK"
     VISION = "VISION"
+    TTS = "TTS"
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,18 @@ class VisionAnalysisProvider(ABC):
     def analyze(self, *, artifact_path: str, context: Mapping[str, object] | None = None) -> "VisionAnalysis": ...
 
 
+class TTSProvider(ABC):
+    capability = CapabilityKind.TTS
+    provider_name = "abstract"
+
+    @property
+    @abstractmethod
+    def status(self) -> CapabilityStatus: ...
+
+    @abstractmethod
+    def synthesize(self, text: str, *, voice: str, language: str = "zh-CN", sample_rate: int = 48000) -> "TTSResult": ...
+
+
 @dataclass(frozen=True)
 class ImageCandidate:
     """A generated image candidate; it can only enter ReferenceAsset DRAFT."""
@@ -133,6 +146,15 @@ class VisionAnalysis:
     provider: str
     metrics: Mapping[str, Mapping[str, object]]
     analysis_kind: str = "AI_ANALYSIS"
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TTSResult:
+    provider: str
+    audio: bytes | None
+    mime_type: str
+    duration_seconds: float | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
 
 
@@ -220,6 +242,17 @@ class UnavailableVisionProvider(VisionAnalysisProvider):
         return CapabilityStatus(CapabilityKind.VISION, self.provider_name, False, "no Vision provider configured")
 
     def analyze(self, *, artifact_path: str, context: Mapping[str, object] | None = None) -> VisionAnalysis:
+        raise CapabilityUnavailable(self.status.reason)
+
+
+class UnavailableTTSProvider(TTSProvider):
+    provider_name = "UNCONFIGURED_TTS"
+
+    @property
+    def status(self) -> CapabilityStatus:
+        return CapabilityStatus(CapabilityKind.TTS, self.provider_name, False, "no TTS provider configured")
+
+    def synthesize(self, text: str, *, voice: str, language: str = "zh-CN", sample_rate: int = 48000) -> TTSResult:
         raise CapabilityUnavailable(self.status.reason)
 
 
@@ -312,7 +345,8 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
     capabilities.  Constructing this registry performs no network calls and
     never turns an absent credential into a live-model claim.
     """
-    from .adapters import MPTProductionAdapter, WanProductionAdapter
+    from .adapters import MPTProductionAdapter, SeedanceProductionAdapter, WanProductionAdapter
+    from .providers.openai_image import OpenAIImageProvider
 
     if env is None:
         wan_adapter = WanProductionAdapter()
@@ -327,13 +361,17 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
             )
         )
     wan = RuntimeVideoProvider(wan_adapter, provider_name="WAN_VIDEO", mode=CapabilityKind.VIDEO_GENERATIVE)
+    seedance = RuntimeVideoProvider(SeedanceProductionAdapter(), provider_name="SEEDANCE", mode=CapabilityKind.VIDEO_GENERATIVE)
     stock = RuntimeVideoProvider(MPTProductionAdapter(), provider_name="MPT_STOCK", mode=CapabilityKind.VIDEO_STOCK)
-    return CapabilityRegistry([MPTLLMProvider(), wan, stock, UnavailableImageProvider(), UnavailableVisionProvider()])
+    # Preserve the existing Wan capability as the default compatibility
+    # provider; a configured Seedance profile is selected explicitly through
+    # ProviderProfileService without hiding the preserved Wan boundary.
+    return CapabilityRegistry([MPTLLMProvider(), wan, seedance, stock, OpenAIImageProvider(), UnavailableVisionProvider(), UnavailableTTSProvider()])
 
 
 __all__ = [
     "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",
-    "LLMProvider", "ImageGenerationProvider", "VideoGenerationProvider", "VisionAnalysisProvider",
-    "ImageCandidate", "VisionAnalysis", "MPTLLMProvider", "RuntimeVideoProvider",
-    "UnavailableImageProvider", "UnavailableVisionProvider", "DeterministicMockVisionProvider", "default_capability_registry",
+    "LLMProvider", "ImageGenerationProvider", "VideoGenerationProvider", "VisionAnalysisProvider", "TTSProvider",
+    "ImageCandidate", "VisionAnalysis", "TTSResult", "MPTLLMProvider", "RuntimeVideoProvider",
+    "UnavailableImageProvider", "UnavailableVisionProvider", "UnavailableTTSProvider", "DeterministicMockVisionProvider", "default_capability_registry",
 ]

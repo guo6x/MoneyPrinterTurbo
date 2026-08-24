@@ -29,6 +29,7 @@ from aidrama_studio.services import ProjectService, ReferenceAssetService, Refer
 from aidrama_studio.services import ReferenceAssetStorageError, ReferenceAssetStorageService
 from aidrama_studio.storage.database import DatabasePaths
 from aidrama_studio.storage.repositories import ProjectRepository
+from test.aidrama_studio.image_fixtures import jpeg_bytes, png_bytes, webp_bytes
 
 
 @pytest.fixture
@@ -111,9 +112,9 @@ def test_storage_path_must_be_relative():
 @pytest.mark.parametrize(
     ("filename", "mime", "payload"),
     [
-        ("hero.jpg", "image/jpeg", b"\xff\xd8\xffminimal\xff\xd9"),
-        ("hero.png", "image/png", b"\x89PNG\r\n\x1a\nminimalIEND"),
-        ("hero.webp", "image/webp", b"RIFF\x00\x00\x00\x00WEBPminimal"),
+        ("hero.jpg", "image/jpeg", jpeg_bytes()),
+        ("hero.png", "image/png", png_bytes()),
+        ("hero.webp", "image/webp", webp_bytes()),
     ],
 )
 def test_controlled_import_validates_stores_and_hashes(context, filename, mime, payload):
@@ -140,7 +141,7 @@ def test_import_rejects_fake_extension_signature_and_oversize(context):
 def test_import_deduplicates_blob_across_assets_and_rejects_same_asset_duplicate(context):
     repository, project = context
     service = ReferenceAssetService(repository); storage = ReferenceAssetStorageService(service)
-    payload = b"\x89PNG\r\n\x1a\nminimalIEND"
+    payload = png_bytes()
     first = service.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
     second = service.create_asset(project.id, ReferenceAssetType.PROP_REFERENCE)
     one = storage.import_image(project.id, first.id, payload, filename="one.png", mime_type="image/png")
@@ -155,7 +156,7 @@ def test_import_project_isolation_and_immutable_blob(context):
     other = ProjectService(repository).create(title="Other")
     service = ReferenceAssetService(repository); storage = ReferenceAssetStorageService(service)
     asset = service.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
-    payload = b"\xff\xd8\xffimmutable\xff\xd9"
+    payload = jpeg_bytes()
     version = storage.import_image(project.id, asset.id, payload, filename="hero.jpg", mime_type="image/jpeg")
     path = repository.paths.projects / project.id / version.storage_path
     before = path.read_bytes()
@@ -263,7 +264,7 @@ def test_readiness_requires_valid_binding_current_source_and_existing_image(cont
     repository, project = context
     service = ReferenceAssetService(repository)
     storage = ReferenceAssetStorageService(service)
-    payload = b"\x89PNG\r\n\x1a\nminimalIEND"
+    payload = png_bytes()
 
     character_asset = service.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
     character_version = storage.import_image(
@@ -275,7 +276,7 @@ def test_readiness_requires_valid_binding_current_source_and_existing_image(cont
 
     location_asset = service.create_asset(project.id, ReferenceAssetType.LOCATION_REFERENCE)
     location_version = storage.import_image(
-        project.id, location_asset.id, b"\x89PNG\r\n\x1a\nlocationIEND", filename="room.png", mime_type="image/png",
+        project.id, location_asset.id, png_bytes(color="blue"), filename="room.png", mime_type="image/png",
         metadata={"source_story_revision_id": "story_001"},
     )
     service.bind_version(project.id, location_version.id, ReferenceBindingType.LOCATION, "loc_001")
@@ -300,7 +301,7 @@ def test_outdated_version_is_detected_and_can_be_cloned_as_draft(context):
     storage = ReferenceAssetStorageService(service)
     asset = service.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
     version = storage.import_image(
-        project.id, asset.id, b"\x89PNG\r\n\x1a\noldIEND", filename="old.png", mime_type="image/png",
+        project.id, asset.id, png_bytes(color="green"), filename="old.png", mime_type="image/png",
         metadata={"source_story_revision_id": "story_old"},
     )
     service.activate_version(project.id, asset.id, version.id)

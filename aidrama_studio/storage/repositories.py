@@ -51,6 +51,7 @@ from aidrama_studio.domain.director import (
 from aidrama_studio.domain.runtime_foundation import AIInvocation, GenerationBrief, OutputProfile, RuntimePlan
 from aidrama_studio.domain.creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourceKind, SourcePackItem
 from aidrama_studio.domain.reference_profile import ReferenceProfile, ReferenceProfileItem
+from aidrama_studio.domain.runtime_operations import CapabilityProfile, ProviderTask, VisionAnalysisRecord, VisionFrameManifest
 
 from .database import DatabasePaths, connect, initialize_database, transaction
 
@@ -2372,3 +2373,191 @@ class ProjectRepository:
         with connect(self.paths.database) as connection:
             row = connection.execute("SELECT * FROM reference_profile_items WHERE id=?", (item_id,)).fetchone()
         return self._reference_profile_item_from_row(row) if row else None
+
+    # Provider/runtime operation records --------------------------------
+    @staticmethod
+    def _capability_profile_from_row(row) -> CapabilityProfile:
+        return CapabilityProfile(
+            id=row["id"], project_id=row["project_id"], capability=row["capability"],
+            provider_id=row["provider_id"], model_id=row["model_id"],
+            profile=json.loads(row["profile_json"]), enabled=bool(row["enabled"]),
+            created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    def create_capability_profile(self, profile: CapabilityProfile) -> CapabilityProfile:
+        with connect(self.paths.database) as connection:
+            if profile.project_id is not None and not self._project_exists(connection, profile.project_id):
+                raise KeyError(f"项目不存在: {profile.project_id}")
+            connection.execute(
+                "INSERT INTO provider_capability_profiles(id,project_id,capability,provider_id,model_id,profile_json,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (profile.id, profile.project_id, profile.capability, profile.provider_id, profile.model_id,
+                 json.dumps(profile.profile, ensure_ascii=False, sort_keys=True), int(profile.enabled), profile.created_at, profile.updated_at),
+            )
+        return self.get_capability_profile(profile.id)
+
+    def get_capability_profile(self, profile_id: str) -> CapabilityProfile | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM provider_capability_profiles WHERE id=?", (profile_id,)).fetchone()
+        return self._capability_profile_from_row(row) if row else None
+
+    def list_capability_profiles(self, project_id: str | None = None, capability: str | None = None) -> list[CapabilityProfile]:
+        query = "SELECT * FROM provider_capability_profiles WHERE (project_id IS NULL OR project_id=?)"
+        args: list[object] = [project_id]
+        if capability is not None:
+            query += " AND capability=?"; args.append(capability)
+        query += " ORDER BY enabled DESC, updated_at DESC, id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(args)).fetchall()
+        return [self._capability_profile_from_row(row) for row in rows]
+
+    def update_capability_profile(self, profile: CapabilityProfile) -> CapabilityProfile:
+        current = self.get_capability_profile(profile.id)
+        if current is None:
+            raise KeyError(f"CapabilityProfile 不存在: {profile.id}")
+        with connect(self.paths.database) as connection:
+            connection.execute(
+                "UPDATE provider_capability_profiles SET profile_json=?,enabled=?,updated_at=? WHERE id=?",
+                (json.dumps(profile.profile, ensure_ascii=False, sort_keys=True), int(profile.enabled), profile.updated_at, profile.id),
+            )
+        return self.get_capability_profile(profile.id)
+
+    @staticmethod
+    def _provider_task_from_row(row) -> ProviderTask:
+        return ProviderTask(
+            id=row["id"], project_id=row["project_id"], execution_id=row["execution_id"],
+            capability=row["capability"], provider_id=row["provider_id"], model_id=row["model_id"],
+            idempotency_key=row["idempotency_key"], provider_task_id=row["provider_task_id"],
+            state=row["state"], request_summary=json.loads(row["request_summary_json"]),
+            metadata=json.loads(row["metadata_json"]), submitted_at=row["submitted_at"],
+            last_polled_at=row["last_polled_at"], next_poll_at=row["next_poll_at"],
+            error_message=row["error_message"], created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    def create_provider_task(self, task: ProviderTask) -> ProviderTask:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, task.project_id):
+                raise KeyError(f"项目不存在: {task.project_id}")
+            if task.execution_id is not None:
+                execution = connection.execute(
+                    "SELECT j.project_id FROM production_executions e JOIN production_jobs j ON j.id=e.production_job_id WHERE e.id=?",
+                    (task.execution_id,),
+                ).fetchone()
+                if execution is None or execution["project_id"] != task.project_id:
+                    raise ValueError("ProviderTask execution 不属于该项目")
+            connection.execute(
+                "INSERT INTO provider_tasks(id,project_id,execution_id,capability,provider_id,model_id,idempotency_key,provider_task_id,state,request_summary_json,metadata_json,submitted_at,last_polled_at,next_poll_at,error_message,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (task.id, task.project_id, task.execution_id, task.capability, task.provider_id, task.model_id,
+                 task.idempotency_key, task.provider_task_id, task.state,
+                 json.dumps(task.request_summary, ensure_ascii=False, sort_keys=True),
+                 json.dumps(task.metadata, ensure_ascii=False, sort_keys=True), task.submitted_at,
+                 task.last_polled_at, task.next_poll_at, task.error_message, task.created_at, task.updated_at),
+            )
+        return self.get_provider_task(task.id)
+
+    def get_provider_task(self, task_id: str) -> ProviderTask | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM provider_tasks WHERE id=?", (task_id,)).fetchone()
+        return self._provider_task_from_row(row) if row else None
+
+    def get_provider_task_by_idempotency(self, project_id: str, key: str) -> ProviderTask | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM provider_tasks WHERE project_id=? AND idempotency_key=?", (project_id, key)).fetchone()
+        return self._provider_task_from_row(row) if row else None
+
+    def list_provider_tasks(self, project_id: str, *, state: str | None = None) -> list[ProviderTask]:
+        query = "SELECT * FROM provider_tasks WHERE project_id=?"; args: list[object] = [project_id]
+        if state is not None:
+            query += " AND state=?"; args.append(state)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(args)).fetchall()
+        return [self._provider_task_from_row(row) for row in rows]
+
+    def update_provider_task(self, task: ProviderTask) -> ProviderTask:
+        if self.get_provider_task(task.id) is None:
+            raise KeyError(f"ProviderTask 不存在: {task.id}")
+        with connect(self.paths.database) as connection:
+            connection.execute(
+                "UPDATE provider_tasks SET provider_task_id=?,state=?,request_summary_json=?,metadata_json=?,submitted_at=?,last_polled_at=?,next_poll_at=?,error_message=?,updated_at=? WHERE id=?",
+                (task.provider_task_id, task.state, json.dumps(task.request_summary, ensure_ascii=False, sort_keys=True),
+                 json.dumps(task.metadata, ensure_ascii=False, sort_keys=True), task.submitted_at, task.last_polled_at,
+                 task.next_poll_at, task.error_message, task.updated_at, task.id),
+            )
+        return self.get_provider_task(task.id)
+
+    @staticmethod
+    def _vision_frame_manifest_from_row(row) -> VisionFrameManifest:
+        return VisionFrameManifest(
+            id=row["id"], project_id=row["project_id"], execution_id=row["execution_id"],
+            artifact_id=row["artifact_id"], frame_count=row["frame_count"],
+            samples=tuple(json.loads(row["samples_json"])), sha256=row["sha256"], created_at=row["created_at"],
+        )
+
+    def create_vision_frame_manifest(self, manifest: VisionFrameManifest) -> VisionFrameManifest:
+        with connect(self.paths.database) as connection:
+            execution = connection.execute(
+                "SELECT j.project_id FROM production_executions e JOIN production_jobs j ON j.id=e.production_job_id WHERE e.id=?",
+                (manifest.execution_id,),
+            ).fetchone()
+            if execution is None or execution["project_id"] != manifest.project_id:
+                raise ValueError("VisionFrameManifest execution 不属于该项目")
+            connection.execute(
+                "INSERT INTO vision_frame_manifests(id,project_id,execution_id,artifact_id,frame_count,samples_json,sha256,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (manifest.id, manifest.project_id, manifest.execution_id, manifest.artifact_id, manifest.frame_count,
+                 json.dumps(list(manifest.samples), ensure_ascii=False, sort_keys=True), manifest.sha256, manifest.created_at),
+            )
+        return self.get_vision_frame_manifest(manifest.id)
+
+    def get_vision_frame_manifest(self, manifest_id: str) -> VisionFrameManifest | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM vision_frame_manifests WHERE id=?", (manifest_id,)).fetchone()
+        return self._vision_frame_manifest_from_row(row) if row else None
+
+    def list_vision_frame_manifests(self, project_id: str, execution_id: str | None = None) -> list[VisionFrameManifest]:
+        query = "SELECT * FROM vision_frame_manifests WHERE project_id=?"; args: list[object] = [project_id]
+        if execution_id is not None:
+            query += " AND execution_id=?"; args.append(execution_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(args)).fetchall()
+        return [self._vision_frame_manifest_from_row(row) for row in rows]
+
+    @staticmethod
+    def _vision_analysis_from_row(row) -> VisionAnalysisRecord:
+        return VisionAnalysisRecord(
+            id=row["id"], project_id=row["project_id"], execution_id=row["execution_id"], artifact_id=row["artifact_id"],
+            frame_manifest_id=row["frame_manifest_id"], provider_id=row["provider_id"], model_id=row["model_id"],
+            status=row["status"], metrics=json.loads(row["metrics_json"]),
+            reference_comparison=json.loads(row["reference_comparison_json"]), created_at=row["created_at"],
+        )
+
+    def create_vision_analysis(self, analysis: VisionAnalysisRecord) -> VisionAnalysisRecord:
+        with connect(self.paths.database) as connection:
+            execution = connection.execute(
+                "SELECT j.project_id FROM production_executions e JOIN production_jobs j ON j.id=e.production_job_id WHERE e.id=?",
+                (analysis.execution_id,),
+            ).fetchone()
+            if execution is None or execution["project_id"] != analysis.project_id:
+                raise ValueError("VisionAnalysis execution 不属于该项目")
+            connection.execute(
+                "INSERT INTO vision_analysis_results(id,project_id,execution_id,artifact_id,frame_manifest_id,provider_id,model_id,status,metrics_json,reference_comparison_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (analysis.id, analysis.project_id, analysis.execution_id, analysis.artifact_id, analysis.frame_manifest_id,
+                 analysis.provider_id, analysis.model_id, analysis.status,
+                 json.dumps(analysis.metrics, ensure_ascii=False, sort_keys=True),
+                 json.dumps(analysis.reference_comparison, ensure_ascii=False, sort_keys=True), analysis.created_at),
+            )
+        return self.get_vision_analysis(analysis.id)
+
+    def get_vision_analysis(self, analysis_id: str) -> VisionAnalysisRecord | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM vision_analysis_results WHERE id=?", (analysis_id,)).fetchone()
+        return self._vision_analysis_from_row(row) if row else None
+
+    def list_vision_analyses(self, project_id: str, execution_id: str | None = None) -> list[VisionAnalysisRecord]:
+        query = "SELECT * FROM vision_analysis_results WHERE project_id=?"; args: list[object] = [project_id]
+        if execution_id is not None:
+            query += " AND execution_id=?"; args.append(execution_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(args)).fetchall()
+        return [self._vision_analysis_from_row(row) for row in rows]

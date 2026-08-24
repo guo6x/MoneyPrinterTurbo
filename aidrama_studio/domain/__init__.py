@@ -27,6 +27,7 @@ from .producer import ProducerPolicy, ProducerRecommendation, ProductionProgress
 from .runtime_foundation import AIInvocation, GenerationBrief, OutputProfile, RuntimePlan
 from .creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourceKind, SourcePackItem
 from .reference_profile import ReferenceProfile, ReferenceProfileItem
+from .runtime_operations import CapabilityProfile, ProviderTask, VisionAnalysisRecord, VisionFrameManifest
 
 __all__ = [
     "AspectRatio",
@@ -55,4 +56,5 @@ __all__ = [
     "OutputProfile", "RuntimePlan", "GenerationBrief", "AIInvocation",
     "SourceKind", "ExtractionState", "SourcePackItem", "NormalizedCreativeBrief", "IntakeAnalysis",
     "ReferenceProfile", "ReferenceProfileItem",
+    "CapabilityProfile", "ProviderTask", "VisionFrameManifest", "VisionAnalysisRecord",
 ]

@@ -8,6 +8,8 @@ directory and only exposes a project-relative path to the database layer.
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import re
 import shutil
 from collections.abc import Mapping
@@ -58,15 +60,15 @@ class ProductionArtifactStorageService:
         """Copy one runtime artifact and return its project-relative path.
 
         ``artifact`` can be bytes, a filesystem path, or a mapping containing
-        ``content``/``data``/``path`` plus optional metadata.  A missing source
-        is allowed for metadata-only runtime results; in that case no fake
-        media bytes are created, but the canonical relative artifact path is
-        still persisted by the caller.
+        ``content``/``data``/``path`` plus optional metadata. A physical source
+        is mandatory: metadata-only pseudo artifacts are rejected.
         """
         if not isinstance(artifact_type, str) or not artifact_type.strip():
             raise ProductionArtifactStorageError("artifact_type 不能为空")
         execution_root = self.execution_root(project_id, execution_id)
         source, source_name, artifact_metadata = self._unpack(artifact, metadata)
+        if source is None:
+            raise ProductionArtifactStorageError("artifact 必须包含真实文件或 bytes 内容")
         safe_name = sanitize_filename(filename or source_name or artifact_type)
         if not Path(safe_name).suffix:
             safe_name = f"{safe_name}.bin"
@@ -77,14 +79,26 @@ class ProductionArtifactStorageService:
         if execution_root.resolve() not in target.parents:
             raise ProductionArtifactStorageError("production artifact path escapes execution directory")
 
-        if source is not None:
-            self._copy_source(source, target)
+        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        self._copy_source(source, temporary)
+        try:
+            if not temporary.is_file() or temporary.stat().st_size <= 0:
+                raise ProductionArtifactStorageError("artifact physical bytes 为空")
+            digest = self._sha256(temporary)
+            if target.exists():
+                raise ProductionArtifactStorageError("artifact 不可覆盖")
+            os.replace(temporary, target)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
         relative = PurePosixPath("production", execution_id, target_name).as_posix()
         merged_metadata = dict(artifact_metadata)
         merged_metadata.setdefault("artifact_type", artifact_type.strip())
-        if source is not None and target.exists():
+        if target.exists():
             merged_metadata.setdefault("size_bytes", target.stat().st_size)
+            merged_metadata.setdefault("sha256", self._sha256(target))
+            merged_metadata.setdefault("physical_artifact", True)
         return relative, self._plain_metadata(merged_metadata)
 
     def _project_root(self, project_id: str) -> Path:
@@ -181,7 +195,8 @@ class ProductionArtifactStorageService:
         try:
             with target.open("xb") as handle:
                 if isinstance(source, (bytes, bytearray, memoryview)):
-                    handle.write(bytes(source))
+                    data = bytes(source)
+                    handle.write(data)
                 elif isinstance(source, str) and not Path(source).is_file():
                     handle.write(source.encode("utf-8"))
                 elif isinstance(source, Path) or isinstance(source, str):
@@ -192,8 +207,18 @@ class ProductionArtifactStorageService:
                         shutil.copyfileobj(source_handle, handle)
                 else:
                     raise ProductionArtifactStorageError("runtime artifact source 类型无效")
+                handle.flush()
+                os.fsync(handle.fileno())
         except FileExistsError as exc:
             raise ProductionArtifactStorageError("artifact 不可覆盖") from exc
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
 
     @classmethod
     def _plain_metadata(cls, value: Mapping[str, object]) -> dict[str, object]:

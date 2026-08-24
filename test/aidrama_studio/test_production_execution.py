@@ -35,6 +35,7 @@ from aidrama_studio.services import (
 )
 from aidrama_studio.storage.database import DatabasePaths
 from aidrama_studio.storage.repositories import ProjectRepository
+from test.aidrama_studio.image_fixtures import png_bytes
 
 
 @pytest.fixture
@@ -91,7 +92,7 @@ def _ready_job(repository, project):
     ):
         asset = reference_service.create_asset(project.id, asset_type)
         version = storage.import_image(
-            project.id, asset.id, b"\x89PNG\r\n\x1a\nreference-IEND",
+            project.id, asset.id, png_bytes(),
             filename=f"{name}.png", mime_type="image/png",
             metadata={"source_story_revision_id": "story_001"},
         )
