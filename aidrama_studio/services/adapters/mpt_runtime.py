@@ -148,7 +148,9 @@ class MPTProductionAdapter(ProductionRuntimeAdapter):
     @classmethod
     def map_status(cls, raw: Any) -> str:
         if isinstance(raw, Mapping):
-            raw = raw.get("status")
+            raw = raw.get("status") or raw.get("state")
+        if hasattr(raw, "status"):
+            raw = raw.status
         if hasattr(raw, "value"):
             raw = raw.value
         key = str(raw or "").strip().lower()
@@ -162,11 +164,11 @@ class MPTProductionAdapter(ProductionRuntimeAdapter):
         if isinstance(result, RuntimeSubmission):
             return result
         if isinstance(result, Mapping):
-            reference = result.get("runtime_reference") or result.get("reference") or result.get("task_id")
+            reference = result.get("runtime_reference") or result.get("reference") or result.get("task_id") or result.get("id")
             metadata = result.get("metadata") or {}
             if reference:
                 return RuntimeSubmission(runtime_reference=str(reference), metadata=dict(metadata) if isinstance(metadata, Mapping) else {})
-        reference = getattr(result, "runtime_reference", None) or getattr(result, "reference", None) or getattr(result, "task_id", None)
+        reference = getattr(result, "runtime_reference", None) or getattr(result, "reference", None) or getattr(result, "task_id", None) or getattr(result, "id", None)
         if reference:
             return RuntimeSubmission(runtime_reference=str(reference))
         if isinstance(result, str) and result.strip():
