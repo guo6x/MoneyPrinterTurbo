@@ -156,28 +156,29 @@ class FinalAssemblyService:
             (shot, self.select_qualified_source(project_id, job.id, shot.id))
             for shot in self._ordered_shots(job.id)
         ]
-        for shot, source in selected_sources:
-            self.repository.create_final_assembly_item(
-                FinalAssemblyItem(
-                    id=uuid4().hex,
-                    final_assembly_id=assembly.id,
-                    # Preserve the canonical ProductionShot order exactly;
-                    # production shots are persisted 1-based by ProductionService.
-                    order_index=shot.order_index,
-                    production_shot_id=shot.id,
-                    production_execution_id=source.production_execution_id,
-                    production_artifact_id=source.production_artifact_id,
-                    qc_result_id=source.qc_result_id,
-                    review_id=source.review_id,
-                    source_path=source.source_path,
-                    created_at=_now(),
-                )
+        items = [
+            FinalAssemblyItem(
+                id=uuid4().hex,
+                final_assembly_id=assembly.id,
+                # Preserve the canonical ProductionShot order exactly;
+                # production shots are persisted 1-based by ProductionService.
+                order_index=shot.order_index,
+                production_shot_id=shot.id,
+                production_execution_id=source.production_execution_id,
+                production_artifact_id=source.production_artifact_id,
+                qc_result_id=source.qc_result_id,
+                review_id=source.review_id,
+                source_path=source.source_path,
+                created_at=_now(),
             )
-        return self.repository.update_final_assembly_status(
-            assembly.id,
-            FinalAssemblyStatus.READY,
-            updated_at=_now(),
-        )
+            for shot, source in selected_sources
+        ]
+        try:
+            return self.repository.freeze_final_assembly_atomic(
+                assembly.id, items, updated_at=_now()
+            )
+        except (KeyError, ValueError) as exc:
+            raise FinalAssemblyServiceError(str(exc)) from exc
 
     freeze = freeze_manifest
     create_manifest = create_assembly

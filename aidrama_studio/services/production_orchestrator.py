@@ -217,17 +217,25 @@ class ProductionOrchestrator:
         execution = self._latest_execution_for_shot(executions, shot.shot_id)
         attempt = self._attempt_for_shot(project_id, shot)
 
+        # A terminal execution is immutable history.  If its shot is not
+        # complete (runtime failure or QC rejection), the next run must create
+        # a fresh execution/attempt pair rather than trying to mutate or reuse
+        # the old one.
+        if execution is not None and execution.status in {
+            ProductionExecutionStatus.SUCCEEDED,
+            ProductionExecutionStatus.FAILED,
+            ProductionExecutionStatus.CANCELLED,
+        } and shot.status not in {ProductionShotStatus.SUCCEEDED, ProductionShotStatus.SKIPPED}:
+            execution = None
+
         if execution is None:
             snapshot = self._shot_snapshot(project_id, job, shot)
             try:
-                execution = self.execution_service.enqueue_shot_execution(
-                    project_id, job.id, snapshot, worker_type=getattr(adapter, "name", "runtime")
-                )
-                attempt = self.production_service.start_attempt(
+                execution, attempt = self.execution_service.enqueue_shot_execution_with_attempt(
                     project_id,
-                    shot.id,
-                    getattr(adapter, "name", "runtime"),
-                    input_snapshot_json=snapshot.to_json_dict(),
+                    job.id,
+                    snapshot,
+                    worker_type=getattr(adapter, "name", "runtime"),
                 )
             except (ProductionExecutionServiceError, ProductionServiceError) as exc:
                 raise ProductionOrchestratorError(str(exc)) from exc
@@ -322,11 +330,16 @@ class ProductionOrchestrator:
                 if str(result_status) != ProductionQCStatus.QC_PASS.value:
                     return False, self._qc_reason(result)
                 reviews = self.qc_service.list_reviews(project_id, result.id)
-                if any(
-                    str(getattr(review.decision, "value", review.decision))
-                    == ProductionReviewDecision.REJECTED.value
-                    for review in reviews
-                ):
+                # Reviews are append-only; only the latest decision for the
+                # current QC result is authoritative.  A later approval can
+                # supersede an earlier rejection without deleting history.
+                latest_review = reviews[-1] if reviews else None
+                latest_decision = (
+                    str(getattr(latest_review.decision, "value", latest_review.decision))
+                    if latest_review is not None
+                    else ""
+                )
+                if latest_decision == ProductionReviewDecision.REJECTED.value:
                     return False, "human review rejected QC result"
             return True, ""
         except ProductionQCServiceError as exc:

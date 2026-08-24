@@ -48,13 +48,20 @@ from aidrama_studio.domain.director import (
     DirectorSession,
     DirectorSessionStatus,
 )
+from aidrama_studio.domain.runtime_foundation import AIInvocation, GenerationBrief, OutputProfile, RuntimePlan
+from aidrama_studio.domain.creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourceKind, SourcePackItem
+from aidrama_studio.domain.reference_profile import ReferenceProfile, ReferenceProfileItem
 
-from .database import DatabasePaths, connect, initialize_database
+from .database import DatabasePaths, connect, initialize_database, transaction
 
 
 class ProjectRepository:
     def __init__(self, paths: DatabasePaths | None = None):
         self.paths = initialize_database(paths)
+
+    def transaction(self):
+        """Return an explicit transaction scoped to this repository database."""
+        return transaction(self.paths.database)
 
     @staticmethod
     def _from_row(row) -> Project:
@@ -527,9 +534,30 @@ class ProjectRepository:
 
     def create_reference_binding(self, binding: ReferenceAssetBinding) -> ReferenceAssetBinding:
         with connect(self.paths.database) as connection:
-            version = connection.execute("SELECT project_id FROM reference_asset_versions WHERE id=?", (binding.asset_version_id,)).fetchone()
+            version = connection.execute(
+                "SELECT project_id,asset_id FROM reference_asset_versions WHERE id=?",
+                (binding.asset_version_id,),
+            ).fetchone()
             if version is None: raise KeyError(f"ReferenceAssetVersion 不存在: {binding.asset_version_id}")
             if version["project_id"] != binding.project_id: raise ValueError("version 不属于该项目")
+            asset = connection.execute(
+                "SELECT project_id,asset_type FROM reference_assets WHERE id=?",
+                (version["asset_id"],),
+            ).fetchone()
+            if asset is None or asset["project_id"] != binding.project_id:
+                raise ValueError("asset 不属于该项目")
+            allowed = {
+                ReferenceBindingType.CHARACTER: {ReferenceAssetType.CHARACTER_REFERENCE.value},
+                ReferenceBindingType.LOCATION: {ReferenceAssetType.LOCATION_REFERENCE.value},
+                ReferenceBindingType.SHOT: {
+                    ReferenceAssetType.CHARACTER_REFERENCE.value,
+                    ReferenceAssetType.LOCATION_REFERENCE.value,
+                    ReferenceAssetType.STYLE_REFERENCE.value,
+                    ReferenceAssetType.PROP_REFERENCE.value,
+                },
+            }
+            if asset["asset_type"] not in allowed.get(binding.binding_type, set()):
+                raise ValueError("ReferenceAsset 类型与 binding 类型不兼容")
             connection.execute(
                 "INSERT INTO reference_asset_bindings(id,project_id,asset_version_id,binding_type,binding_id,created_at) VALUES (?,?,?,?,?,?)",
                 (binding.id, binding.project_id, binding.asset_version_id, binding.binding_type.value, binding.binding_id, binding.created_at),
@@ -554,6 +582,7 @@ class ProjectRepository:
     def _production_job_from_row(row) -> ProductionJob:
         return ProductionJob(
             id=row["id"], project_id=row["project_id"], shot_plan_revision_id=row["shot_plan_revision_id"],
+            output_profile_id=row["output_profile_id"] if "output_profile_id" in row.keys() else None,
             status=row["status"], created_at=row["created_at"], updated_at=row["updated_at"],
         )
 
@@ -584,8 +613,16 @@ class ProjectRepository:
             if plan["project_id"] != job.project_id:
                 raise ValueError("Shot Plan revision 不属于该项目")
             connection.execute(
-                "INSERT INTO production_jobs(id,project_id,shot_plan_revision_id,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
-                (job.id, job.project_id, job.shot_plan_revision_id, job.status.value, job.created_at, job.updated_at),
+                "INSERT INTO production_jobs(id,project_id,shot_plan_revision_id,output_profile_id,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    job.id,
+                    job.project_id,
+                    job.shot_plan_revision_id,
+                    job.output_profile_id,
+                    job.status.value,
+                    job.created_at,
+                    job.updated_at,
+                ),
             )
         return self.get_production_job(job.id)
 
@@ -602,6 +639,17 @@ class ProjectRepository:
     def update_production_job_status(self, job_id: str, status: ProductionJobStatus, *, updated_at: str) -> ProductionJob:
         with connect(self.paths.database) as connection:
             cursor = connection.execute("UPDATE production_jobs SET status=?,updated_at=? WHERE id=?", (status.value, updated_at, job_id))
+            if cursor.rowcount != 1:
+                raise KeyError(f"ProductionJob 不存在: {job_id}")
+        return self.get_production_job(job_id)
+
+    def set_production_job_output_profile(self, job_id: str, profile_id: str) -> ProductionJob:
+        with connect(self.paths.database) as connection:
+            profile = connection.execute("SELECT project_id FROM output_profiles WHERE id=?", (profile_id,)).fetchone()
+            job = connection.execute("SELECT project_id FROM production_jobs WHERE id=?", (job_id,)).fetchone()
+            if profile is None or job is None or profile["project_id"] != job["project_id"]:
+                raise ValueError("OutputProfile 不属于该 ProductionJob 项目")
+            cursor = connection.execute("UPDATE production_jobs SET output_profile_id=? WHERE id=?", (profile_id, job_id))
             if cursor.rowcount != 1:
                 raise KeyError(f"ProductionJob 不存在: {job_id}")
         return self.get_production_job(job_id)
@@ -689,6 +737,8 @@ class ProjectRepository:
             created_at=row["created_at"],
             input_snapshot=ProductionInputSnapshot.model_validate(json.loads(row["input_snapshot_json"]))
             if row["input_snapshot_json"] else None,
+            runtime_plan_id=row["runtime_plan_id"] if "runtime_plan_id" in row.keys() else None,
+            generation_brief_id=row["generation_brief_id"] if "generation_brief_id" in row.keys() else None,
         )
 
     @staticmethod
@@ -710,11 +760,155 @@ class ProjectRepository:
             if connection.execute("SELECT 1 FROM production_jobs WHERE id=?", (execution.production_job_id,)).fetchone() is None:
                 raise KeyError(f"ProductionJob 不存在: {execution.production_job_id}")
             connection.execute(
-                "INSERT INTO production_executions(id,production_job_id,status,worker_type,started_at,finished_at,created_at,input_snapshot_json) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO production_executions(id,production_job_id,status,worker_type,started_at,finished_at,created_at,input_snapshot_json,runtime_plan_id,generation_brief_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (execution.id, execution.production_job_id, execution.status.value, execution.worker_type, execution.started_at, execution.finished_at, execution.created_at,
-                 json.dumps(execution.input_snapshot.to_json_dict(), ensure_ascii=False, sort_keys=True) if execution.input_snapshot else None),
+                  json.dumps(execution.input_snapshot.to_json_dict(), ensure_ascii=False, sort_keys=True) if execution.input_snapshot else None,
+                  execution.runtime_plan_id, execution.generation_brief_id),
             )
         return self.get_production_execution(execution.id)
+
+    def enqueue_production_execution_atomic(
+        self,
+        execution: ProductionExecution,
+        *,
+        job_status: ProductionJobStatus,
+        event: ProductionEvent,
+        attempt: ProductionAttempt | None = None,
+        shot_status: ProductionShotStatus | None = None,
+    ) -> ProductionExecution:
+        """Create an execution, optional matching attempt, job projection and
+        initial event as one durable unit.
+
+        The optional attempt is used by the multi-shot orchestrator.  It closes
+        the historical window in which an execution could be visible without
+        its matching ProductionAttempt after a process crash.
+        """
+        with self.transaction() as connection:
+            job = connection.execute(
+                "SELECT project_id FROM production_jobs WHERE id=?",
+                (execution.production_job_id,),
+            ).fetchone()
+            if job is None:
+                raise KeyError(f"ProductionJob 不存在: {execution.production_job_id}")
+            connection.execute(
+                "INSERT INTO production_executions("
+                "id,production_job_id,status,worker_type,started_at,finished_at,created_at,input_snapshot_json,"
+                "runtime_plan_id,generation_brief_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    execution.id,
+                    execution.production_job_id,
+                    execution.status.value,
+                    execution.worker_type,
+                    execution.started_at,
+                    execution.finished_at,
+                    execution.created_at,
+                    json.dumps(
+                        execution.input_snapshot.to_json_dict(),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    if execution.input_snapshot
+                    else None,
+                    execution.runtime_plan_id,
+                    execution.generation_brief_id,
+                ),
+            )
+            if attempt is not None:
+                shot = connection.execute(
+                    "SELECT production_job_id FROM production_shots WHERE id=?",
+                    (attempt.production_shot_id,),
+                ).fetchone()
+                if shot is None or shot["production_job_id"] != execution.production_job_id:
+                    raise ValueError("ProductionAttempt 不属于该 ProductionJob")
+                connection.execute(
+                    "INSERT INTO production_attempts("
+                    "id,production_shot_id,attempt_number,status,runtime_adapter,runtime_reference,"
+                    "input_snapshot_json,output_artifact_json,error_message,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        attempt.id,
+                        attempt.production_shot_id,
+                        attempt.attempt_number,
+                        attempt.status.value,
+                        attempt.runtime_adapter,
+                        attempt.runtime_reference,
+                        json.dumps(attempt.input_snapshot_json, ensure_ascii=False, sort_keys=True),
+                        json.dumps(attempt.output_artifact_json, ensure_ascii=False, sort_keys=True)
+                        if attempt.output_artifact_json is not None
+                        else None,
+                        attempt.error_message,
+                        attempt.created_at,
+                    ),
+                )
+                if shot_status is not None:
+                    connection.execute(
+                        "UPDATE production_shots SET status=? WHERE id=?",
+                        (shot_status.value, attempt.production_shot_id),
+                    )
+            connection.execute(
+                "UPDATE production_jobs SET status=?,updated_at=? WHERE id=?",
+                (job_status.value, event.created_at, execution.production_job_id),
+            )
+            connection.execute(
+                "INSERT INTO production_events(id,execution_id,event_type,payload_json,created_at) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    event.id,
+                    event.execution_id,
+                    event.event_type.value,
+                    json.dumps(event.payload_json, ensure_ascii=False, sort_keys=True),
+                    event.created_at,
+                ),
+            )
+        return self.get_production_execution(execution.id)
+
+    def transition_production_execution_atomic(
+        self,
+        execution_id: str,
+        *,
+        expected_status: ProductionExecutionStatus,
+        status: ProductionExecutionStatus,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+        job_status: ProductionJobStatus | None,
+        event: ProductionEvent,
+    ) -> ProductionExecution:
+        """Update execution/job projections and append the matching event atomically."""
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT production_job_id,status FROM production_executions WHERE id=?",
+                (execution_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"ProductionExecution 不存在: {execution_id}")
+            if row["status"] != expected_status.value:
+                raise ValueError(
+                    f"ProductionExecution 状态已改变: expected {expected_status.value}, got {row['status']}"
+                )
+            cursor = connection.execute(
+                "UPDATE production_executions SET status=?,started_at=COALESCE(?,started_at),"
+                "finished_at=COALESCE(?,finished_at) WHERE id=? AND status=?",
+                (status.value, started_at, finished_at, execution_id, expected_status.value),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("ProductionExecution transition 失败")
+            if job_status is not None:
+                connection.execute(
+                    "UPDATE production_jobs SET status=?,updated_at=? WHERE id=?",
+                    (job_status.value, event.created_at, row["production_job_id"]),
+                )
+            connection.execute(
+                "INSERT INTO production_events(id,execution_id,event_type,payload_json,created_at) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    event.id,
+                    execution_id,
+                    event.event_type.value,
+                    json.dumps(event.payload_json, ensure_ascii=False, sort_keys=True),
+                    event.created_at,
+                ),
+            )
+        return self.get_production_execution(execution_id)
 
     def get_production_execution(self, execution_id: str) -> ProductionExecution | None:
         with connect(self.paths.database) as connection:
@@ -1005,6 +1199,112 @@ class ProjectRepository:
                 raise KeyError(f"DirectorSession 不存在: {session.id}")
         return self.get_director_session(session.id)
 
+    def transition_director(
+        self,
+        *,
+        decision: DirectorDecision,
+        event: DirectorDecisionEvent,
+        goal: DirectorGoal,
+        session: DirectorSession,
+    ) -> DirectorDecision:
+        """Atomically append a Director event and update goal/session state.
+
+        Director lifecycle history is append-only, while the goal and session
+        are projections of the latest transition.  Keeping all four writes in
+        one SQLite transaction prevents a crash or fault injection from
+        exposing an APPROVED decision with an old session (or vice versa).
+        """
+        with self.transaction() as connection:
+            decision_row = connection.execute(
+                "SELECT session_id, project_id, goal_id, status FROM director_decisions WHERE id=?",
+                (decision.id,),
+            ).fetchone()
+            session_row = connection.execute(
+                "SELECT project_id FROM director_sessions WHERE id=?", (session.id,)
+            ).fetchone()
+            goal_row = connection.execute(
+                "SELECT project_id, session_id FROM director_goals WHERE id=?", (goal.id,)
+            ).fetchone()
+            if (
+                decision_row is None
+                or decision_row["session_id"] != session.id
+                or decision_row["project_id"] != decision.project_id
+                or decision_row["goal_id"] != goal.id
+                or session_row is None
+                or session_row["project_id"] != decision.project_id
+                or goal_row is None
+                or goal_row["project_id"] != decision.project_id
+                or goal_row["session_id"] != session.id
+            ):
+                raise ValueError("Director transition provenance 不属于同一 project/session/goal")
+            latest = connection.execute(
+                "SELECT to_status FROM director_decision_events "
+                "WHERE decision_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                (decision.id,),
+            ).fetchone()
+            current = latest["to_status"] if latest is not None else decision_row["status"]
+            if current != event.from_status.value:
+                raise ValueError(
+                    f"Director transition 无效: expected {current}, got {event.from_status.value}"
+                )
+            connection.execute(
+                "INSERT INTO director_decision_events("
+                "id,decision_id,session_id,project_id,from_status,to_status,event_type,metadata_json,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    event.id,
+                    event.decision_id,
+                    event.session_id,
+                    event.project_id,
+                    event.from_status.value,
+                    event.to_status.value,
+                    event.event_type,
+                    json.dumps(event.metadata, ensure_ascii=False, sort_keys=True),
+                    event.created_at,
+                ),
+            )
+            connection.execute(
+                "UPDATE director_decisions SET status=? WHERE id=?",
+                (event.to_status.value, decision.id),
+            )
+            goal_cursor = connection.execute(
+                "UPDATE director_goals SET status=?,max_steps=?,completed_steps=?,finished_at=? "
+                "WHERE id=? AND project_id=? AND session_id=?",
+                (
+                    goal.status.value,
+                    goal.max_steps,
+                    goal.completed_steps,
+                    goal.finished_at,
+                    goal.id,
+                    goal.project_id,
+                    session.id,
+                ),
+            )
+            if goal_cursor.rowcount != 1:
+                raise KeyError(f"DirectorGoal 不存在: {goal.id}")
+            session_cursor = connection.execute(
+                "UPDATE director_sessions SET status=?,current_goal=?,blocking_reason=?,"
+                "pending_recommendation_json=?,updated_at=? WHERE id=? AND project_id=?",
+                (
+                    session.status.value,
+                    session.current_goal.value,
+                    session.blocking_reason,
+                    json.dumps(
+                        session.pending_recommendation.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    if session.pending_recommendation
+                    else None,
+                    session.updated_at,
+                    session.id,
+                    session.project_id,
+                ),
+            )
+            if session_cursor.rowcount != 1:
+                raise KeyError(f"DirectorSession 不存在: {session.id}")
+        return self.get_director_decision(decision.id)
+
     def create_director_goal(self, goal: DirectorGoal) -> DirectorGoal:
         with connect(self.paths.database) as connection:
             session = connection.execute("SELECT project_id FROM director_sessions WHERE id=?", (goal.session_id,)).fetchone()
@@ -1221,6 +1521,55 @@ class ProjectRepository:
         with connect(self.paths.database) as connection:
             rows = connection.execute(query, tuple(params)).fetchall()
         return [self._final_assembly_from_row(row) for row in rows]
+
+    def freeze_final_assembly_atomic(
+        self,
+        assembly_id: str,
+        items: list[FinalAssemblyItem],
+        *,
+        updated_at: str,
+    ) -> FinalAssembly:
+        """Insert a complete immutable manifest and mark it READY atomically."""
+        with self.transaction() as connection:
+            assembly = connection.execute(
+                "SELECT project_id,status FROM final_assemblies WHERE id=?", (assembly_id,)
+            ).fetchone()
+            if assembly is None:
+                raise KeyError(f"FinalAssembly 不存在: {assembly_id}")
+            if assembly["status"] != FinalAssemblyStatus.DRAFT.value:
+                raise ValueError("只有 DRAFT FinalAssembly 可以 freeze")
+            existing = connection.execute(
+                "SELECT 1 FROM final_assembly_items WHERE final_assembly_id=? LIMIT 1",
+                (assembly_id,),
+            ).fetchone()
+            if existing is not None:
+                raise ValueError("DRAFT FinalAssembly 已包含 item，不能重新构建")
+            for item in items:
+                if item.final_assembly_id != assembly_id:
+                    raise ValueError("FinalAssemblyItem provenance 无效")
+                connection.execute(
+                    "INSERT INTO final_assembly_items("
+                    "id,final_assembly_id,order_index,production_shot_id,production_execution_id,"
+                    "production_artifact_id,qc_result_id,review_id,source_path,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        item.id,
+                        item.final_assembly_id,
+                        item.order_index,
+                        item.production_shot_id,
+                        item.production_execution_id,
+                        item.production_artifact_id,
+                        item.qc_result_id,
+                        item.review_id,
+                        item.source_path,
+                        item.created_at,
+                    ),
+                )
+            connection.execute(
+                "UPDATE final_assemblies SET status=?,updated_at=? WHERE id=? AND status=?",
+                (FinalAssemblyStatus.READY.value, updated_at, assembly_id, FinalAssemblyStatus.DRAFT.value),
+            )
+        return self.get_final_assembly(assembly_id)
 
     def update_final_assembly_status(
         self,
@@ -1721,3 +2070,305 @@ class ProjectRepository:
                 (status.value, output_relative_path, json.dumps(metadata_json if metadata_json is not None else current.metadata_json, ensure_ascii=False, sort_keys=True), error_message, started_at, finished_at, attempt_id),
             )
         return self.get_post_render_attempt(attempt_id)
+
+    # Runtime foundation -------------------------------------------------
+    @staticmethod
+    def _output_profile_from_row(row) -> OutputProfile:
+        return OutputProfile(
+            id=row["id"], project_id=row["project_id"], aspect_ratio=row["aspect_ratio"],
+            target_duration_seconds=row["target_duration_seconds"], target_resolution=row["target_resolution"],
+            fps=row["fps"], video_codec_target=row["video_codec_target"],
+            audio_sample_rate=row["audio_sample_rate"], audio_channels=row["audio_channels"],
+            created_at=row["created_at"],
+        )
+
+    def create_output_profile(self, profile: OutputProfile) -> OutputProfile:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, profile.project_id):
+                raise KeyError(f"项目不存在: {profile.project_id}")
+            connection.execute(
+                "INSERT INTO output_profiles(id,project_id,aspect_ratio,target_duration_seconds,target_resolution,fps,"
+                "video_codec_target,audio_sample_rate,audio_channels,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (profile.id, profile.project_id, profile.aspect_ratio, profile.target_duration_seconds,
+                 profile.target_resolution, profile.fps, profile.video_codec_target, profile.audio_sample_rate,
+                 profile.audio_channels, profile.created_at),
+            )
+        return self.get_output_profile(profile.id)
+
+    def get_output_profile(self, profile_id: str) -> OutputProfile | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM output_profiles WHERE id=?", (profile_id,)).fetchone()
+        return self._output_profile_from_row(row) if row else None
+
+    def list_output_profiles(self, project_id: str) -> list[OutputProfile]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM output_profiles WHERE project_id=? ORDER BY created_at,id", (project_id,)).fetchall()
+        return [self._output_profile_from_row(row) for row in rows]
+
+    @staticmethod
+    def _generation_brief_from_row(row) -> GenerationBrief:
+        content = json.loads(row["content_json"])
+        return GenerationBrief.model_validate(content | {
+            "id": row["id"], "project_id": row["project_id"],
+            "production_job_id": row["production_job_id"], "shot_id": row["shot_id"],
+            "sha256": row["sha256"], "created_at": row["created_at"],
+        })
+
+    def create_generation_brief(self, brief: GenerationBrief) -> GenerationBrief:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, brief.project_id):
+                raise KeyError(f"项目不存在: {brief.project_id}")
+            connection.execute(
+                "INSERT INTO generation_briefs(id,project_id,production_job_id,shot_id,content_json,sha256,created_at) VALUES (?,?,?,?,?,?,?)",
+                (brief.id, brief.project_id, brief.production_job_id, brief.shot_id,
+                 json.dumps(brief.model_dump(mode="json", exclude={"id","project_id","production_job_id","shot_id","sha256","created_at"}), ensure_ascii=False, sort_keys=True),
+                 brief.sha256, brief.created_at),
+            )
+        return self.get_generation_brief(brief.id)
+
+    def get_generation_brief(self, brief_id: str) -> GenerationBrief | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM generation_briefs WHERE id=?", (brief_id,)).fetchone()
+        return self._generation_brief_from_row(row) if row else None
+
+    def list_generation_briefs(self, project_id: str, production_job_id: str | None = None) -> list[GenerationBrief]:
+        query = "SELECT * FROM generation_briefs WHERE project_id=?"; args: list[object] = [project_id]
+        if production_job_id is not None:
+            query += " AND production_job_id=?"; args.append(production_job_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(args)).fetchall()
+        return [self._generation_brief_from_row(row) for row in rows]
+
+    @staticmethod
+    def _runtime_plan_from_row(row) -> RuntimePlan:
+        return RuntimePlan(
+            id=row["id"], project_id=row["project_id"], production_job_id=row["production_job_id"],
+            execution_id=row["execution_id"], output_profile_id=row["output_profile_id"],
+            generation_brief_id=row["generation_brief_id"], provider_capability=row["provider_capability"],
+            provider_id=row["provider_id"], model_id=row["model_id"], generation_mode=row["generation_mode"],
+            resolution=row["resolution"], provider_generation_duration=row["provider_generation_duration"],
+            target_creative_duration=row["target_creative_duration"], audio_strategy=row["audio_strategy"],
+            provider_parameters=json.loads(row["provider_parameters_json"]),
+            reference_version_ids=tuple(json.loads(row["reference_version_ids_json"])),
+            reference_roles=json.loads(row["reference_roles_json"]),
+            continuity_strategy=row["continuity_strategy"], generation_brief_hash=row["generation_brief_hash"],
+            output_profile_hash=row["output_profile_hash"], authorization=json.loads(row["authorization_json"]),
+            prompt_template_version=row["prompt_template_version"], plan_hash=row["plan_hash"], created_at=row["created_at"],
+        )
+
+    def create_runtime_plan(self, plan: RuntimePlan) -> RuntimePlan:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, plan.project_id):
+                raise KeyError(f"项目不存在: {plan.project_id}")
+            connection.execute(
+                "INSERT INTO runtime_plans(id,project_id,production_job_id,execution_id,output_profile_id,generation_brief_id,"
+                "provider_capability,provider_id,model_id,generation_mode,resolution,provider_generation_duration,target_creative_duration,"
+                "audio_strategy,provider_parameters_json,reference_version_ids_json,reference_roles_json,continuity_strategy,"
+                "generation_brief_hash,output_profile_hash,authorization_json,prompt_template_version,plan_hash,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (plan.id, plan.project_id, plan.production_job_id, plan.execution_id, plan.output_profile_id,
+                 plan.generation_brief_id, plan.provider_capability, plan.provider_id, plan.model_id,
+                 plan.generation_mode, plan.resolution, plan.provider_generation_duration, plan.target_creative_duration,
+                 plan.audio_strategy, json.dumps(plan.provider_parameters, ensure_ascii=False, sort_keys=True),
+                 json.dumps(list(plan.reference_version_ids), ensure_ascii=False), json.dumps(plan.reference_roles, ensure_ascii=False, sort_keys=True),
+                 plan.continuity_strategy, plan.generation_brief_hash, plan.output_profile_hash,
+                 json.dumps(plan.authorization, ensure_ascii=False, sort_keys=True), plan.prompt_template_version,
+                 plan.plan_hash, plan.created_at),
+            )
+        return self.get_runtime_plan(plan.id)
+
+    def get_runtime_plan(self, plan_id: str) -> RuntimePlan | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM runtime_plans WHERE id=?", (plan_id,)).fetchone()
+        return self._runtime_plan_from_row(row) if row else None
+
+    def list_runtime_plans(self, project_id: str, execution_id: str | None = None) -> list[RuntimePlan]:
+        query = "SELECT * FROM runtime_plans WHERE project_id=?"; args: list[object] = [project_id]
+        if execution_id is not None:
+            query += " AND execution_id=?"; args.append(execution_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(args)).fetchall()
+        return [self._runtime_plan_from_row(row) for row in rows]
+
+    @staticmethod
+    def _ai_invocation_from_row(row) -> AIInvocation:
+        return AIInvocation(
+            id=row["id"], project_id=row["project_id"], production_job_id=row["production_job_id"], execution_id=row["execution_id"],
+            capability=row["capability"], provider_id=row["provider_id"], model_id=row["model_id"],
+            input_source_ids=tuple(json.loads(row["input_source_ids_json"])), reference_version_ids=tuple(json.loads(row["reference_version_ids_json"])),
+            generation_brief_hash=row["generation_brief_hash"], runtime_plan_id=row["runtime_plan_id"], runtime_plan_hash=row["runtime_plan_hash"],
+            request_summary=json.loads(row["request_summary_json"]), provider_task_id=row["provider_task_id"], status=row["status"],
+            started_at=row["started_at"], finished_at=row["finished_at"], usage=json.loads(row["usage_json"]), estimated_cost=row["estimated_cost"], actual_cost=row["actual_cost"],
+            output_artifact_ids=tuple(json.loads(row["output_artifact_ids_json"])), created_at=row["created_at"],
+        )
+
+    def create_ai_invocation(self, invocation: AIInvocation) -> AIInvocation:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, invocation.project_id):
+                raise KeyError(f"项目不存在: {invocation.project_id}")
+            connection.execute(
+                "INSERT INTO ai_invocations(id,project_id,production_job_id,execution_id,capability,provider_id,model_id,"
+                "input_source_ids_json,reference_version_ids_json,generation_brief_hash,runtime_plan_id,runtime_plan_hash,"
+                "request_summary_json,provider_task_id,status,started_at,finished_at,usage_json,estimated_cost,actual_cost,output_artifact_ids_json,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (invocation.id, invocation.project_id, invocation.production_job_id, invocation.execution_id, invocation.capability,
+                 invocation.provider_id, invocation.model_id, json.dumps(list(invocation.input_source_ids)), json.dumps(list(invocation.reference_version_ids)),
+                 invocation.generation_brief_hash, invocation.runtime_plan_id, invocation.runtime_plan_hash,
+                 json.dumps(invocation.request_summary, ensure_ascii=False, sort_keys=True), invocation.provider_task_id, invocation.status,
+                 invocation.started_at, invocation.finished_at, json.dumps(invocation.usage, ensure_ascii=False, sort_keys=True),
+                 invocation.estimated_cost, invocation.actual_cost, json.dumps(list(invocation.output_artifact_ids)), invocation.created_at),
+            )
+        return self.get_ai_invocation(invocation.id)
+
+    def get_ai_invocation(self, invocation_id: str) -> AIInvocation | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM ai_invocations WHERE id=?", (invocation_id,)).fetchone()
+        return self._ai_invocation_from_row(row) if row else None
+
+    def list_ai_invocations(self, project_id: str, execution_id: str | None = None) -> list[AIInvocation]:
+        query = "SELECT * FROM ai_invocations WHERE project_id=?"; args: list[object] = [project_id]
+        if execution_id is not None:
+            query += " AND execution_id=?"; args.append(execution_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(args)).fetchall()
+        return [self._ai_invocation_from_row(row) for row in rows]
+
+    # Creative intake / Source Pack -------------------------------------
+    @staticmethod
+    def _source_pack_from_row(row) -> SourcePackItem:
+        return SourcePackItem(
+            id=row["id"], project_id=row["project_id"], source_kind=row["source_kind"],
+            display_filename=row["display_filename"], mime_type=row["mime_type"], size_bytes=row["size_bytes"],
+            sha256=row["sha256"], storage_path=row["storage_path"], version_of_id=row["version_of_id"],
+            extraction_state=row["extraction_state"], extracted_text=row["extracted_text"],
+            metadata=json.loads(row["metadata_json"]), created_at=row["created_at"],
+        )
+
+    def create_source_pack_item(self, item: SourcePackItem) -> SourcePackItem:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, item.project_id):
+                raise KeyError(f"项目不存在: {item.project_id}")
+            if item.version_of_id is not None:
+                parent = connection.execute("SELECT project_id FROM source_pack_items WHERE id=?", (item.version_of_id,)).fetchone()
+                if parent is None or parent["project_id"] != item.project_id:
+                    raise ValueError("SourcePack version parent 不属于该项目")
+            connection.execute(
+                "INSERT INTO source_pack_items(id,project_id,source_kind,display_filename,mime_type,size_bytes,sha256,storage_path,version_of_id,extraction_state,extracted_text,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (item.id, item.project_id, item.source_kind.value, item.display_filename, item.mime_type, item.size_bytes, item.sha256, item.storage_path, item.version_of_id, item.extraction_state.value, item.extracted_text, json.dumps(item.metadata, ensure_ascii=False, sort_keys=True), item.created_at),
+            )
+        return self.get_source_pack_item(item.id)
+
+    def get_source_pack_item(self, item_id: str) -> SourcePackItem | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM source_pack_items WHERE id=?", (item_id,)).fetchone()
+        return self._source_pack_from_row(row) if row else None
+
+    def list_source_pack_items(self, project_id: str) -> list[SourcePackItem]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM source_pack_items WHERE project_id=? ORDER BY created_at,id", (project_id,)).fetchall()
+        return [self._source_pack_from_row(row) for row in rows]
+
+    def find_source_pack_by_hash(self, project_id: str, sha256: str) -> SourcePackItem | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM source_pack_items WHERE project_id=? AND sha256=? ORDER BY created_at,id LIMIT 1", (project_id, sha256)).fetchone()
+        return self._source_pack_from_row(row) if row else None
+
+    def update_source_pack_extraction(self, item_id: str, *, state: ExtractionState, extracted_text: str | None, metadata: dict[str, object] | None = None) -> SourcePackItem:
+        current = self.get_source_pack_item(item_id)
+        if current is None:
+            raise KeyError(f"SourcePackItem 不存在: {item_id}")
+        with connect(self.paths.database) as connection:
+            connection.execute("UPDATE source_pack_items SET extraction_state=?,extracted_text=?,metadata_json=? WHERE id=?", (state.value, extracted_text, json.dumps(metadata if metadata is not None else current.metadata, ensure_ascii=False, sort_keys=True), item_id))
+        return self.get_source_pack_item(item_id)
+
+    @staticmethod
+    def _normalized_brief_from_row(row) -> NormalizedCreativeBrief:
+        content = json.loads(row["content_json"])
+        return NormalizedCreativeBrief.model_validate(content | {"id": row["id"], "project_id": row["project_id"], "status": row["status"], "source_ids": tuple(json.loads(row["source_ids_json"])), "created_at": row["created_at"], "updated_at": row["updated_at"]})
+
+    def create_normalized_creative_brief(self, brief: NormalizedCreativeBrief) -> NormalizedCreativeBrief:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, brief.project_id):
+                raise KeyError(f"项目不存在: {brief.project_id}")
+            connection.execute("INSERT INTO normalized_creative_briefs(id,project_id,status,content_json,source_ids_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", (brief.id, brief.project_id, brief.status, json.dumps(brief.model_dump(mode="json", exclude={"id","project_id","status","source_ids","created_at","updated_at"}), ensure_ascii=False, sort_keys=True), json.dumps(list(brief.source_ids), ensure_ascii=False), brief.created_at, brief.updated_at))
+        return self.get_normalized_creative_brief(brief.id)
+
+    def get_normalized_creative_brief(self, brief_id: str) -> NormalizedCreativeBrief | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM normalized_creative_briefs WHERE id=?", (brief_id,)).fetchone()
+        return self._normalized_brief_from_row(row) if row else None
+
+    def list_normalized_creative_briefs(self, project_id: str) -> list[NormalizedCreativeBrief]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM normalized_creative_briefs WHERE project_id=? ORDER BY created_at,id", (project_id,)).fetchall()
+        return [self._normalized_brief_from_row(row) for row in rows]
+
+    @staticmethod
+    def _intake_analysis_from_row(row) -> IntakeAnalysis:
+        return IntakeAnalysis(id=row["id"], project_id=row["project_id"], source_id=row["source_id"], classifications=tuple(json.loads(row["classifications_json"])), confidence=row["confidence"], warnings=tuple(json.loads(row["warnings_json"])), created_at=row["created_at"])
+
+    def create_intake_analysis(self, analysis: IntakeAnalysis) -> IntakeAnalysis:
+        with connect(self.paths.database) as connection:
+            source = connection.execute("SELECT project_id FROM source_pack_items WHERE id=?", (analysis.source_id,)).fetchone()
+            if source is None or source["project_id"] != analysis.project_id:
+                raise ValueError("IntakeAnalysis source 不属于该项目")
+            connection.execute("INSERT INTO intake_analyses(id,project_id,source_id,classifications_json,confidence,warnings_json,created_at) VALUES (?,?,?,?,?,?,?)", (analysis.id, analysis.project_id, analysis.source_id, json.dumps(list(analysis.classifications), ensure_ascii=False), analysis.confidence, json.dumps(list(analysis.warnings), ensure_ascii=False), analysis.created_at))
+        return self.get_intake_analysis(analysis.id)
+
+    def get_intake_analysis(self, analysis_id: str) -> IntakeAnalysis | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM intake_analyses WHERE id=?", (analysis_id,)).fetchone()
+        return self._intake_analysis_from_row(row) if row else None
+
+    def list_intake_analyses(self, project_id: str) -> list[IntakeAnalysis]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM intake_analyses WHERE project_id=? ORDER BY created_at,id", (project_id,)).fetchall()
+        return [self._intake_analysis_from_row(row) for row in rows]
+
+    # Ordered multi-reference profiles ----------------------------------
+    @staticmethod
+    def _reference_profile_from_row(row) -> ReferenceProfile:
+        return ReferenceProfile(id=row["id"], project_id=row["project_id"], binding_type=row["binding_type"], binding_id=row["binding_id"], created_at=row["created_at"], updated_at=row["updated_at"])
+
+    @staticmethod
+    def _reference_profile_item_from_row(row) -> ReferenceProfileItem:
+        return ReferenceProfileItem(id=row["id"], profile_id=row["profile_id"], version_id=row["version_id"], role=row["role"], order_index=row["order_index"], created_at=row["created_at"])
+
+    def create_reference_profile(self, profile: ReferenceProfile) -> ReferenceProfile:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, profile.project_id):
+                raise KeyError(f"项目不存在: {profile.project_id}")
+            connection.execute("INSERT INTO reference_profiles(id,project_id,binding_type,binding_id,created_at,updated_at) VALUES (?,?,?,?,?,?)", (profile.id, profile.project_id, profile.binding_type, profile.binding_id, profile.created_at, profile.updated_at))
+        return self.get_reference_profile(profile.id)
+
+    def get_reference_profile(self, profile_id: str) -> ReferenceProfile | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM reference_profiles WHERE id=?", (profile_id,)).fetchone()
+        return self._reference_profile_from_row(row) if row else None
+
+    def get_reference_profile_for_binding(self, project_id: str, binding_type: str, binding_id: str) -> ReferenceProfile | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM reference_profiles WHERE project_id=? AND binding_type=? AND binding_id=?", (project_id, binding_type, binding_id)).fetchone()
+        return self._reference_profile_from_row(row) if row else None
+
+    def list_reference_profile_items(self, profile_id: str) -> list[ReferenceProfileItem]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM reference_profile_items WHERE profile_id=? ORDER BY order_index,id", (profile_id,)).fetchall()
+        return [self._reference_profile_item_from_row(row) for row in rows]
+
+    def create_reference_profile_item(self, item: ReferenceProfileItem) -> ReferenceProfileItem:
+        with connect(self.paths.database) as connection:
+            profile = connection.execute("SELECT project_id FROM reference_profiles WHERE id=?", (item.profile_id,)).fetchone()
+            version = connection.execute("SELECT project_id FROM reference_asset_versions WHERE id=?", (item.version_id,)).fetchone()
+            if profile is None or version is None or profile["project_id"] != version["project_id"]:
+                raise ValueError("ReferenceProfileItem project provenance 无效")
+            connection.execute("INSERT INTO reference_profile_items(id,profile_id,version_id,role,order_index,created_at) VALUES (?,?,?,?,?,?)", (item.id, item.profile_id, item.version_id, item.role, item.order_index, item.created_at))
+        return self.get_reference_profile_item(item.id)
+
+    def get_reference_profile_item(self, item_id: str) -> ReferenceProfileItem | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM reference_profile_items WHERE id=?", (item_id,)).fetchone()
+        return self._reference_profile_item_from_row(row) if row else None

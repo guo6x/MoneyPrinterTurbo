@@ -36,6 +36,7 @@ class ProductionJob(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     project_id: str = Field(min_length=1, max_length=64)
     shot_plan_revision_id: str = Field(min_length=1, max_length=64)
+    output_profile_id: str | None = Field(default=None, max_length=80)
     status: ProductionJobStatus = ProductionJobStatus.DRAFT
     created_at: str = Field(min_length=1, max_length=80)
     updated_at: str = Field(min_length=1, max_length=80)

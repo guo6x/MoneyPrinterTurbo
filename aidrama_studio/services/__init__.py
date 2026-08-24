@@ -17,6 +17,9 @@ from .final_assembly_runtime import FinalAssemblyRenderService, FinalAssemblyRun
 from .postproduction import FFmpegPostProductionAdapter, PostProductionMediaAdapter, PostProductionService, PostProductionServiceError, PostRenderRequest, PostRenderService
 from .director import DirectorService, DirectorServiceError
 from .producer import ProducerService, ProducerServiceError
+from .runtime_foundation import AIInvocationService, GenerationBriefCompiler, OutputProfileService, RuntimeFoundationError, RuntimePlanService
+from .creative_intake import CreativeIntakeError, CreativeIntakeService, DocumentIngestionService, IntakeAnalyzer, SourcePackService
+from .reference_profiles import ReferenceProfileService, ReferenceProfileServiceError
 from .current_state import CurrentProductionState, CurrentProductionStateService
 from .vision_qc import VisionQCResult, VisionQCService
 from .provider_readiness import ProviderReadinessService, CapabilityReadiness, ReadinessState
@@ -77,6 +80,9 @@ __all__ = [
     "PostProductionService", "PostRenderService", "PostProductionServiceError", "PostProductionMediaAdapter", "FFmpegPostProductionAdapter", "PostRenderRequest",
     "DirectorService", "DirectorServiceError", "ProducerService", "ProducerServiceError",
     "CurrentProductionState", "CurrentProductionStateService",
+    "OutputProfileService", "GenerationBriefCompiler", "RuntimePlanService", "AIInvocationService", "RuntimeFoundationError",
+    "CreativeIntakeService", "CreativeIntakeError", "SourcePackService", "DocumentIngestionService", "IntakeAnalyzer",
+    "ReferenceProfileService", "ReferenceProfileServiceError",
     "VisionQCResult", "VisionQCService",
     "ProviderReadinessService", "CapabilityReadiness", "ReadinessState",
     "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",

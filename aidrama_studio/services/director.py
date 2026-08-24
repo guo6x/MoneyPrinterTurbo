@@ -354,11 +354,13 @@ class DirectorService:
                 raise DirectorServiceError("只有 APPROVED decision 可以标记完成")
         else:
             raise DirectorServiceError("不支持的 Director decision transition")
+        if to_status is DirectorDecisionStatus.COMPLETED:
+            state = self.inspect_project(project_id)
+            if not self._canonical_action_satisfied(decision, state):
+                raise DirectorServiceError(
+                    "canonical action 尚未完成；APPROVED 只表示人工同意，不能替代真实业务操作"
+                )
         now = _now()
-        self.repository.create_director_decision_event(
-            DirectorDecisionEvent(id=uuid4().hex, decision_id=decision.id, session_id=decision.session_id, project_id=project_id, from_status=current, to_status=to_status, event_type=event_type, metadata=metadata or {}, created_at=now)
-        )
-        updated = self._get_decision(project_id, decision.id)
         session = self._get_session(decision.session_id, project_id)
         goal = self.repository.get_director_goal(decision.goal_id)
         if goal is None:
@@ -366,11 +368,88 @@ class DirectorService:
         if to_status is DirectorDecisionStatus.COMPLETED:
             goal_complete = self._goal_satisfied(self.inspect_project(project_id), goal.goal)
             new_goal = goal.model_copy(update={"status": DirectorGoalStatus.COMPLETED if goal_complete else DirectorGoalStatus.ACTIVE, "finished_at": now if goal_complete else None})
+            new_session_status = DirectorSessionStatus.COMPLETED if goal_complete else DirectorSessionStatus.ACTIVE
+            new_blocking_reason = ""
+            new_pending = None
+        elif to_status is DirectorDecisionStatus.APPROVED:
+            # Approval is review-only.  Keep the session blocked until the
+            # user performs the canonical action and explicitly completes the
+            # decision.
+            new_goal = goal.model_copy(update={"status": DirectorGoalStatus.BLOCKED})
+            new_session_status = DirectorSessionStatus.BLOCKED
+            new_blocking_reason = decision.recommendation.reason
+            new_pending = decision.recommendation
         else:
             new_goal = goal.model_copy(update={"status": DirectorGoalStatus.ACTIVE})
-        self.repository.update_director_goal(new_goal)
-        self.repository.update_director_session(session.model_copy(update={"status": DirectorSessionStatus.COMPLETED if new_goal.status is DirectorGoalStatus.COMPLETED else DirectorSessionStatus.ACTIVE, "blocking_reason": "", "pending_recommendation": None, "updated_at": now}))
-        return updated
+            new_session_status = DirectorSessionStatus.ACTIVE
+            new_blocking_reason = ""
+            new_pending = None
+        event = DirectorDecisionEvent(
+            id=uuid4().hex,
+            decision_id=decision.id,
+            session_id=decision.session_id,
+            project_id=project_id,
+            from_status=current,
+            to_status=to_status,
+            event_type=event_type,
+            metadata=metadata or {},
+            created_at=now,
+        )
+        updated_session = session.model_copy(
+            update={
+                "status": new_session_status,
+                "blocking_reason": new_blocking_reason,
+                "pending_recommendation": new_pending,
+                "updated_at": now,
+            }
+        )
+        return self.repository.transition_director(
+            decision=decision,
+            event=event,
+            goal=new_goal,
+            session=updated_session,
+        )
+
+    def _canonical_action_satisfied(self, decision: DirectorDecision, state: dict[str, object]) -> bool:
+        """Check the real domain fact named by a Director recommendation."""
+        action = str(decision.recommendation.action or "").upper()
+        readiness = state["readiness"]
+        current = state["current_state"]
+        if action in {"GOAL_COMPLETE", "REVIEW_PROJECT_STATE"}:
+            goal = self.repository.get_director_goal(decision.goal_id)
+            return bool(goal and self._goal_satisfied(state, goal.goal))
+        if action in {"APPROVE_STORY_BIBLE", "APPROVE_STRUCTURED_SCRIPT", "APPROVE_SHOT_PLAN"}:
+            return {
+                "APPROVE_STORY_BIBLE": state.get("story_revision_id"),
+                "APPROVE_STRUCTURED_SCRIPT": state.get("script_revision_id"),
+                "APPROVE_SHOT_PLAN": state.get("shot_plan_revision_id"),
+            }[action] is not None
+        if action == "LOCK_CHARACTER_REFERENCE":
+            target = decision.recommendation.target_id
+            return target is not None and target not in set(readiness.get("missing_character_references", []))
+        if action == "LOCK_LOCATION_REFERENCE":
+            target = decision.recommendation.target_id
+            return target is not None and target not in set(readiness.get("missing_location_references", []))
+        if action in {"REVIEW_REFERENCE_READINESS", "CONFIRM_PRODUCTION_READINESS"}:
+            return bool(readiness.get("ready")) and (
+                action != "CONFIRM_PRODUCTION_READINESS" or current.job is not None
+            )
+        if action == "START_PRODUCTION":
+            return current.job is not None
+        if action in {"RESUME_PRODUCTION", "COMPLETE_PRODUCTION"}:
+            return bool(current.production_complete)
+        if action in {"REVIEW_QC_FAILURE", "CONFIRM_QC_RESOLUTION"}:
+            return not bool(current.qc_blockers)
+        if action in {"CREATE_FINAL_ASSEMBLY", "MAKE_FINAL_ASSEMBLY_READY"}:
+            if not current.final_readiness or not current.final_readiness.ready or current.job is None:
+                return False
+            return any(
+                item.status.value in {"READY", "SUCCEEDED"}
+                for item in self.repository.list_final_assemblies(state["project_id"], current.job.id)
+            )
+        if action == "START_POST_PRODUCTION":
+            return bool(current.post_production_ready)
+        return self._goal_satisfied(state, self.repository.get_director_goal(decision.goal_id).goal)
 
     def approve_decision(self, project_id: str, decision_id: str) -> DirectorDecision:
         return self._transition(project_id, decision_id, DirectorDecisionStatus.APPROVED, "APPROVED")

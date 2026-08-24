@@ -13,12 +13,15 @@ from pathlib import PurePosixPath, PureWindowsPath
 from uuid import uuid4
 
 from aidrama_studio.domain import (
+    ProductionAttempt,
+    ProductionAttemptStatus,
     ProductionArtifact,
     ProductionEvent,
     ProductionEventType,
     ProductionExecution,
     ProductionExecutionStatus,
     ProductionJobStatus,
+    ProductionShotStatus,
     ProductionInputSnapshot,
     ReferenceBindingType,
 )
@@ -102,19 +105,24 @@ class ProductionExecutionService:
             raise ProductionExecutionServiceError("该 ProductionJob 已有正在排队或运行的 execution")
 
         now = _now()
-        execution = self.repository.create_production_execution(
-            ProductionExecution(
-                id=uuid4().hex,
-                production_job_id=job.id,
-                status=ProductionExecutionStatus.QUEUED,
-                worker_type=worker_type.strip(),
-                created_at=now,
-                input_snapshot=snapshot,
-            )
+        execution = ProductionExecution(
+            id=uuid4().hex,
+            production_job_id=job.id,
+            status=ProductionExecutionStatus.QUEUED,
+            worker_type=worker_type.strip(),
+            created_at=now,
+            input_snapshot=snapshot,
         )
-        self.repository.update_production_job_status(job.id, ProductionJobStatus.QUEUED, updated_at=now)
-        self._append_event(project_id, execution, ProductionEventType.QUEUED, {})
-        return execution
+        event = ProductionEvent(
+            id=uuid4().hex,
+            execution_id=execution.id,
+            event_type=ProductionEventType.QUEUED,
+            payload_json={},
+            created_at=now,
+        )
+        return self.repository.enqueue_production_execution_atomic(
+            execution, job_status=ProductionJobStatus.QUEUED, event=event
+        )
 
     def enqueue_shot_execution(
         self,
@@ -153,19 +161,91 @@ class ProductionExecutionService:
             ):
                 raise ProductionExecutionServiceError("该 shot 已有正在排队或运行的 execution")
         now = _now()
-        execution = self.repository.create_production_execution(
-            ProductionExecution(
-                id=uuid4().hex,
-                production_job_id=job.id,
-                status=ProductionExecutionStatus.QUEUED,
-                worker_type=worker_type.strip(),
-                created_at=now,
-                input_snapshot=input_snapshot,
-            )
+        execution = ProductionExecution(
+            id=uuid4().hex,
+            production_job_id=job.id,
+            status=ProductionExecutionStatus.QUEUED,
+            worker_type=worker_type.strip(),
+            created_at=now,
+            input_snapshot=input_snapshot,
         )
-        self.repository.update_production_job_status(job.id, ProductionJobStatus.QUEUED, updated_at=now)
-        self._append_event(project_id, execution, ProductionEventType.QUEUED, {"shot_id": shot_id})
-        return execution
+        event = ProductionEvent(
+            id=uuid4().hex,
+            execution_id=execution.id,
+            event_type=ProductionEventType.QUEUED,
+            payload_json={"shot_id": shot_id},
+            created_at=now,
+        )
+        return self.repository.enqueue_production_execution_atomic(
+            execution, job_status=ProductionJobStatus.QUEUED, event=event
+        )
+
+    def enqueue_shot_execution_with_attempt(
+        self,
+        project_id: str,
+        production_job_id: str,
+        input_snapshot: ProductionInputSnapshot,
+        *,
+        worker_type: str = "mpt",
+    ) -> tuple[ProductionExecution, object]:
+        """Create the immutable execution and its first/retry attempt atomically."""
+        self._require_project(project_id)
+        if not isinstance(worker_type, str) or not worker_type.strip():
+            raise ProductionExecutionServiceError("worker_type 不能为空")
+        job = self.production_service.get_job(project_id, production_job_id)
+        if job.status in (ProductionJobStatus.SUCCEEDED, ProductionJobStatus.CANCELLED):
+            raise ProductionExecutionServiceError("ProductionJob 已结束，不能启动新的 shot execution")
+        if input_snapshot.project_id != project_id or input_snapshot.shot_plan_revision_id != job.shot_plan_revision_id:
+            raise ProductionExecutionServiceError("input snapshot provenance 不匹配")
+        if len(input_snapshot.shot_parameters) != 1:
+            raise ProductionExecutionServiceError("shot execution 必须包含且只包含一个 shot")
+        shot_id = next(iter(input_snapshot.shot_parameters))
+        shots = self.repository.list_production_shots(job.id)
+        shot = next((item for item in shots if item.shot_id == shot_id), None)
+        if shot is None:
+            raise ProductionExecutionServiceError("input snapshot 的 shot 不属于该 ProductionJob")
+        for existing in self.repository.list_production_executions(job.id):
+            existing_shots = existing.input_snapshot.shot_parameters if existing.input_snapshot else {}
+            if shot_id in existing_shots and existing.status in (
+                ProductionExecutionStatus.QUEUED, ProductionExecutionStatus.RUNNING
+            ):
+                raise ProductionExecutionServiceError("该 shot 已有正在排队或运行的 execution")
+        attempts = self.repository.list_production_attempts(shot.id)
+        if any(item.status is ProductionAttemptStatus.STARTED for item in attempts):
+            raise ProductionExecutionServiceError("该 ProductionShot 已有正在运行的 attempt")
+        now = _now()
+        execution = ProductionExecution(
+            id=uuid4().hex,
+            production_job_id=job.id,
+            status=ProductionExecutionStatus.QUEUED,
+            worker_type=worker_type.strip(),
+            created_at=now,
+            input_snapshot=input_snapshot,
+        )
+        attempt = ProductionAttempt(
+            id=uuid4().hex,
+            production_shot_id=shot.id,
+            attempt_number=(attempts[-1].attempt_number + 1 if attempts else 1),
+            status=ProductionAttemptStatus.STARTED,
+            runtime_adapter=worker_type.strip(),
+            input_snapshot_json=input_snapshot.to_json_dict(),
+            created_at=now,
+        )
+        event = ProductionEvent(
+            id=uuid4().hex,
+            execution_id=execution.id,
+            event_type=ProductionEventType.QUEUED,
+            payload_json={"shot_id": shot_id, "attempt_id": attempt.id},
+            created_at=now,
+        )
+        created = self.repository.enqueue_production_execution_atomic(
+            execution,
+            job_status=ProductionJobStatus.QUEUED,
+            event=event,
+            attempt=attempt,
+            shot_status=ProductionShotStatus.PENDING,
+        )
+        return created, attempt
 
     create_shot_execution = enqueue_shot_execution
 
@@ -180,14 +260,21 @@ class ProductionExecutionService:
         if execution.input_snapshot is None:
             raise ProductionExecutionServiceError("execution 缺少 immutable input snapshot")
         now = _now()
-        execution = self.repository.update_production_execution(
+        event = ProductionEvent(
+            id=uuid4().hex,
+            execution_id=execution.id,
+            event_type=ProductionEventType.STARTED,
+            payload_json=payload_json or {},
+            created_at=now,
+        )
+        return self.repository.transition_production_execution_atomic(
             execution.id,
+            expected_status=ProductionExecutionStatus.QUEUED,
             status=ProductionExecutionStatus.RUNNING,
             started_at=now,
+            job_status=ProductionJobStatus.RUNNING,
+            event=event,
         )
-        self.repository.update_production_job_status(job.id, ProductionJobStatus.RUNNING, updated_at=now)
-        self._append_event(project_id, execution, ProductionEventType.STARTED, payload_json or {})
-        return execution
 
     def create_input_snapshot(self, project_id: str, production_job_id: str) -> ProductionInputSnapshot:
         """Capture the approved Story → Script → Shot Plan input graph once."""
@@ -477,12 +564,21 @@ class ProductionExecutionService:
             except Exception as exc:
                 raise ProductionExecutionServiceError(f"runtime cancel 失败: {exc}") from exc
         now = _now()
-        execution = self.repository.update_production_execution(
-            execution.id, status=ProductionExecutionStatus.CANCELLED, finished_at=now
+        event = ProductionEvent(
+            id=uuid4().hex,
+            execution_id=execution.id,
+            event_type=ProductionEventType.CANCELLED,
+            payload_json={"reason": reason or ""},
+            created_at=now,
         )
-        self.repository.update_production_job_status(job.id, ProductionJobStatus.CANCELLED, updated_at=now)
-        self._append_event(project_id, execution, ProductionEventType.CANCELLED, {"reason": reason or ""})
-        return execution
+        return self.repository.transition_production_execution_atomic(
+            execution.id,
+            expected_status=execution.status,
+            status=ProductionExecutionStatus.CANCELLED,
+            finished_at=now,
+            job_status=ProductionJobStatus.CANCELLED,
+            event=event,
+        )
 
     def complete_execution(
         self,
@@ -493,12 +589,21 @@ class ProductionExecutionService:
         execution, job = self._get_execution(project_id, execution_id)
         self._require_status(execution, ProductionExecutionStatus.RUNNING, "只有 RUNNING execution 可以完成")
         now = _now()
-        execution = self.repository.update_production_execution(
-            execution.id, status=ProductionExecutionStatus.SUCCEEDED, finished_at=now
+        event = ProductionEvent(
+            id=uuid4().hex,
+            execution_id=execution.id,
+            event_type=ProductionEventType.FINISHED,
+            payload_json=payload_json or {},
+            created_at=now,
         )
-        self.repository.update_production_job_status(job.id, ProductionJobStatus.SUCCEEDED, updated_at=now)
-        self._append_event(project_id, execution, ProductionEventType.FINISHED, payload_json or {})
-        return execution
+        return self.repository.transition_production_execution_atomic(
+            execution.id,
+            expected_status=ProductionExecutionStatus.RUNNING,
+            status=ProductionExecutionStatus.SUCCEEDED,
+            finished_at=now,
+            job_status=ProductionJobStatus.SUCCEEDED,
+            event=event,
+        )
 
     def fail_execution(
         self,
@@ -511,15 +616,24 @@ class ProductionExecutionService:
         if execution.status not in (ProductionExecutionStatus.QUEUED, ProductionExecutionStatus.RUNNING):
             raise ProductionExecutionServiceError("只有 QUEUED/RUNNING execution 可以失败")
         now = _now()
-        execution = self.repository.update_production_execution(
-            execution.id, status=ProductionExecutionStatus.FAILED, finished_at=now
-        )
-        self.repository.update_production_job_status(job.id, ProductionJobStatus.FAILED, updated_at=now)
         payload = dict(payload_json or {})
         if error_message:
             payload["error"] = error_message
-        self._append_event(project_id, execution, ProductionEventType.FAILED, payload)
-        return execution
+        event = ProductionEvent(
+            id=uuid4().hex,
+            execution_id=execution.id,
+            event_type=ProductionEventType.FAILED,
+            payload_json=payload,
+            created_at=now,
+        )
+        return self.repository.transition_production_execution_atomic(
+            execution.id,
+            expected_status=execution.status,
+            status=ProductionExecutionStatus.FAILED,
+            finished_at=now,
+            job_status=ProductionJobStatus.FAILED,
+            event=event,
+        )
 
     def list_events(self, project_id: str, execution_id: str) -> list[ProductionEvent]:
         execution, _ = self._get_execution(project_id, execution_id)

@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from uuid import uuid4
-
-from aidrama_studio.domain import ProducerPolicy, ProducerRecommendation, ProductionProgress, ProductionShotStatus
+from aidrama_studio.domain import (
+    ProducerPolicy,
+    ProducerRecommendation,
+    ProductionProgress,
+    ProductionShot,
+    ProductionShotStatus,
+)
 from aidrama_studio.storage.repositories import ProjectRepository
 
 from .current_state import CurrentProductionStateService
-from .production import ProductionService, ProductionServiceError
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+from .production import ProductionService
 
 
 class ProducerServiceError(RuntimeError):
@@ -60,12 +59,29 @@ class ProducerService:
         if job is None:
             return ProductionProgress(project_id, None)
         shots = self.repository.list_production_shots(job.id)
-        if not shots:
-            try:
-                shots = self.production_service.create_production_shots(project_id, job.id)
-            except ProductionServiceError:
-                shots = []
         state = self.current_state_service.derive(project_id, job.id)
+        # A projection may be requested immediately after a job is created,
+        # before the orchestration service has materialized ProductionShot
+        # rows.  Build ephemeral rows for display only; reads must never write
+        # them to SQLite.
+        projected_shots = list(state.shots)
+        if not projected_shots:
+            plan = self.repository.get_shot_revision(job.shot_plan_revision_id)
+            if plan is not None:
+                projected_shots = [
+                    ProductionShot(
+                        id=f"projection:{job.id}:{shot.id}",
+                        production_job_id=job.id,
+                        shot_id=shot.id,
+                        order_index=index,
+                        status=ProductionShotStatus.PENDING,
+                        created_at=job.created_at,
+                    )
+                    for index, shot in enumerate(
+                        sorted(plan["content"].shots, key=lambda item: (item.order, item.id)),
+                        start=1,
+                    )
+                ]
         plan = self.repository.get_shot_revision(job.shot_plan_revision_id)
         high_risk = tuple(
             sorted(
@@ -74,15 +90,15 @@ class ProducerService:
                 if getattr(shot.risk_level, "value", shot.risk_level) == "HIGH" and not shot.risk_override
             )
         )
-        completed = sum(shot.status is ProductionShotStatus.SUCCEEDED for shot in state.shots)
-        failed = sum(shot.status is ProductionShotStatus.FAILED for shot in state.shots)
-        pending = sum(shot.status is ProductionShotStatus.PENDING for shot in state.shots)
-        running = next((shot.shot_id for shot in state.shots if shot.status is ProductionShotStatus.RUNNING), None)
+        completed = sum(shot.status is ProductionShotStatus.SUCCEEDED for shot in projected_shots)
+        failed = sum(shot.status is ProductionShotStatus.FAILED for shot in projected_shots)
+        pending = sum(shot.status is ProductionShotStatus.PENDING for shot in projected_shots)
+        running = next((shot.shot_id for shot in projected_shots if shot.status is ProductionShotStatus.RUNNING), None)
         final_ready = bool(state.final_readiness and state.final_readiness.ready)
         return ProductionProgress(
             project_id=project_id,
             job_id=job.id,
-            total_shots=len(state.shots),
+            total_shots=len(projected_shots),
             completed_shots=completed,
             pending_shots=pending,
             failed_shots=failed,
@@ -104,21 +120,33 @@ class ProducerService:
             revision_id = job.shot_plan_revision_id
         return self.production_service.calculate_production_readiness(project_id, revision_id)
 
-    def _record_qc_recommendation(self, project_id: str, job_id: str, target_id: str) -> int:
-        self.repository.create_producer_recommendation_event(
-            event_id=uuid4().hex,
-            project_id=project_id,
-            production_job_id=job_id,
-            action="RETRY_QC",
-            target_id=target_id,
-            metadata={"automatic_retry_enabled": self.policy.automatic_retry_enabled},
-            created_at=_now(),
-        )
-        return len(
-            self.repository.list_producer_recommendation_events(
-                project_id, production_job_id=job_id, action="RETRY_QC", target_id=target_id
-            )
-        )
+    def _qc_retry_count(self, project_id: str, job_id: str, target_id: str) -> int:
+        """Count executed QC retries without recording a read observation.
+
+        A QC result is an executed action; a Producer recommendation is only a
+        projection.  The first result for an artifact is the initial check and
+        subsequent persisted results are retries.  This deliberately scans the
+        current job only, preserving a history-wide audit without consuming a
+        budget merely by opening the Producer page.
+        """
+        counts: dict[str, int] = {}
+        for execution in self.repository.list_production_executions(job_id):
+            snapshot = execution.input_snapshot
+            shot_ids = set(snapshot.shot_parameters) if snapshot else set()
+            artifacts = self.repository.list_production_artifacts(execution.id)
+            results = self.repository.list_production_qc_results(project_id, execution.id)
+            for artifact in artifacts:
+                metadata = artifact.metadata_json or {}
+                artifact_shot = metadata.get("shot_id")
+                if artifact_shot not in shot_ids and artifact_shot != target_id and target_id not in shot_ids:
+                    continue
+                total = sum(1 for result in results if result.artifact_id == artifact.id)
+                if total:
+                    counts[target_id] = counts.get(target_id, 0) + max(0, total - 1)
+            if not artifacts and target_id in shot_ids:
+                total = sum(1 for result in results if result.artifact_id is None)
+                counts[target_id] = counts.get(target_id, 0) + max(0, total - 1)
+        return counts.get(target_id, 0)
 
     def recommendations(self, project_id: str, job_id: str | None = None) -> list[ProducerRecommendation]:
         readiness = self.readiness(project_id, job_id)
@@ -132,7 +160,6 @@ class ProducerService:
             target = state.qc_blockers[0]
             used = len(self.repository.list_producer_recommendation_events(state.project_id, production_job_id=state.job.id, action="RETRY_QC", target_id=target))
             if used < self.policy.max_qc_retry_recommendations:
-                used = self._record_qc_recommendation(project_id, state.job.id, target)
                 return [ProducerRecommendation("RETRY_QC", "当前镜头 QC 未通过，可在预算内人工重试", target_id=target, requires_human_approval=True, metadata={"recommendations_used": used, "recommendation_budget": self.policy.max_qc_retry_recommendations, "automatic_retry_enabled": self.policy.automatic_retry_enabled})]
             return [ProducerRecommendation("STOP_AND_REVIEW", "该镜头已达到 QC 重试建议预算", target_id=target, requires_human_approval=True, metadata={"recommendations_used": used, "recommendation_budget": self.policy.max_qc_retry_recommendations})]
         failed_shot = next((shot for shot in state.shots if shot.status is ProductionShotStatus.FAILED), None)

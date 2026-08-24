@@ -68,6 +68,9 @@ class ProductionInputSnapshot(BaseModel):
     story_revision_id: str = Field(min_length=1, max_length=64)
     script_revision_id: str = Field(min_length=1, max_length=64)
     shot_plan_revision_id: str = Field(min_length=1, max_length=64)
+    runtime_plan_id: str | None = Field(default=None, max_length=80)
+    generation_brief_id: str | None = Field(default=None, max_length=80)
+    runtime_plan_hash: str | None = Field(default=None, max_length=64)
     reference_asset_versions: FrozenDict = Field(default_factory=FrozenDict)
     shot_parameters: FrozenDict = Field(default_factory=FrozenDict)
 
@@ -88,6 +91,9 @@ class ProductionInputSnapshot(BaseModel):
             "story_revision_id": self.story_revision_id,
             "script_revision_id": self.script_revision_id,
             "shot_plan_revision_id": self.shot_plan_revision_id,
+            "runtime_plan_id": self.runtime_plan_id,
+            "generation_brief_id": self.generation_brief_id,
+            "runtime_plan_hash": self.runtime_plan_hash,
             "reference_asset_versions": _thaw(self.reference_asset_versions),
             "shot_parameters": _thaw(self.shot_parameters),
         }

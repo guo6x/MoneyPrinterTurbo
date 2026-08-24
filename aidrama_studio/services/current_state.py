@@ -86,7 +86,7 @@ class CurrentProductionStateService:
             final_readiness = self.final_assembly_service.calculate_readiness(project_id, job.id)
         except FinalAssemblyServiceError:
             pass
-        post_ready = self._post_ready(project_id)
+        post_ready = self._post_ready(project_id, job.id)
         return CurrentProductionState(
             project_id=project_id,
             job=job,
@@ -99,19 +99,65 @@ class CurrentProductionStateService:
             post_production_ready=post_ready,
         )
 
-    def _post_ready(self, project_id: str) -> bool:
-        for plan in reversed(self.repository.list_post_plans(project_id)):
-            for attempt in reversed(self.repository.list_post_render_attempts(project_id, plan.id)):
-                if attempt.status.value != "SUCCEEDED" or not attempt.output_relative_path:
+    def _post_ready(self, project_id: str, current_job_id: str) -> bool:
+        """Require post output to belong to the current production chain.
+
+        A successful post render from an older ProductionJob is historical
+        evidence only; it must never make a newer job appear ready.
+        """
+        assemblies = self.repository.list_final_assemblies(project_id, current_job_id)
+        if not assemblies:
+            return False
+        assembly = max(assemblies, key=lambda item: (item.created_at, item.id))
+        if assembly.status.value not in {"READY", "SUCCEEDED"}:
+            return False
+        render_attempts = self.repository.list_final_assembly_render_attempts(assembly.id)
+        successful_sources = [
+            item
+            for item in render_attempts
+            if item.status.value == "SUCCEEDED" and item.output_relative_path
+        ]
+        if not successful_sources:
+            return False
+        root = (self.repository.paths.projects / project_id).resolve()
+        for source_attempt in reversed(successful_sources):
+            source_path = self._safe_project_file(root, source_attempt.output_relative_path)
+            if source_path is None or not source_path.is_file() or source_path.stat().st_size <= 0:
+                continue
+            for plan in self.repository.list_post_plans(project_id):
+                if plan.source_final_assembly_id != assembly.id:
                     continue
-                normalized = attempt.output_relative_path.replace("\\", "/")
-                if normalized.startswith("/") or ".." in normalized.split("/"):
+                # V1 requires an immutable pin to the exact successful
+                # FinalAssembly render attempt; legacy unpinned plans are not
+                # allowed to satisfy current-chain readiness.
+                if plan.source_final_assembly_render_attempt_id != source_attempt.id:
                     continue
-                target = (self.repository.paths.projects / project_id / Path(*normalized.split("/"))).resolve()
-                root = (self.repository.paths.projects / project_id).resolve()
-                if root in target.parents and target.is_file() and target.stat().st_size > 0:
-                    return True
+                for attempt in reversed(self.repository.list_post_render_attempts(project_id, plan.id)):
+                    if (
+                        attempt.status.value != "SUCCEEDED"
+                        or not attempt.output_relative_path
+                        or attempt.source_final_assembly_render_attempt_id != source_attempt.id
+                    ):
+                        continue
+                    output = self._safe_project_file(root, attempt.output_relative_path)
+                    if output is not None and output.is_file() and output.stat().st_size > 0:
+                        return True
         return False
+
+    @staticmethod
+    def _safe_project_file(root: Path, relative: str | None) -> Path | None:
+        if not isinstance(relative, str) or not relative.strip() or "\x00" in relative:
+            return None
+        normalized = relative.strip().replace("\\", "/")
+        if normalized.startswith("/"):
+            return None
+        parts = normalized.split("/")
+        if not parts or any(part in {"", ".", ".."} for part in parts):
+            return None
+        target = (root / Path(*parts)).resolve()
+        if root not in target.parents:
+            return None
+        return target
 
 
 __all__ = ["CurrentProductionState", "CurrentProductionStateService"]

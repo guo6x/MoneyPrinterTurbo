@@ -18,6 +18,7 @@ from aidrama_studio.domain import (
 from aidrama_studio.storage.repositories import ProjectRepository
 
 from .reference_assets import ReferenceAssetService
+from .runtime_foundation import OutputProfileService
 
 
 def _now() -> str:
@@ -178,10 +179,16 @@ class ProductionService:
             raise ProductionServiceError("只有 APPROVED Shot Plan 可以创建 ProductionJob")
         readiness = self.validate_job_readiness(project_id, plan["id"])
         now = _now()
+        profile = OutputProfileService(self.repository).create(
+            project_id,
+            aspect_ratio=self.repository.get_project(project_id).aspect_ratio.value,
+            target_duration_seconds=float(self.repository.get_project(project_id).target_duration_seconds),
+        )
         job = ProductionJob(
             id=uuid4().hex,
             project_id=project_id,
             shot_plan_revision_id=plan["id"],
+            output_profile_id=profile.id,
             status=ProductionJobStatus.READY if readiness["ready"] else ProductionJobStatus.DRAFT,
             created_at=now,
             updated_at=now,

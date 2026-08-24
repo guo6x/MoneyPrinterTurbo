@@ -24,6 +24,9 @@ from .director import (
     DirectorSessionStatus,
 )
 from .producer import ProducerPolicy, ProducerRecommendation, ProductionProgress
+from .runtime_foundation import AIInvocation, GenerationBrief, OutputProfile, RuntimePlan
+from .creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourceKind, SourcePackItem
+from .reference_profile import ReferenceProfile, ReferenceProfileItem
 
 __all__ = [
     "AspectRatio",
@@ -49,4 +52,7 @@ __all__ = [
     "DirectorDecision", "DirectorDecisionStatus", "DirectorRecommendation",
     "DirectorDecisionEvent",
     "ProducerPolicy", "ProducerRecommendation", "ProductionProgress",
+    "OutputProfile", "RuntimePlan", "GenerationBrief", "AIInvocation",
+    "SourceKind", "ExtractionState", "SourcePackItem", "NormalizedCreativeBrief", "IntakeAnalysis",
+    "ReferenceProfile", "ReferenceProfileItem",
 ]

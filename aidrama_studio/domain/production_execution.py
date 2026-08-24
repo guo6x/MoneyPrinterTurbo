@@ -36,6 +36,8 @@ class ProductionExecution(BaseModel):
     finished_at: str | None = Field(default=None, max_length=80)
     created_at: str | None = Field(default=None, max_length=80)
     input_snapshot: ProductionInputSnapshot | None = None
+    runtime_plan_id: str | None = Field(default=None, max_length=80)
+    generation_brief_id: str | None = Field(default=None, max_length=80)
 
 
 class ProductionEvent(BaseModel):

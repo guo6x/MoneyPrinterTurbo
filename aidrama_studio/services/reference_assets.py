@@ -20,6 +20,20 @@ class ReferenceAssetServiceError(RuntimeError):
 
 
 class ReferenceAssetService:
+    # Canonical binding policy: entity-specific references are strict; a Shot
+    # may use any explicitly supported reference class because a shot can
+    # combine a character, location, style, or prop image.
+    BINDING_ASSET_TYPES = {
+        ReferenceBindingType.CHARACTER: {ReferenceAssetType.CHARACTER_REFERENCE},
+        ReferenceBindingType.LOCATION: {ReferenceAssetType.LOCATION_REFERENCE},
+        ReferenceBindingType.SHOT: {
+            ReferenceAssetType.CHARACTER_REFERENCE,
+            ReferenceAssetType.LOCATION_REFERENCE,
+            ReferenceAssetType.STYLE_REFERENCE,
+            ReferenceAssetType.PROP_REFERENCE,
+        },
+    }
+
     def __init__(self, repository: ProjectRepository | None = None):
         self.repository = repository or ProjectRepository()
 
@@ -121,6 +135,8 @@ class ReferenceAssetService:
         asset = self.repository.get_reference_asset(version.asset_id)
         if asset is None or asset.project_id != binding.project_id:
             return False
+        if asset.asset_type not in self.BINDING_ASSET_TYPES.get(binding.binding_type, set()):
+            return False
         try:
             source_revision = self._version_source_revision(binding.project_id, version)
         except ReferenceAssetServiceError:
@@ -133,12 +149,20 @@ class ReferenceAssetService:
         self._require_project(project_id)
         version = self.repository.get_reference_asset_version(version_id)
         if version is None or version.project_id != project_id: raise ReferenceAssetServiceError("version 不属于该项目")
+        asset = self.repository.get_reference_asset(version.asset_id)
+        if asset is None or asset.project_id != project_id:
+            raise ReferenceAssetServiceError("version 的 asset 不属于该项目")
         source_revision = self._version_source_revision(project_id, version)
         if binding_type in (ReferenceBindingType.CHARACTER, ReferenceBindingType.LOCATION):
             if not self._story_target_exists(source_revision, binding_type, binding_id):
                 raise ReferenceAssetServiceError("binding target 不存在于 source Story Bible revision")
         elif not self._binding_target_exists(project_id, binding_type, binding_id):
             raise ReferenceAssetServiceError("binding target 不存在于 APPROVED ShotPlan")
+        if asset.asset_type not in self.BINDING_ASSET_TYPES.get(binding_type, set()):
+            allowed = ", ".join(sorted(item.value for item in self.BINDING_ASSET_TYPES.get(binding_type, set())))
+            raise ReferenceAssetServiceError(
+                f"binding target/type 不兼容：{binding_type.value} binding 要求兼容 ReferenceAsset 类型: {allowed}"
+            )
         return self.repository.create_reference_binding(ReferenceAssetBinding(id=uuid4().hex, project_id=project_id, asset_version_id=version_id, binding_type=binding_type, binding_id=binding_id, created_at=_now()))
 
     def list_bindings(self, project_id: str, version_id: str | None = None):

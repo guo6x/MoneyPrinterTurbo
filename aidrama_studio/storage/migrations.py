@@ -9,6 +9,10 @@ from collections.abc import Callable
 Migration = tuple[int, Callable[[sqlite3.Connection], None]]
 
 
+class UnsupportedDatabaseSchemaError(RuntimeError):
+    """An older application must not mutate a newer database schema."""
+
+
 def _migration_001_projects(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -809,6 +813,216 @@ def _migration_018_producer_recommendation_events(connection: sqlite3.Connection
     connection.execute("CREATE INDEX IF NOT EXISTS idx_producer_recommendation_events_scope ON producer_recommendation_events(project_id, production_job_id, action, created_at, id)")
 
 
+def _migration_019_runtime_foundation(connection: sqlite3.Connection) -> None:
+    """Pin output/runtime inputs and keep a non-secret AI invocation ledger."""
+    job_columns = {row[1] for row in connection.execute("PRAGMA table_info(production_jobs)")}
+    if "output_profile_id" not in job_columns:
+        connection.execute("ALTER TABLE production_jobs ADD COLUMN output_profile_id TEXT")
+    execution_columns = {row[1] for row in connection.execute("PRAGMA table_info(production_executions)")}
+    if "runtime_plan_id" not in execution_columns:
+        connection.execute("ALTER TABLE production_executions ADD COLUMN runtime_plan_id TEXT")
+    if "generation_brief_id" not in execution_columns:
+        connection.execute("ALTER TABLE production_executions ADD COLUMN generation_brief_id TEXT")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS output_profiles (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            aspect_ratio TEXT NOT NULL,
+            target_duration_seconds REAL NOT NULL,
+            target_resolution TEXT NOT NULL,
+            fps REAL NOT NULL,
+            video_codec_target TEXT NOT NULL,
+            audio_sample_rate INTEGER NOT NULL,
+            audio_channels INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_output_profiles_project ON output_profiles(project_id, created_at DESC, id)")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS generation_briefs (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            production_job_id TEXT,
+            shot_id TEXT NOT NULL,
+            content_json TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(production_job_id) REFERENCES production_jobs(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_generation_briefs_scope ON generation_briefs(project_id, production_job_id, shot_id, created_at DESC)")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_plans (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            production_job_id TEXT,
+            execution_id TEXT,
+            output_profile_id TEXT,
+            generation_brief_id TEXT,
+            provider_capability TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            generation_mode TEXT NOT NULL,
+            resolution TEXT NOT NULL,
+            provider_generation_duration REAL NOT NULL,
+            target_creative_duration REAL NOT NULL,
+            audio_strategy TEXT NOT NULL,
+            provider_parameters_json TEXT NOT NULL,
+            reference_version_ids_json TEXT NOT NULL,
+            reference_roles_json TEXT NOT NULL,
+            continuity_strategy TEXT NOT NULL,
+            generation_brief_hash TEXT NOT NULL,
+            output_profile_hash TEXT NOT NULL,
+            authorization_json TEXT NOT NULL,
+            prompt_template_version TEXT NOT NULL,
+            plan_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(production_job_id) REFERENCES production_jobs(id) ON DELETE SET NULL,
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id) ON DELETE SET NULL,
+            FOREIGN KEY(output_profile_id) REFERENCES output_profiles(id) ON DELETE SET NULL,
+            FOREIGN KEY(generation_brief_id) REFERENCES generation_briefs(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_plans_hash ON runtime_plans(project_id, plan_hash)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_runtime_plans_execution ON runtime_plans(execution_id, created_at DESC)")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_invocations (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            production_job_id TEXT,
+            execution_id TEXT,
+            capability TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            input_source_ids_json TEXT NOT NULL,
+            reference_version_ids_json TEXT NOT NULL,
+            generation_brief_hash TEXT,
+            runtime_plan_id TEXT,
+            runtime_plan_hash TEXT,
+            request_summary_json TEXT NOT NULL,
+            provider_task_id TEXT,
+            status TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            usage_json TEXT NOT NULL,
+            estimated_cost REAL,
+            actual_cost REAL,
+            output_artifact_ids_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(production_job_id) REFERENCES production_jobs(id) ON DELETE SET NULL,
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id) ON DELETE SET NULL,
+            FOREIGN KEY(runtime_plan_id) REFERENCES runtime_plans(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_ai_invocations_scope ON ai_invocations(project_id, created_at DESC, id)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_ai_invocations_provider_task ON ai_invocations(provider_id, provider_task_id)")
+
+
+def _migration_020_creative_intake(connection: sqlite3.Connection) -> None:
+    """Project-scoped immutable source pack and normalized intake drafts."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_pack_items (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            display_filename TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            storage_path TEXT NOT NULL,
+            version_of_id TEXT,
+            extraction_state TEXT NOT NULL,
+            extracted_text TEXT,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(version_of_id) REFERENCES source_pack_items(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_source_pack_project ON source_pack_items(project_id, created_at, id)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_source_pack_hash ON source_pack_items(project_id, sha256)")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS normalized_creative_briefs (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('DRAFT','APPROVED','SUPERSEDED')),
+            content_json TEXT NOT NULL,
+            source_ids_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_normalized_briefs_project ON normalized_creative_briefs(project_id, created_at DESC, id)")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS intake_analyses (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            classifications_json TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            warnings_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_id) REFERENCES source_pack_items(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_intake_analyses_project ON intake_analyses(project_id, created_at, id)")
+
+
+def _migration_021_reference_profiles(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reference_profiles (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            binding_type TEXT NOT NULL,
+            binding_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            UNIQUE(project_id, binding_type, binding_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reference_profile_items (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            version_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            order_index INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(profile_id) REFERENCES reference_profiles(id) ON DELETE CASCADE,
+            FOREIGN KEY(version_id) REFERENCES reference_asset_versions(id) ON DELETE RESTRICT,
+            UNIQUE(profile_id, order_index),
+            UNIQUE(profile_id, version_id, role)
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_reference_profiles_scope ON reference_profiles(project_id, binding_type, binding_id)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_reference_profile_items_order ON reference_profile_items(profile_id, order_index)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -828,6 +1042,9 @@ MIGRATIONS: tuple[Migration, ...] = (
     (16, _migration_016_director_decision_events),
     (17, _migration_017_post_source_render_attempt),
     (18, _migration_018_producer_recommendation_events),
+    (19, _migration_019_runtime_foundation),
+    (20, _migration_020_creative_intake),
+    (21, _migration_021_reference_profiles),
 )
 
 
@@ -849,6 +1066,12 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
     applied = {
         row[0] for row in connection.execute("SELECT version FROM schema_migrations")
     }
+    supported_max = max(version for version, _ in MIGRATIONS)
+    unsupported = sorted(version for version in applied if version > supported_max)
+    if unsupported:
+        raise UnsupportedDatabaseSchemaError(
+            f"数据库 schema version {unsupported[-1]} 高于当前应用支持的 {supported_max}"
+        )
     count = 0
     for version, migration in MIGRATIONS:
         if version in applied:
