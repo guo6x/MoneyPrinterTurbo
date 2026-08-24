@@ -23,7 +23,8 @@ used.
 ## Immutability and rebuilds
 
 Freezing a DRAFT assembly inserts one item per canonical
-`ProductionShot.order_index` and changes the assembly to `READY`. READY rows
+`ProductionShot.order_index` (preserving the existing 1-based production
+order) and changes the assembly to `READY`. READY rows
 cannot accept new items or transition to another status. A later retry or QC
 result therefore requires a new assembly; an earlier READY manifest remains
 readable with its original execution, artifact, QC, review, and relative path

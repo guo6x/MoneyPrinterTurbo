@@ -126,7 +126,7 @@ def test_freezes_ordered_three_shot_manifest_with_exact_provenance(context):
     manifest = service.get_manifest(project.id, assembly.id)
 
     assert frozen.status is FinalAssemblyStatus.READY
-    assert [item.order_index for item in manifest.items] == [0, 1, 2]
+    assert [item.order_index for item in manifest.items] == [1, 2, 3]
     assert [item.production_shot_id for item in manifest.items] == [shot.id for shot in shots]
     assert [item.production_execution_id for item in manifest.items] == [item[0].id for item in sources]
     assert [item.production_artifact_id for item in manifest.items] == [item[1].id for item in sources]
