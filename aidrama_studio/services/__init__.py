@@ -9,7 +9,7 @@ from .reference_asset_storage import ReferenceAssetStorageService, ReferenceAsse
 from .production import ProductionService, ProductionServiceError
 from .production_execution import ProductionExecutionService, ProductionExecutionServiceError
 from .production_worker import ProductionWorker
-from .adapters import MPTProductionAdapter, MockProductionAdapter, ProductionRuntimeAdapter, RuntimeEvent, RuntimeSubmission
+from .adapters import MPTAdapterError, MPTInputMapper, MPTProductionAdapter, MockProductionAdapter, ProductionRuntimeAdapter, RuntimeEvent, RuntimeSubmission
 
 __all__ = [
     "DeleteProjectResult",
@@ -24,5 +24,5 @@ __all__ = [
     "ReferenceAssetStorageService", "ReferenceAssetStorageError",
     "ProductionService", "ProductionServiceError",
     "ProductionExecutionService", "ProductionExecutionServiceError", "ProductionWorker",
-    "ProductionRuntimeAdapter", "RuntimeSubmission", "RuntimeEvent", "MPTProductionAdapter", "MockProductionAdapter",
+    "ProductionRuntimeAdapter", "RuntimeSubmission", "RuntimeEvent", "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
 ]

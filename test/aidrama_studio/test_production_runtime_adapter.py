@@ -69,8 +69,7 @@ def test_adapter_interface_and_mpt_boundary_are_not_runtime_implementations():
         with pytest.raises(NotImplementedError):
             method(*args)
     mpt = MPTProductionAdapter()
-    with pytest.raises(NotImplementedError):
-        mpt.validate(snapshot)
+    assert mpt.validate(snapshot) is False
     assert "aidrama_studio.domain" not in Path(mpt.__class__.__module__.replace(".", "/") + ".py").as_posix()
 
 
