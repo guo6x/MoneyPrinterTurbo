@@ -10,6 +10,7 @@ from .production import ProductionService, ProductionServiceError
 from .production_execution import ProductionExecutionService, ProductionExecutionServiceError
 from .production_worker import ProductionWorker, ProductionWorkerError
 from .production_artifact_storage import ProductionArtifactStorageError, ProductionArtifactStorageService
+from .production_qc import ProductionQCService, ProductionQCServiceError
 from .adapters import MPTAdapterError, MPTInputMapper, MPTProductionAdapter, MockProductionAdapter, ProductionRuntimeAdapter, RuntimeEvent, RuntimeSubmission
 
 __all__ = [
@@ -26,5 +27,6 @@ __all__ = [
     "ProductionService", "ProductionServiceError",
     "ProductionExecutionService", "ProductionExecutionServiceError", "ProductionWorker", "ProductionWorkerError",
     "ProductionArtifactStorageService", "ProductionArtifactStorageError",
+    "ProductionQCService", "ProductionQCServiceError",
     "ProductionRuntimeAdapter", "RuntimeSubmission", "RuntimeEvent", "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
 ]

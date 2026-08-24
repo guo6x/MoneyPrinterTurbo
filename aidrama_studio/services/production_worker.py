@@ -229,6 +229,13 @@ class ProductionWorker:
             metadata = {"runtime_reference": runtime_reference}
             filename = None
             source = spec
+        execution = self.execution_service.get_execution(project_id, execution_id)
+        metadata.setdefault("execution_id", execution_id)
+        if execution.input_snapshot is not None:
+            shot_ids = list(execution.input_snapshot.shot_parameters)
+            if shot_ids:
+                metadata.setdefault("shot_id", shot_ids[0])
+            metadata.setdefault("reference_versions", dict(execution.input_snapshot.reference_asset_versions))
         relative_path, stored_metadata = self.artifact_storage.store(
             project_id,
             execution_id,

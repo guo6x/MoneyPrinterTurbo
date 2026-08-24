@@ -8,6 +8,7 @@ from .shot import Blocking, CameraAngle, CameraMovement, Lens, Lighting, RiskLev
 from .reference_asset import ReferenceAsset, ReferenceAssetType, ReferenceAssetVersion, ReferenceAssetBinding, ReferenceBindingType
 from .production import ProductionAttempt, ProductionAttemptStatus, ProductionJob, ProductionJobStatus, ProductionShot, ProductionShotStatus
 from .production_execution import ProductionArtifact, ProductionEvent, ProductionEventType, ProductionExecution, ProductionExecutionStatus
+from .production_qc import ProductionQCMetric, ProductionQCMetricStatus, ProductionQCResult, ProductionQCStatus, ProductionReview, ProductionReviewDecision
 from .production_snapshot import FrozenDict, ProductionInputSnapshot
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     "ReferenceAsset", "ReferenceAssetType", "ReferenceAssetVersion", "ReferenceAssetBinding", "ReferenceBindingType",
     "ProductionJob", "ProductionJobStatus", "ProductionShot", "ProductionShotStatus", "ProductionAttempt", "ProductionAttemptStatus",
     "ProductionExecution", "ProductionExecutionStatus", "ProductionEvent", "ProductionEventType", "ProductionArtifact",
+    "ProductionQCResult", "ProductionQCStatus", "ProductionQCMetric", "ProductionQCMetricStatus", "ProductionReview", "ProductionReviewDecision",
     "FrozenDict", "ProductionInputSnapshot",
 ]

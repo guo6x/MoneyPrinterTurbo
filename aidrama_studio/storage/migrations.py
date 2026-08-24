@@ -247,6 +247,62 @@ def _migration_008_production_input_snapshots(connection: sqlite3.Connection) ->
     connection.execute("ALTER TABLE production_executions ADD COLUMN input_snapshot_json TEXT")
 
 
+def _migration_009_production_qc(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE production_qc_results (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            execution_id TEXT NOT NULL,
+            artifact_id TEXT,
+            status TEXT NOT NULL CHECK (status IN ('QC_PENDING', 'QC_RUNNING', 'QC_PASS', 'QC_FAILED')),
+            report_path TEXT,
+            summary_json TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id) ON DELETE CASCADE,
+            FOREIGN KEY(artifact_id) REFERENCES production_artifacts(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE production_qc_metrics (
+            id TEXT PRIMARY KEY,
+            result_id TEXT NOT NULL,
+            metric_name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('PASS', 'FAIL', 'SKIPPED')),
+            value_json TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(result_id) REFERENCES production_qc_results(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE production_reviews (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            qc_result_id TEXT NOT NULL,
+            decision TEXT NOT NULL CHECK (decision IN ('PENDING', 'APPROVED', 'REJECTED')),
+            reviewer TEXT NOT NULL,
+            notes TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(qc_result_id) REFERENCES production_qc_results(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute("CREATE INDEX idx_production_qc_results_execution ON production_qc_results(execution_id, created_at DESC)")
+    connection.execute("CREATE INDEX idx_production_qc_results_status ON production_qc_results(project_id, status, created_at DESC)")
+    connection.execute("CREATE INDEX idx_production_qc_metrics_result ON production_qc_metrics(result_id, created_at, id)")
+    connection.execute("CREATE INDEX idx_production_reviews_result ON production_reviews(qc_result_id, created_at DESC)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -256,6 +312,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (6, _migration_006_production_domain),
     (7, _migration_007_production_execution_queue),
     (8, _migration_008_production_input_snapshots),
+    (9, _migration_009_production_qc),
 )
 
 

@@ -18,6 +18,7 @@ from aidrama_studio.domain.reference_asset import ReferenceAsset, ReferenceAsset
 from aidrama_studio.domain.production import ProductionAttempt, ProductionAttemptStatus, ProductionJob, ProductionJobStatus, ProductionShot, ProductionShotStatus
 from aidrama_studio.domain.production_execution import ProductionArtifact, ProductionEvent, ProductionEventType, ProductionExecution, ProductionExecutionStatus
 from aidrama_studio.domain.production_snapshot import ProductionInputSnapshot
+from aidrama_studio.domain.production_qc import ProductionQCMetric, ProductionQCResult, ProductionReview
 
 from .database import DatabasePaths, connect, initialize_database
 
@@ -752,3 +753,144 @@ class ProjectRepository:
         with connect(self.paths.database) as connection:
             rows = connection.execute("SELECT * FROM production_artifacts WHERE execution_id=? ORDER BY created_at,rowid", (execution_id,)).fetchall()
         return [self._production_artifact_from_row(row) for row in rows]
+
+    @staticmethod
+    def _production_qc_result_from_row(row) -> ProductionQCResult:
+        return ProductionQCResult(
+            id=row["id"], project_id=row["project_id"], execution_id=row["execution_id"],
+            artifact_id=row["artifact_id"], status=row["status"], report_path=row["report_path"],
+            summary_json=json.loads(row["summary_json"]), started_at=row["started_at"],
+            finished_at=row["finished_at"], created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _production_qc_metric_from_row(row) -> ProductionQCMetric:
+        return ProductionQCMetric(
+            id=row["id"], result_id=row["result_id"], metric_name=row["metric_name"],
+            category=row["category"], status=row["status"], value_json=json.loads(row["value_json"]),
+            message=row["message"], created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _production_review_from_row(row) -> ProductionReview:
+        return ProductionReview(
+            id=row["id"], project_id=row["project_id"], qc_result_id=row["qc_result_id"],
+            decision=row["decision"], reviewer=row["reviewer"], notes=row["notes"],
+            created_at=row["created_at"],
+        )
+
+    def create_production_qc_result(self, result: ProductionQCResult) -> ProductionQCResult:
+        with connect(self.paths.database) as connection:
+            execution = connection.execute(
+                "SELECT pj.project_id FROM production_executions pe JOIN production_jobs pj ON pj.id=pe.production_job_id WHERE pe.id=?",
+                (result.execution_id,),
+            ).fetchone()
+            if execution is None or execution["project_id"] != result.project_id:
+                raise KeyError("ProductionQCResult execution 不属于该项目")
+            if result.artifact_id is not None:
+                artifact = connection.execute(
+                    "SELECT execution_id FROM production_artifacts WHERE id=?", (result.artifact_id,)
+                ).fetchone()
+                if artifact is None or artifact["execution_id"] != result.execution_id:
+                    raise KeyError("ProductionQCResult artifact 不属于该 execution")
+            connection.execute(
+                "INSERT INTO production_qc_results(id,project_id,execution_id,artifact_id,status,report_path,summary_json,started_at,finished_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    result.id, result.project_id, result.execution_id, result.artifact_id, result.status.value,
+                    result.report_path, json.dumps(result.summary_json, ensure_ascii=False, sort_keys=True),
+                    result.started_at, result.finished_at, result.created_at,
+                ),
+            )
+        return self.get_production_qc_result(result.id)
+
+    def get_production_qc_result(self, result_id: str) -> ProductionQCResult | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM production_qc_results WHERE id=?", (result_id,)).fetchone()
+        return self._production_qc_result_from_row(row) if row else None
+
+    def list_production_qc_results(self, project_id: str, execution_id: str | None = None) -> list[ProductionQCResult]:
+        query = "SELECT * FROM production_qc_results WHERE project_id=?"
+        params: list[object] = [project_id]
+        if execution_id is not None:
+            query += " AND execution_id=?"
+            params.append(execution_id)
+        query += " ORDER BY created_at,rowid"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [self._production_qc_result_from_row(row) for row in rows]
+
+    def update_production_qc_result(
+        self,
+        result_id: str,
+        *,
+        status,
+        report_path: str | None = None,
+        summary_json: dict[str, object] | None = None,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+    ) -> ProductionQCResult:
+        current = self.get_production_qc_result(result_id)
+        if current is None:
+            raise KeyError(f"ProductionQCResult 不存在: {result_id}")
+        with connect(self.paths.database) as connection:
+            connection.execute(
+                "UPDATE production_qc_results SET status=?,report_path=COALESCE(?,report_path),summary_json=?,started_at=COALESCE(?,started_at),finished_at=COALESCE(?,finished_at) WHERE id=?",
+                (
+                    status.value, report_path,
+                    json.dumps(summary_json if summary_json is not None else current.summary_json, ensure_ascii=False, sort_keys=True),
+                    started_at, finished_at, result_id,
+                ),
+            )
+        return self.get_production_qc_result(result_id)
+
+    def create_production_qc_metric(self, metric: ProductionQCMetric) -> ProductionQCMetric:
+        with connect(self.paths.database) as connection:
+            if connection.execute("SELECT 1 FROM production_qc_results WHERE id=?", (metric.result_id,)).fetchone() is None:
+                raise KeyError(f"ProductionQCResult 不存在: {metric.result_id}")
+            connection.execute(
+                "INSERT INTO production_qc_metrics(id,result_id,metric_name,category,status,value_json,message,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    metric.id, metric.result_id, metric.metric_name, metric.category, metric.status.value,
+                    json.dumps(metric.value_json, ensure_ascii=False, sort_keys=True), metric.message, metric.created_at,
+                ),
+            )
+        return self.get_production_qc_metric(metric.id)
+
+    def get_production_qc_metric(self, metric_id: str) -> ProductionQCMetric | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM production_qc_metrics WHERE id=?", (metric_id,)).fetchone()
+        return self._production_qc_metric_from_row(row) if row else None
+
+    def list_production_qc_metrics(self, result_id: str) -> list[ProductionQCMetric]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM production_qc_metrics WHERE result_id=? ORDER BY created_at,rowid", (result_id,)).fetchall()
+        return [self._production_qc_metric_from_row(row) for row in rows]
+
+    def create_production_review(self, review: ProductionReview) -> ProductionReview:
+        with connect(self.paths.database) as connection:
+            result = connection.execute(
+                "SELECT project_id FROM production_qc_results WHERE id=?", (review.qc_result_id,)
+            ).fetchone()
+            if result is None or result["project_id"] != review.project_id:
+                raise KeyError("ProductionReview QC result 不属于该项目")
+            connection.execute(
+                "INSERT INTO production_reviews(id,project_id,qc_result_id,decision,reviewer,notes,created_at) VALUES (?,?,?,?,?,?,?)",
+                (review.id, review.project_id, review.qc_result_id, review.decision.value, review.reviewer, review.notes, review.created_at),
+            )
+        return self.get_production_review(review.id)
+
+    def get_production_review(self, review_id: str) -> ProductionReview | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM production_reviews WHERE id=?", (review_id,)).fetchone()
+        return self._production_review_from_row(row) if row else None
+
+    def list_production_reviews(self, project_id: str, qc_result_id: str | None = None) -> list[ProductionReview]:
+        query = "SELECT * FROM production_reviews WHERE project_id=?"
+        params: list[object] = [project_id]
+        if qc_result_id is not None:
+            query += " AND qc_result_id=?"
+            params.append(qc_result_id)
+        query += " ORDER BY created_at,rowid"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [self._production_review_from_row(row) for row in rows]
