@@ -82,8 +82,8 @@ tables and projecting legacy rows without deleting the legacy tables.
 
 ## Validation evidence
 
-- AIDrama suite: **160 passed**, 10 warnings.
-- Full repository: **758 passed, 10 skipped, 1 known baseline failure** in
+- AIDrama suite: **164 passed**, 10 warnings.
+- Full repository: **762 passed, 10 skipped, 1 known baseline failure** in
   `test_worker_logs_are_available_without_streamlit_session_state` (Windows
   path separator formatting only); no new regressions.
 - Fresh migration and idempotency tests pass; the repaired default database
