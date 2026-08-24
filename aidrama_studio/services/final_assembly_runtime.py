@@ -155,6 +155,56 @@ class FinalAssemblyRuntimeService:
 
     list_render_attempts = list_attempts
 
+    def latest_successful_attempt(
+        self, project_id: str, assembly_id: str
+    ) -> FinalAssemblyRenderAttempt | None:
+        """Return the newest successful attempt, scoped to the project."""
+        attempts = self.list_attempts(project_id, assembly_id)
+        successful = [
+            attempt
+            for attempt in attempts
+            if attempt.status is FinalAssemblyRenderAttemptStatus.SUCCEEDED
+        ]
+        return successful[-1] if successful else None
+
+    def resolve_output_path(
+        self,
+        project_id: str,
+        assembly_id: str,
+        attempt_id: str | None = None,
+    ) -> Path | None:
+        """Resolve a persisted successful output without exposing raw paths.
+
+        The page receives this safe, project-scoped path only for Streamlit's
+        preview/download APIs.  The database still stores only a relative
+        path, and a missing file returns ``None`` rather than being presented
+        as a valid completed video.
+        """
+        self._assembly(project_id, assembly_id)
+        if attempt_id is None:
+            attempt = self.latest_successful_attempt(project_id, assembly_id)
+        else:
+            attempt = self.get_attempt(project_id, attempt_id)
+            if attempt.final_assembly_id != assembly_id:
+                raise FinalAssemblyRuntimeServiceError("render attempt 不属于该成片版本")
+            if attempt.status is not FinalAssemblyRenderAttemptStatus.SUCCEEDED:
+                return None
+        if attempt is None or not attempt.output_relative_path:
+            return None
+        relative = attempt.output_relative_path.strip().replace("\\", "/")
+        if not relative or relative.startswith("/") or PureWindowsPath(relative).drive:
+            raise FinalAssemblyRuntimeServiceError("final output path 必须是项目相对路径")
+        parts = PurePosixPath(relative).parts
+        if not parts or any(part in {"", ".", ".."} for part in parts):
+            raise FinalAssemblyRuntimeServiceError("final output path 不能越过项目目录")
+        root = self._project_root(project_id)
+        target = (root / Path(*parts)).resolve()
+        if root not in target.parents or target.suffix.lower() != ".mp4":
+            raise FinalAssemblyRuntimeServiceError("final output path 不属于该项目")
+        if not target.is_file() or target.stat().st_size <= 0:
+            return None
+        return target
+
     def get_attempt(self, project_id: str, attempt_id: str) -> FinalAssemblyRenderAttempt:
         attempt = self.repository.get_final_assembly_render_attempt(attempt_id)
         if attempt is None:

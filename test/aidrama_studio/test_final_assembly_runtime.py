@@ -149,3 +149,23 @@ def test_retry_keeps_frozen_source_identity_and_survives_repository_reload(conte
     reloaded = ProjectRepository(repository.paths)
     assert reloaded.get_final_assembly_render_attempt(first_attempt.id).metadata_json["sha256"]
     assert len(FinalAssemblyRuntimeService(reloaded).list_attempts(project.id, assembly.id)) == 2
+
+
+def test_successful_output_resolver_handles_missing_file_and_rejects_cross_project(context):
+    repository, project = context
+    job, shots = _shots(repository, project, 1)
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        import imageio_ffmpeg
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    _make_source_videos(repository, project, job, shots, ffmpeg=ffmpeg)
+    manifest_service = FinalAssemblyService(repository)
+    assembly = manifest_service.create_assembly(project.id, job.id, freeze=True)
+    runtime = FinalAssemblyRuntimeService(repository, adapter=MPTFinalAssemblyAdapter(project_root=repository.paths.projects / project.id))
+    attempt = runtime.render(project.id, assembly.id)
+    assert runtime.resolve_output_path(project.id, assembly.id, attempt.id).is_file()
+    output = repository.paths.projects / project.id / attempt.output_relative_path
+    output.unlink()
+    assert runtime.resolve_output_path(project.id, assembly.id, attempt.id) is None
+    with pytest.raises(FinalAssemblyRuntimeServiceError):
+        runtime.resolve_output_path("other-project", assembly.id, attempt.id)
