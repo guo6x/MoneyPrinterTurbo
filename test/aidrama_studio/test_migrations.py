@@ -64,3 +64,13 @@ def test_migrations_are_idempotent_and_do_not_duplicate_schema_records() -> None
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
         ).fetchone()
+
+
+def test_execution_snapshot_column_is_available_after_migration() -> None:
+    connection = sqlite3.connect(":memory:")
+    apply_migrations(connection)
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(production_executions)")
+    }
+    assert "input_snapshot_json" in columns

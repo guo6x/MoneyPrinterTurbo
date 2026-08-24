@@ -4,6 +4,8 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .production_snapshot import ProductionInputSnapshot
+
 
 class ProductionExecutionStatus(str, Enum):
     QUEUED = "QUEUED"
@@ -33,6 +35,7 @@ class ProductionExecution(BaseModel):
     started_at: str | None = Field(default=None, max_length=80)
     finished_at: str | None = Field(default=None, max_length=80)
     created_at: str | None = Field(default=None, max_length=80)
+    input_snapshot: ProductionInputSnapshot | None = None
 
 
 class ProductionEvent(BaseModel):

@@ -243,6 +243,10 @@ def _migration_007_production_execution_queue(connection: sqlite3.Connection) ->
     connection.execute("CREATE INDEX idx_production_artifacts_execution ON production_artifacts(execution_id, created_at, id)")
 
 
+def _migration_008_production_input_snapshots(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE production_executions ADD COLUMN input_snapshot_json TEXT")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -251,6 +255,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (5, _migration_005_reference_assets),
     (6, _migration_006_production_domain),
     (7, _migration_007_production_execution_queue),
+    (8, _migration_008_production_input_snapshots),
 )
 
 

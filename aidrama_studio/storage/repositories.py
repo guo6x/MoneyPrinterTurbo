@@ -17,6 +17,7 @@ from aidrama_studio.domain.shot import ShotPlan, ShotRevisionStatus
 from aidrama_studio.domain.reference_asset import ReferenceAsset, ReferenceAssetBinding, ReferenceAssetType, ReferenceAssetVersion, ReferenceBindingType
 from aidrama_studio.domain.production import ProductionAttempt, ProductionAttemptStatus, ProductionJob, ProductionJobStatus, ProductionShot, ProductionShotStatus
 from aidrama_studio.domain.production_execution import ProductionArtifact, ProductionEvent, ProductionEventType, ProductionExecution, ProductionExecutionStatus
+from aidrama_studio.domain.production_snapshot import ProductionInputSnapshot
 
 from .database import DatabasePaths, connect, initialize_database
 
@@ -656,6 +657,8 @@ class ProjectRepository:
             id=row["id"], production_job_id=row["production_job_id"], status=row["status"],
             worker_type=row["worker_type"], started_at=row["started_at"], finished_at=row["finished_at"],
             created_at=row["created_at"],
+            input_snapshot=ProductionInputSnapshot.model_validate(json.loads(row["input_snapshot_json"]))
+            if row["input_snapshot_json"] else None,
         )
 
     @staticmethod
@@ -677,8 +680,9 @@ class ProjectRepository:
             if connection.execute("SELECT 1 FROM production_jobs WHERE id=?", (execution.production_job_id,)).fetchone() is None:
                 raise KeyError(f"ProductionJob 不存在: {execution.production_job_id}")
             connection.execute(
-                "INSERT INTO production_executions(id,production_job_id,status,worker_type,started_at,finished_at,created_at) VALUES (?,?,?,?,?,?,?)",
-                (execution.id, execution.production_job_id, execution.status.value, execution.worker_type, execution.started_at, execution.finished_at, execution.created_at),
+                "INSERT INTO production_executions(id,production_job_id,status,worker_type,started_at,finished_at,created_at,input_snapshot_json) VALUES (?,?,?,?,?,?,?,?)",
+                (execution.id, execution.production_job_id, execution.status.value, execution.worker_type, execution.started_at, execution.finished_at, execution.created_at,
+                 json.dumps(execution.input_snapshot.to_json_dict(), ensure_ascii=False, sort_keys=True) if execution.input_snapshot else None),
             )
         return self.get_production_execution(execution.id)
 
