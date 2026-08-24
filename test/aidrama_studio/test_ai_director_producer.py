@@ -11,6 +11,7 @@ from aidrama_studio.services import (
     CapabilityRegistry,
     DeterministicMockVisionProvider,
     ProducerService,
+    DirectorServiceError,
     RuntimeVideoProvider,
     UnavailableImageProvider,
     UnavailableVisionProvider,
@@ -111,6 +112,20 @@ def test_director_cross_project_transition_is_rejected(context):
     )
     with pytest.raises(Exception):
         service.approve_decision(other.id, first.id)
+
+
+def test_director_block_gate_and_max_steps_require_explicit_resume_segment(context):
+    repository, project = context
+    service = DirectorService(repository)
+    session = service.start_session(project.id, DirectorGoalKind.MAKE_PRODUCTION_READY, max_steps=1)
+    first = service.run(project.id, session.id)
+    with pytest.raises(DirectorServiceError, match="等待人工处理"):
+        service.resume(project.id, session.id)
+    service.approve_decision(project.id, first.id)
+    with pytest.raises(DirectorServiceError, match="max_steps"):
+        service.run(project.id, session.id)
+    second = service.resume(project.id, session.id)
+    assert second.id != first.id
 
 
 @pytest.mark.parametrize(
