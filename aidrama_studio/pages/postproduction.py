@@ -439,7 +439,7 @@ def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: An
 
     st.caption(f"PostProductionPlan · 已连接到当前成片版本")
     subtitle_revision_id = _script_revision_id(repository, job)
-    subtitle_tracks = service.repository.list_post_subtitle_tracks(project.id, plan.id)
+    subtitle_tracks = service.list_subtitle_tracks(project.id, plan.id)
     subtitle_track = subtitle_tracks[-1] if subtitle_tracks else None
     with st.container(border=True):
         st.markdown("### 字幕")
@@ -476,7 +476,7 @@ def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: An
             st.success("TTS runtime 已就绪，可通过 VoiceTrack 接入。")
         else:
             st.info("TTS Provider 未配置；当前不会伪造音频。可稍后通过 VoiceTrack 接入本地或已配置的音频。")
-        voice_tracks = service.repository.list_post_voice_tracks(project.id, plan.id)
+        voice_tracks = service.list_voice_tracks(project.id, plan.id)
         if voice_tracks:
             st.caption(f"已有 VoiceTrack：{len(voice_tracks)}")
         else:
@@ -492,7 +492,7 @@ def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: An
                 st.rerun()
             except Exception as exc:
                 st.warning(_safe_error(exc, "BGM 导入失败"))
-        music_tracks = service.repository.list_post_music_tracks(project.id, plan.id)
+        music_tracks = service.list_music_tracks(project.id, plan.id)
         music = music_tracks[-1] if music_tracks else None
         gain = st.slider("BGM 音量", min_value=0.0, max_value=1.5, value=float(plan.audio_mix.music_gain), step=0.05, key=f"bgm-gain-{plan.id}")
         if st.button("保存混音设置", key=f"mix-save-{plan.id}"):

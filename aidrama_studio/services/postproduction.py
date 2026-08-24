@@ -261,6 +261,12 @@ class PostProductionService:
         })
         return self.repository.update_post_subtitle_track(updated)
 
+    def list_subtitle_tracks(self, project_id: str, plan_id: str | None = None) -> list[SubtitleTrack]:
+        self._require_project(project_id)
+        if plan_id is not None:
+            self.get_plan(project_id, plan_id)
+        return self.repository.list_post_subtitle_tracks(project_id, plan_id)
+
     export_subtitles = export_srt
 
     # Audio -------------------------------------------------------------
@@ -269,6 +275,10 @@ class PostProductionService:
         relative = self._validate_optional_audio_path(project_id, path)
         track = VoiceTrack(id=track_id or uuid4().hex, project_id=project_id, plan_id=plan_id, path=relative, voice_assignments=dict(voice_assignments or {}), metadata_json=dict(metadata or {}), created_at=_now())
         return self.repository.create_post_voice_track(track)
+
+    def list_voice_tracks(self, project_id: str, plan_id: str) -> list[VoiceTrack]:
+        self.get_plan(project_id, plan_id)
+        return self.repository.list_post_voice_tracks(project_id, plan_id)
 
     def import_bgm(self, project_id: str, plan_id: str, source_path: str | Path, *, filename: str | None = None) -> MusicTrack:
         self.get_plan(project_id, plan_id)
@@ -312,6 +322,10 @@ class PostProductionService:
         relative = self._validate_audio_path(project_id, path)
         track = MusicTrack(id=track_id or uuid4().hex, project_id=project_id, plan_id=plan_id, path=relative, start_seconds=start_seconds, end_seconds=end_seconds, gain=gain, loop=loop, fade_in_seconds=fade_in_seconds, fade_out_seconds=fade_out_seconds, metadata_json=dict(metadata or {}), created_at=_now())
         return self.repository.create_post_music_track(track)
+
+    def list_music_tracks(self, project_id: str, plan_id: str) -> list[MusicTrack]:
+        self.get_plan(project_id, plan_id)
+        return self.repository.list_post_music_tracks(project_id, plan_id)
 
     def add_bgm(self, project_id: str, plan_id: str, path: str, **kwargs: Any) -> MusicTrack:
         """Compatibility helper: absolute user-selected paths are imported."""
