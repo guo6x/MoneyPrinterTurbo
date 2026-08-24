@@ -197,6 +197,52 @@ def _migration_006_production_domain(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX idx_production_attempts_shot ON production_attempts(production_shot_id, attempt_number)")
 
 
+def _migration_007_production_execution_queue(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE production_executions (
+            id TEXT PRIMARY KEY,
+            production_job_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
+            worker_type TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(production_job_id) REFERENCES production_jobs(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE production_events (
+            id TEXT PRIMARY KEY,
+            execution_id TEXT NOT NULL,
+            event_type TEXT NOT NULL CHECK (event_type IN ('QUEUED', 'STARTED', 'PROGRESS', 'SHOT_COMPLETED', 'FAILED', 'CANCELLED', 'FINISHED')),
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE production_artifacts (
+            id TEXT PRIMARY KEY,
+            execution_id TEXT NOT NULL,
+            artifact_type TEXT NOT NULL,
+            path TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute("CREATE INDEX idx_production_executions_job ON production_executions(production_job_id, created_at DESC)")
+    connection.execute("CREATE INDEX idx_production_executions_status ON production_executions(status, created_at)")
+    connection.execute("CREATE INDEX idx_production_events_execution ON production_events(execution_id, created_at, id)")
+    connection.execute("CREATE INDEX idx_production_artifacts_execution ON production_artifacts(execution_id, created_at, id)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -204,6 +250,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (4, _migration_004_shot_plan_revisions),
     (5, _migration_005_reference_assets),
     (6, _migration_006_production_domain),
+    (7, _migration_007_production_execution_queue),
 )
 
 

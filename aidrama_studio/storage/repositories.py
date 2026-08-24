@@ -16,6 +16,7 @@ from aidrama_studio.domain.script import ScriptRevisionStatus
 from aidrama_studio.domain.shot import ShotPlan, ShotRevisionStatus
 from aidrama_studio.domain.reference_asset import ReferenceAsset, ReferenceAssetBinding, ReferenceAssetType, ReferenceAssetVersion, ReferenceBindingType
 from aidrama_studio.domain.production import ProductionAttempt, ProductionAttemptStatus, ProductionJob, ProductionJobStatus, ProductionShot, ProductionShotStatus
+from aidrama_studio.domain.production_execution import ProductionArtifact, ProductionEvent, ProductionEventType, ProductionExecution, ProductionExecutionStatus
 
 from .database import DatabasePaths, connect, initialize_database
 
@@ -648,3 +649,102 @@ class ProjectRepository:
             if cursor.rowcount != 1:
                 raise KeyError(f"ProductionAttempt 不存在: {attempt_id}")
         return self.get_production_attempt(attempt_id)
+
+    @staticmethod
+    def _production_execution_from_row(row) -> ProductionExecution:
+        return ProductionExecution(
+            id=row["id"], production_job_id=row["production_job_id"], status=row["status"],
+            worker_type=row["worker_type"], started_at=row["started_at"], finished_at=row["finished_at"],
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _production_event_from_row(row) -> ProductionEvent:
+        return ProductionEvent(
+            id=row["id"], execution_id=row["execution_id"], event_type=row["event_type"],
+            payload_json=json.loads(row["payload_json"]), created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _production_artifact_from_row(row) -> ProductionArtifact:
+        return ProductionArtifact(
+            id=row["id"], execution_id=row["execution_id"], artifact_type=row["artifact_type"],
+            path=row["path"], metadata_json=json.loads(row["metadata_json"]), created_at=row["created_at"],
+        )
+
+    def create_production_execution(self, execution: ProductionExecution) -> ProductionExecution:
+        with connect(self.paths.database) as connection:
+            if connection.execute("SELECT 1 FROM production_jobs WHERE id=?", (execution.production_job_id,)).fetchone() is None:
+                raise KeyError(f"ProductionJob 不存在: {execution.production_job_id}")
+            connection.execute(
+                "INSERT INTO production_executions(id,production_job_id,status,worker_type,started_at,finished_at,created_at) VALUES (?,?,?,?,?,?,?)",
+                (execution.id, execution.production_job_id, execution.status.value, execution.worker_type, execution.started_at, execution.finished_at, execution.created_at),
+            )
+        return self.get_production_execution(execution.id)
+
+    def get_production_execution(self, execution_id: str) -> ProductionExecution | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM production_executions WHERE id=?", (execution_id,)).fetchone()
+        return self._production_execution_from_row(row) if row else None
+
+    def list_production_executions(self, job_id: str) -> list[ProductionExecution]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM production_executions WHERE production_job_id=? ORDER BY created_at,rowid", (job_id,)).fetchall()
+        return [self._production_execution_from_row(row) for row in rows]
+
+    def update_production_execution(
+        self,
+        execution_id: str,
+        *,
+        status: ProductionExecutionStatus,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+    ) -> ProductionExecution:
+        with connect(self.paths.database) as connection:
+            cursor = connection.execute(
+                "UPDATE production_executions SET status=?,started_at=COALESCE(?,started_at),finished_at=COALESCE(?,finished_at) WHERE id=?",
+                (status.value, started_at, finished_at, execution_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"ProductionExecution 不存在: {execution_id}")
+        return self.get_production_execution(execution_id)
+
+    def create_production_event(self, event: ProductionEvent) -> ProductionEvent:
+        with connect(self.paths.database) as connection:
+            if connection.execute("SELECT 1 FROM production_executions WHERE id=?", (event.execution_id,)).fetchone() is None:
+                raise KeyError(f"ProductionExecution 不存在: {event.execution_id}")
+            connection.execute(
+                "INSERT INTO production_events(id,execution_id,event_type,payload_json,created_at) VALUES (?,?,?,?,?)",
+                (event.id, event.execution_id, event.event_type.value, json.dumps(event.payload_json, ensure_ascii=False, sort_keys=True), event.created_at),
+            )
+        return self.get_production_event(event.id)
+
+    def get_production_event(self, event_id: str) -> ProductionEvent | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM production_events WHERE id=?", (event_id,)).fetchone()
+        return self._production_event_from_row(row) if row else None
+
+    def list_production_events(self, execution_id: str) -> list[ProductionEvent]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM production_events WHERE execution_id=? ORDER BY created_at,rowid", (execution_id,)).fetchall()
+        return [self._production_event_from_row(row) for row in rows]
+
+    def create_production_artifact(self, artifact: ProductionArtifact) -> ProductionArtifact:
+        with connect(self.paths.database) as connection:
+            if connection.execute("SELECT 1 FROM production_executions WHERE id=?", (artifact.execution_id,)).fetchone() is None:
+                raise KeyError(f"ProductionExecution 不存在: {artifact.execution_id}")
+            connection.execute(
+                "INSERT INTO production_artifacts(id,execution_id,artifact_type,path,metadata_json,created_at) VALUES (?,?,?,?,?,?)",
+                (artifact.id, artifact.execution_id, artifact.artifact_type, artifact.path, json.dumps(artifact.metadata_json, ensure_ascii=False, sort_keys=True), artifact.created_at),
+            )
+        return self.get_production_artifact(artifact.id)
+
+    def get_production_artifact(self, artifact_id: str) -> ProductionArtifact | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM production_artifacts WHERE id=?", (artifact_id,)).fetchone()
+        return self._production_artifact_from_row(row) if row else None
+
+    def list_production_artifacts(self, execution_id: str) -> list[ProductionArtifact]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM production_artifacts WHERE execution_id=? ORDER BY created_at,rowid", (execution_id,)).fetchall()
+        return [self._production_artifact_from_row(row) for row in rows]
