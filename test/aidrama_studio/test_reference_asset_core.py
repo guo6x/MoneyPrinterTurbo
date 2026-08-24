@@ -18,6 +18,7 @@ from aidrama_studio.domain import (
     World,
 )
 from aidrama_studio.services import ProjectService, ReferenceAssetService, ReferenceAssetServiceError
+from aidrama_studio.services import ReferenceAssetStorageError, ReferenceAssetStorageService
 from aidrama_studio.storage.database import DatabasePaths
 from aidrama_studio.storage.repositories import ProjectRepository
 
@@ -97,3 +98,59 @@ def test_storage_path_must_be_relative():
     values = dict(id="v", asset_id="a", project_id="p", version_number=1, filename="x", mime_type="image/png", size_bytes=1, sha256="a" * 64, created_at="now")
     with pytest.raises(ValueError): ReferenceAssetVersion(**values, storage_path="C:/outside.png")
     with pytest.raises(ValueError): ReferenceAssetVersion(**values, storage_path="assets/../outside.png")
+
+
+@pytest.mark.parametrize(
+    ("filename", "mime", "payload"),
+    [
+        ("hero.jpg", "image/jpeg", b"\xff\xd8\xffminimal\xff\xd9"),
+        ("hero.png", "image/png", b"\x89PNG\r\n\x1a\nminimalIEND"),
+        ("hero.webp", "image/webp", b"RIFF\x00\x00\x00\x00WEBPminimal"),
+    ],
+)
+def test_controlled_import_validates_stores_and_hashes(context, filename, mime, payload):
+    repository, project = context
+    service = ReferenceAssetService(repository)
+    storage = ReferenceAssetStorageService(service)
+    asset = service.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
+    version = storage.import_image(project.id, asset.id, payload, filename="../../CON." + filename.rsplit(".", 1)[-1], mime_type=mime)
+    assert version.sha256 == hashlib.sha256(payload).hexdigest()
+    assert version.storage_path.startswith("assets/references/")
+    assert (repository.paths.projects / project.id / version.storage_path).read_bytes() == payload
+    assert version.filename.startswith("CON") is False
+
+
+def test_import_rejects_fake_extension_signature_and_oversize(context):
+    repository, project = context
+    service = ReferenceAssetService(repository); storage = ReferenceAssetStorageService(service)
+    asset = service.create_asset(project.id, ReferenceAssetType.LOCATION_REFERENCE)
+    with pytest.raises(ValueError): storage.import_image(project.id, asset.id, b"not png", filename="x.png", mime_type="image/png")
+    with pytest.raises(ValueError): storage.import_image(project.id, asset.id, b"\xff\xd8\xffx\xff\xd9", filename="x.png", mime_type="image/png")
+    with pytest.raises(ValueError, match="15 MB"): storage.import_image(project.id, asset.id, b"x" * (15 * 1024 * 1024 + 1), filename="x.jpg", mime_type="image/jpeg")
+
+
+def test_import_deduplicates_blob_across_assets_and_rejects_same_asset_duplicate(context):
+    repository, project = context
+    service = ReferenceAssetService(repository); storage = ReferenceAssetStorageService(service)
+    payload = b"\x89PNG\r\n\x1a\nminimalIEND"
+    first = service.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
+    second = service.create_asset(project.id, ReferenceAssetType.PROP_REFERENCE)
+    one = storage.import_image(project.id, first.id, payload, filename="one.png", mime_type="image/png")
+    two = storage.import_image(project.id, second.id, payload, filename="two.png", mime_type="image/png")
+    assert one.storage_path == two.storage_path
+    with pytest.raises(ReferenceAssetStorageError, match="相同 SHA-256"):
+        storage.import_image(project.id, first.id, payload, filename="again.png", mime_type="image/png")
+
+
+def test_import_project_isolation_and_immutable_blob(context):
+    repository, project = context
+    other = ProjectService(repository).create(title="Other")
+    service = ReferenceAssetService(repository); storage = ReferenceAssetStorageService(service)
+    asset = service.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
+    payload = b"\xff\xd8\xffimmutable\xff\xd9"
+    version = storage.import_image(project.id, asset.id, payload, filename="hero.jpg", mime_type="image/jpeg")
+    path = repository.paths.projects / project.id / version.storage_path
+    before = path.read_bytes()
+    with pytest.raises(ReferenceAssetStorageError, match="不属于"):
+        storage.import_image(other.id, asset.id, payload, filename="hero.jpg", mime_type="image/jpeg")
+    assert path.read_bytes() == before

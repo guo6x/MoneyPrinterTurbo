@@ -35,12 +35,13 @@ class ReferenceAssetService:
     def create_version(
         self, project_id: str, asset_id: str, *, filename: str, mime_type: str,
         size_bytes: int, sha256: str, storage_path: str, metadata: dict[str, object] | None = None,
+        allow_duplicate_hash: bool = False,
     ) -> ReferenceAssetVersion:
         self._require_project(project_id)
         asset = self.repository.get_reference_asset(asset_id)
         if asset is None: raise ReferenceAssetServiceError(f"ReferenceAsset 不存在: {asset_id}")
         if asset.project_id != project_id: raise ReferenceAssetServiceError("asset 不属于该项目")
-        if self.repository.find_reference_version_by_hash(project_id, sha256):
+        if self.repository.find_reference_version_by_hash(project_id, sha256) and not allow_duplicate_hash:
             raise ReferenceAssetServiceError("该项目已存在相同 SHA-256 的资产")
         versions = self.repository.list_reference_asset_versions(asset_id)
         version = ReferenceAssetVersion(
