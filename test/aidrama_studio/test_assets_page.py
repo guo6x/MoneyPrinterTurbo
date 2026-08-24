@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from streamlit.testing.v1 import AppTest
+
 from aidrama_studio.domain import (
     Character,
     ReferenceAsset,
@@ -96,6 +98,39 @@ def test_page_loads_and_exposes_required_center_sections():
     source = Path(assets.__file__).read_text(encoding="utf-8")
     for label in ("Reference Readiness", "Characters", "Locations", "Styles", "Props", "Version history"):
         assert label in source
+
+
+def test_page_renders_in_streamlit_with_project_context():
+    app = AppTest.from_string(
+        """
+from types import SimpleNamespace
+from aidrama_studio.pages import assets as page
+
+project = SimpleNamespace(id="project-smoke", title="Smoke")
+character = SimpleNamespace(id="char-1", name="Hero", identity="detective", appearance="coat", personality="calm")
+location = SimpleNamespace(id="loc-1", name="Room", environment="interior", visual_style="warm", time_of_day="night")
+story = SimpleNamespace(characters=[character], locations=[location])
+
+class FakeService:
+    def approved_story_revision(self, project_id):
+        return {"id": "story-1", "content": story}
+    def find_asset_for_binding(self, project_id, binding_type, binding_id):
+        return None
+    def get_current_version(self, project_id, asset_id):
+        return None
+
+page.current_project_or_stop = lambda: project
+page.ReferenceAssetService = FakeService
+page.ReferenceAssetStorageService = lambda service: SimpleNamespace()
+page.render()
+"""
+    ).run(timeout=30)
+
+    assert not app.exception
+    assert [tab.label for tab in app.tabs] == ["Characters", "Locations", "Styles", "Props"]
+    assert [metric.label for metric in app.metric] == [
+        "Characters", "Character locked", "Locations", "Location locked", "Missing coverage"
+    ]
 
 
 def test_readiness_dashboard_is_project_isolated_and_counts_locked_assets():
