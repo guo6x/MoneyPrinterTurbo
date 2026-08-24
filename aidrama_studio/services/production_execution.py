@@ -116,6 +116,59 @@ class ProductionExecutionService:
         self._append_event(project_id, execution, ProductionEventType.QUEUED, {})
         return execution
 
+    def enqueue_shot_execution(
+        self,
+        project_id: str,
+        production_job_id: str,
+        input_snapshot: ProductionInputSnapshot,
+        worker_type: str = "mpt",
+    ) -> ProductionExecution:
+        """Queue one immutable, project-scoped shot execution.
+
+        ``enqueue_job`` predates the multi-shot orchestrator and captures a
+        whole-plan snapshot.  The orchestrator uses this narrower seam so
+        every ``ProductionShot`` has exactly one durable execution containing
+        only its own frozen shot parameters.
+        """
+        self._require_project(project_id)
+        if not isinstance(worker_type, str) or not worker_type.strip():
+            raise ProductionExecutionServiceError("worker_type 不能为空")
+        if input_snapshot.project_id != project_id:
+            raise ProductionExecutionServiceError("input snapshot 不属于该项目")
+        if len(input_snapshot.shot_parameters) != 1:
+            raise ProductionExecutionServiceError("shot execution 必须包含且只包含一个 shot")
+        job = self.production_service.get_job(project_id, production_job_id)
+        if job.status in (ProductionJobStatus.SUCCEEDED, ProductionJobStatus.CANCELLED):
+            raise ProductionExecutionServiceError("ProductionJob 已结束，不能启动新的 shot execution")
+        if input_snapshot.shot_plan_revision_id != job.shot_plan_revision_id:
+            raise ProductionExecutionServiceError("input snapshot 的 Shot Plan revision 不匹配")
+        shot_id = next(iter(input_snapshot.shot_parameters))
+        if not any(shot.shot_id == shot_id for shot in self.repository.list_production_shots(job.id)):
+            raise ProductionExecutionServiceError("input snapshot 的 shot 不属于该 ProductionJob")
+        for existing in self.repository.list_production_executions(job.id):
+            existing_shots = existing.input_snapshot.shot_parameters if existing.input_snapshot else {}
+            if shot_id in existing_shots and existing.status in (
+                ProductionExecutionStatus.QUEUED,
+                ProductionExecutionStatus.RUNNING,
+            ):
+                raise ProductionExecutionServiceError("该 shot 已有正在排队或运行的 execution")
+        now = _now()
+        execution = self.repository.create_production_execution(
+            ProductionExecution(
+                id=uuid4().hex,
+                production_job_id=job.id,
+                status=ProductionExecutionStatus.QUEUED,
+                worker_type=worker_type.strip(),
+                created_at=now,
+                input_snapshot=input_snapshot,
+            )
+        )
+        self.repository.update_production_job_status(job.id, ProductionJobStatus.QUEUED, updated_at=now)
+        self._append_event(project_id, execution, ProductionEventType.QUEUED, {"shot_id": shot_id})
+        return execution
+
+    create_shot_execution = enqueue_shot_execution
+
     def start_execution(
         self,
         project_id: str,

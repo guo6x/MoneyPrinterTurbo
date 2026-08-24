@@ -189,7 +189,8 @@ class ProductionService:
             raise ProductionServiceError("ProductionJob 必须引用 APPROVED Shot Plan")
         existing = {shot.shot_id: shot for shot in self.repository.list_production_shots(job.id)}
         created = list(existing.values())
-        for index, shot in enumerate(plan["content"].shots, start=1):
+        ordered_plan_shots = sorted(plan["content"].shots, key=lambda shot: (shot.order, shot.id))
+        for index, shot in enumerate(ordered_plan_shots, start=1):
             if shot.id in existing:
                 continue
             production_shot = self.repository.create_production_shot(
@@ -282,6 +283,21 @@ class ProductionService:
         self.repository.update_production_shot_status(shot.id, ProductionShotStatus.FAILED)
         self.repository.update_production_job_status(job.id, ProductionJobStatus.FAILED, updated_at=_now())
         return failed
+
+    def cancel_attempt(self, project_id: str, attempt_id: str, reason: str = "") -> ProductionAttempt:
+        """Close a started attempt without rewriting its historical inputs."""
+        job, shot, attempt = self._require_started_attempt(project_id, attempt_id)
+        cancelled = self.repository.update_production_attempt(
+            attempt.id,
+            status=ProductionAttemptStatus.CANCELLED,
+            error_message=reason or None,
+        )
+        # SKIPPED means this shot was intentionally not completed; it keeps
+        # cancellation distinct from a runtime/QC failure while preserving
+        # all prior attempts and execution events.
+        self.repository.update_production_shot_status(shot.id, ProductionShotStatus.SKIPPED)
+        self.repository.update_production_job_status(job.id, ProductionJobStatus.CANCELLED, updated_at=_now())
+        return cancelled
 
     def get_job_status(self, project_id: str, job_id: str) -> dict[str, object]:
         job = self._get_job(project_id, job_id)

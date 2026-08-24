@@ -101,6 +101,37 @@ class ProductionWorker:
 
     execute = run
 
+    def resume(
+        self,
+        project_id: str,
+        execution_id: str,
+        *,
+        adapter: ProductionRuntimeAdapter | None = None,
+    ) -> ProductionExecution:
+        """Resume polling a persisted RUNNING execution.
+
+        A process restart must not submit a second runtime job.  The runtime
+        reference is recovered from the immutable STARTED event and the
+        injected adapter remains the only runtime boundary.
+        """
+        runtime_adapter = adapter or self.adapter
+        if runtime_adapter is None:
+            raise ProductionWorkerError("ProductionWorker 需要一个 ProductionRuntimeAdapter")
+        try:
+            execution = self.execution_service.get_execution(project_id, execution_id)
+        except ProductionExecutionServiceError as exc:
+            raise ProductionWorkerError(str(exc)) from exc
+        if execution.status is not ProductionExecutionStatus.RUNNING:
+            raise ProductionWorkerError("只有 RUNNING execution 可以恢复")
+        try:
+            runtime_reference = self._runtime_reference(project_id, execution.id)
+            return self._poll(project_id, execution, runtime_adapter, runtime_reference)
+        except Exception as exc:
+            current = self.execution_service.get_execution(project_id, execution.id)
+            if current.status in self._terminal_statuses():
+                return current
+            return self._fail(project_id, current, f"worker resume failed: {exc}")
+
     def cancel(self, project_id: str, execution_id: str, reason: str | None = None) -> ProductionExecution:
         """Cancel a queued/running execution through the durable service."""
         try:
