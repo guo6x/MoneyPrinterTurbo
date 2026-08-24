@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from aidrama_studio.storage.migrations import MIGRATIONS
 
 from aidrama_studio.domain import (
     Character,
@@ -111,7 +112,7 @@ def test_migration_002_creates_revision_table(paths: DatabasePaths):
         versions = connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
         table = connection.execute("SELECT name FROM sqlite_master WHERE name = 'story_bible_revisions'").fetchone()
         script_table = connection.execute("SELECT name FROM sqlite_master WHERE name = 'structured_script_revisions'").fetchone()
-    assert versions == [(1,), (2,), (3,), (4,)]
+    assert versions == [(version,) for version, _ in MIGRATIONS]
     assert table == ("story_bible_revisions",)
     assert script_table == ("structured_script_revisions",)
     shot_table = connection.execute("SELECT name FROM sqlite_master WHERE name = 'shot_plan_revisions'").fetchone()

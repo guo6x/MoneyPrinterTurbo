@@ -44,7 +44,7 @@ def test_all_migrations_are_applied_in_order_and_recorded(paths: DatabasePaths):
         }
 
     expected_versions = [version for version, _ in MIGRATIONS]
-    assert expected_versions == [1, 2, 3, 4]
+    assert expected_versions == sorted(set(expected_versions))
     assert versions == [(version,) for version in expected_versions]
     assert [row[0] for row in migration_rows] == expected_versions
     assert all(row[1] for row in migration_rows)
@@ -72,7 +72,7 @@ def test_migrations_are_idempotent(paths: DatabasePaths):
         }
 
     assert after == before
-    assert [row[0] for row in after] == [1, 2, 3, 4]
+    assert [row[0] for row in after] == [version for version, _ in MIGRATIONS]
     assert {"projects", "story_bible_revisions", "structured_script_revisions", "shot_plan_revisions"} <= tables
 
 

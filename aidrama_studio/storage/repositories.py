@@ -14,6 +14,7 @@ from aidrama_studio.domain import (
 )
 from aidrama_studio.domain.script import ScriptRevisionStatus
 from aidrama_studio.domain.shot import ShotPlan, ShotRevisionStatus
+from aidrama_studio.domain.reference_asset import ReferenceAsset, ReferenceAssetBinding, ReferenceAssetType, ReferenceAssetVersion, ReferenceBindingType
 
 from .database import DatabasePaths, connect, initialize_database
 
@@ -409,3 +410,109 @@ class ProjectRepository:
             if row["status"] == ShotRevisionStatus.SUPERSEDED.value: raise ValueError("已被替代的 revision 不能批准")
             c.execute("UPDATE shot_plan_revisions SET status=?,updated_at=? WHERE project_id=? AND status=? AND id<>?",(ShotRevisionStatus.SUPERSEDED.value,updated_at,row["project_id"],ShotRevisionStatus.APPROVED.value,revision_id)); c.execute("UPDATE shot_plan_revisions SET status=?,updated_at=? WHERE id=?",(ShotRevisionStatus.APPROVED.value,updated_at,revision_id)); row=c.execute("SELECT * FROM shot_plan_revisions WHERE id=?",(revision_id,)).fetchone()
         return self._shot_revision_from_row(row)
+
+    @staticmethod
+    def _reference_asset_from_row(row) -> ReferenceAsset:
+        return ReferenceAsset(
+            id=row["id"], project_id=row["project_id"], asset_type=row["asset_type"],
+            current_version_id=row["current_version_id"], created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _reference_version_from_row(row) -> ReferenceAssetVersion:
+        return ReferenceAssetVersion(
+            id=row["id"], asset_id=row["asset_id"], project_id=row["project_id"],
+            version_number=row["version_number"], filename=row["filename"],
+            mime_type=row["mime_type"], size_bytes=row["size_bytes"], sha256=row["sha256"],
+            storage_path=row["storage_path"], metadata=json.loads(row["metadata_json"]),
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _reference_binding_from_row(row) -> ReferenceAssetBinding:
+        return ReferenceAssetBinding(
+            id=row["id"], project_id=row["project_id"], asset_version_id=row["asset_version_id"],
+            binding_type=row["binding_type"], binding_id=row["binding_id"],
+            created_at=row["created_at"],
+        )
+
+    def create_reference_asset(self, asset: ReferenceAsset) -> ReferenceAsset:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, asset.project_id):
+                raise KeyError(f"项目不存在: {asset.project_id}")
+            connection.execute(
+                "INSERT INTO reference_assets(id,project_id,asset_type,current_version_id,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                (asset.id, asset.project_id, asset.asset_type.value, asset.current_version_id, asset.created_at, asset.updated_at),
+            )
+        return self.get_reference_asset(asset.id)
+
+    def get_reference_asset(self, asset_id: str) -> ReferenceAsset | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM reference_assets WHERE id=?", (asset_id,)).fetchone()
+        return self._reference_asset_from_row(row) if row else None
+
+    def list_reference_assets(self, project_id: str) -> list[ReferenceAsset]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM reference_assets WHERE project_id=? ORDER BY created_at,id", (project_id,)).fetchall()
+        return [self._reference_asset_from_row(row) for row in rows]
+
+    def create_reference_asset_version(self, version: ReferenceAssetVersion) -> ReferenceAssetVersion:
+        with connect(self.paths.database) as connection:
+            asset = connection.execute("SELECT project_id FROM reference_assets WHERE id=?", (version.asset_id,)).fetchone()
+            if asset is None: raise KeyError(f"ReferenceAsset 不存在: {version.asset_id}")
+            if asset["project_id"] != version.project_id: raise ValueError("asset 不属于该项目")
+            connection.execute(
+                "INSERT INTO reference_asset_versions(id,asset_id,project_id,version_number,filename,mime_type,size_bytes,sha256,storage_path,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (version.id, version.asset_id, version.project_id, version.version_number, version.filename, version.mime_type, version.size_bytes, version.sha256, version.storage_path, json.dumps(version.metadata, ensure_ascii=False, sort_keys=True), version.created_at),
+            )
+        return self.get_reference_asset_version(version.id)
+
+    def get_reference_asset_version(self, version_id: str) -> ReferenceAssetVersion | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM reference_asset_versions WHERE id=?", (version_id,)).fetchone()
+        return self._reference_version_from_row(row) if row else None
+
+    def list_reference_asset_versions(self, asset_id: str) -> list[ReferenceAssetVersion]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM reference_asset_versions WHERE asset_id=? ORDER BY version_number", (asset_id,)).fetchall()
+        return [self._reference_version_from_row(row) for row in rows]
+
+    def find_reference_version_by_hash(self, project_id: str, sha256: str) -> ReferenceAssetVersion | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM reference_asset_versions WHERE project_id=? AND sha256=? LIMIT 1", (project_id, sha256)).fetchone()
+        return self._reference_version_from_row(row) if row else None
+
+    def set_current_reference_version(self, asset_id: str, version_id: str, *, updated_at: str) -> ReferenceAsset:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT asset_id FROM reference_asset_versions WHERE id=?", (version_id,)).fetchone()
+            if row is None or row["asset_id"] != asset_id: raise ValueError("version 不属于该 asset")
+            connection.execute("UPDATE reference_assets SET current_version_id=?,updated_at=? WHERE id=?", (version_id, updated_at, asset_id))
+        asset = self.get_reference_asset(asset_id)
+        if asset is None: raise KeyError(f"ReferenceAsset 不存在: {asset_id}")
+        return asset
+
+    def create_reference_binding(self, binding: ReferenceAssetBinding) -> ReferenceAssetBinding:
+        with connect(self.paths.database) as connection:
+            version = connection.execute("SELECT project_id FROM reference_asset_versions WHERE id=?", (binding.asset_version_id,)).fetchone()
+            if version is None: raise KeyError(f"ReferenceAssetVersion 不存在: {binding.asset_version_id}")
+            if version["project_id"] != binding.project_id: raise ValueError("version 不属于该项目")
+            connection.execute(
+                "INSERT INTO reference_asset_bindings(id,project_id,asset_version_id,binding_type,binding_id,created_at) VALUES (?,?,?,?,?,?)",
+                (binding.id, binding.project_id, binding.asset_version_id, binding.binding_type.value, binding.binding_id, binding.created_at),
+            )
+        return self.get_reference_binding(binding.id)
+
+    def get_reference_binding(self, binding_id: str) -> ReferenceAssetBinding | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM reference_asset_bindings WHERE id=?", (binding_id,)).fetchone()
+        return self._reference_binding_from_row(row) if row else None
+
+    def list_reference_bindings(self, project_id: str, *, asset_version_id: str | None = None) -> list[ReferenceAssetBinding]:
+        query = "SELECT * FROM reference_asset_bindings WHERE project_id=?"
+        args: list[str] = [project_id]
+        if asset_version_id:
+            query += " AND asset_version_id=?"; args.append(asset_version_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection: rows = connection.execute(query, args).fetchall()
+        return [self._reference_binding_from_row(row) for row in rows]

@@ -88,11 +88,67 @@ def _migration_004_shot_plan_revisions(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE UNIQUE INDEX idx_shot_one_approved ON shot_plan_revisions(project_id) WHERE status='APPROVED'")
 
 
+def _migration_005_reference_assets(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE reference_assets (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            asset_type TEXT NOT NULL,
+            current_version_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE reference_asset_versions (
+            id TEXT PRIMARY KEY,
+            asset_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            version_number INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            storage_path TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(asset_id, version_number),
+            FOREIGN KEY(asset_id) REFERENCES reference_assets(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE reference_asset_bindings (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            asset_version_id TEXT NOT NULL,
+            binding_type TEXT NOT NULL,
+            binding_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(project_id, asset_version_id, binding_type, binding_id),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(asset_version_id) REFERENCES reference_asset_versions(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute("CREATE INDEX idx_reference_assets_project ON reference_assets(project_id, asset_type)")
+    connection.execute("CREATE INDEX idx_reference_versions_asset ON reference_asset_versions(asset_id, version_number DESC)")
+    connection.execute("CREATE INDEX idx_reference_versions_hash ON reference_asset_versions(project_id, sha256)")
+    connection.execute("CREATE INDEX idx_reference_bindings_target ON reference_asset_bindings(project_id, binding_type, binding_id)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
     (3, _migration_003_structured_script_revisions),
     (4, _migration_004_shot_plan_revisions),
+    (5, _migration_005_reference_assets),
 )
 
 
