@@ -12,15 +12,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from aidrama_studio.components.navigation import build_navigation  # noqa: E402
+from aidrama_studio.branding import BRAND  # noqa: E402
 from aidrama_studio.storage.database import initialize_database  # noqa: E402
 
 
 st.set_page_config(
-    page_title="AIDrama Studio",
+    page_title=BRAND.product_name,
     page_icon="🎬",
     layout="wide",
     initial_sidebar_state="expanded",
-    menu_items={"About": "AIDrama Studio\n\nBuilt on MoneyPrinterTurbo · MIT License"},
+    menu_items={"About": f"{BRAND.product_name}\n\n{BRAND.tagline}\n\nMIT License"},
 )
 
 
@@ -48,9 +49,9 @@ def main() -> None:
 
     with st.sidebar:
         st.markdown(
-            '<div class="aidrama-brand">AIDrama Studio</div>', unsafe_allow_html=True
+            f'<div class="aidrama-brand">{BRAND.product_name}</div>', unsafe_allow_html=True
         )
-        st.caption("AI 短剧全链路制作工作台")
+        st.caption(BRAND.tagline)
 
     navigation = build_navigation()
     navigation.run()

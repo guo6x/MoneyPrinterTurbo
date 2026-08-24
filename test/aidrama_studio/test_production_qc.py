@@ -129,8 +129,13 @@ def test_qc_retry_creates_history_and_review_is_project_scoped(context):
 def test_qc_migration_is_applied_and_idempotent(context):
     repository, project = context
     from aidrama_studio.storage.database import connect
+    from aidrama_studio.storage.migrations import MIGRATIONS, apply_migrations
     with connect(repository.paths.database) as connection:
         versions = [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")]
-        assert versions[-1] == 11
+        expected = [version for version, _ in MIGRATIONS]
+        assert versions == expected
+        assert apply_migrations(connection) == 0
+        versions_after = [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")]
+        assert versions_after == expected
         for table in ("production_qc_results", "production_qc_metrics", "production_reviews"):
             assert connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()

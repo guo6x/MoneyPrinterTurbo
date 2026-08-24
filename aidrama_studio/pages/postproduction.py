@@ -20,7 +20,11 @@ from aidrama_studio.services import (
     FinalAssemblyService,
     FinalAssemblyServiceError,
     ProductionService,
+    PostProductionService,
+    PostProductionServiceError,
+    ProviderReadinessService,
 )
+from aidrama_studio.domain import AudioMixConfig
 
 
 _ASSEMBLY_LABELS = {
@@ -402,6 +406,129 @@ def _render_advanced(project: Any, assembly: Any | None, attempts: list[Any]) ->
                 st.caption(f"Frozen source count · {len(source_items)}")
 
 
+def _script_revision_id(repository: Any, job: Any) -> str | None:
+    if repository is None or job is None:
+        return None
+    try:
+        revision = repository.get_shot_revision(_value(job, "shot_plan_revision_id", ""))
+        return str(revision["source_script_revision_id"]) if revision else None
+    except Exception:
+        return None
+
+
+def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: Any) -> None:
+    """Thin post-production workspace backed exclusively by PostProductionService."""
+    st.subheader("最终后期")
+    st.caption("字幕、配音状态与本地 BGM 会进入新的 project-scoped PostProductionPlan；基础成片保持不可变。")
+    if repository is None:
+        st.info("后期服务尚未连接到项目存储。")
+        return
+    service = PostProductionService(repository=repository)
+    plans = service.list_plans(project.id)
+    plan = plans[-1] if plans else None
+    if plan is None:
+        if st.button("开始后期", type="primary", key=f"post-start-{project.id}-{assembly.id}"):
+            try:
+                plan = service.create_plan(project.id, assembly.id)
+                st.success("后期计划已创建")
+                st.rerun()
+            except Exception as exc:
+                st.warning(_safe_error(exc, "无法创建后期计划"))
+        st.caption("后期计划会引用当前 FinalAssembly，不会覆盖基础成片。")
+        return
+
+    st.caption(f"PostProductionPlan · 已连接到当前成片版本")
+    subtitle_revision_id = _script_revision_id(repository, job)
+    subtitle_tracks = service.repository.list_post_subtitle_tracks(project.id, plan.id)
+    subtitle_track = subtitle_tracks[-1] if subtitle_tracks else None
+    with st.container(border=True):
+        st.markdown("### 字幕")
+        if subtitle_track is None and subtitle_revision_id:
+            if st.button("从结构化剧本生成字幕时间线", key=f"post-subtitles-{plan.id}"):
+                try:
+                    service.build_subtitle_timeline(project.id, subtitle_revision_id, plan_id=plan.id)
+                    st.rerun()
+                except Exception as exc:
+                    st.warning(_safe_error(exc, "字幕时间线生成失败"))
+        elif subtitle_track is None:
+            st.caption("没有可用的结构化剧本修订版，暂时无法生成字幕。")
+        else:
+            enabled = st.checkbox("启用字幕（可在最终渲染前关闭）", value=bool(subtitle_track.enabled), key=f"subtitle-enabled-{subtitle_track.id}")
+            cue_text = "\n".join(cue.text for cue in subtitle_track.cues)
+            edited_text = st.text_area("字幕文本（每行一个 cue，时间轴保持来自剧本）", value=cue_text, key=f"subtitle-edit-{subtitle_track.id}", height=130)
+            if st.button("保存字幕 Draft", key=f"subtitle-save-{subtitle_track.id}"):
+                try:
+                    lines = edited_text.splitlines()
+                    cues = [cue.model_copy(update={"text": lines[index].strip()}) for index, cue in enumerate(subtitle_track.cues) if index < len(lines) and lines[index].strip()]
+                    service.update_subtitle_track(project.id, subtitle_track.id, cues=cues, enabled=enabled)
+                    service.update_plan(project.id, plan.id, subtitle_enabled=enabled)
+                    st.success("字幕 Draft 已保存")
+                    st.rerun()
+                except Exception as exc:
+                    st.warning(_safe_error(exc, "字幕保存失败"))
+            srt = service.to_srt(subtitle_track)
+            st.download_button("导出 SRT", data=srt, file_name=f"{project.title or 'aidrama'}.srt", mime="application/x-subrip", key=f"srt-download-{subtitle_track.id}")
+
+    with st.container(border=True):
+        st.markdown("### 配音 / TTS")
+        tts = next((item for item in ProviderReadinessService().list_capabilities() if item.capability == "TTS"), None)
+        if tts and tts.ready:
+            st.success("TTS runtime 已就绪，可通过 VoiceTrack 接入。")
+        else:
+            st.info("TTS Provider 未配置；当前不会伪造音频。可稍后通过 VoiceTrack 接入本地或已配置的音频。")
+        voice_tracks = service.repository.list_post_voice_tracks(project.id, plan.id)
+        if voice_tracks:
+            st.caption(f"已有 VoiceTrack：{len(voice_tracks)}")
+        else:
+            st.caption("尚无 VoiceTrack")
+
+    with st.container(border=True):
+        st.markdown("### BGM / 基础混音")
+        uploaded = st.file_uploader("选择本地 BGM（MP3/WAV/M4A/AAC/OGG/FLAC）", type=["mp3", "wav", "m4a", "aac", "ogg", "flac"], key=f"bgm-upload-{plan.id}")
+        if uploaded is not None and st.button("导入 BGM", key=f"bgm-import-{plan.id}"):
+            try:
+                service.import_bgm_bytes(project.id, plan.id, uploaded.getvalue(), filename=uploaded.name)
+                st.success("BGM 已复制到项目存储")
+                st.rerun()
+            except Exception as exc:
+                st.warning(_safe_error(exc, "BGM 导入失败"))
+        music_tracks = service.repository.list_post_music_tracks(project.id, plan.id)
+        music = music_tracks[-1] if music_tracks else None
+        gain = st.slider("BGM 音量", min_value=0.0, max_value=1.5, value=float(plan.audio_mix.music_gain), step=0.05, key=f"bgm-gain-{plan.id}")
+        if st.button("保存混音设置", key=f"mix-save-{plan.id}"):
+            try:
+                service.configure_audio_mix(project.id, plan.id, AudioMixConfig(source_gain=plan.audio_mix.source_gain, voice_gain=plan.audio_mix.voice_gain, music_gain=gain, normalize=plan.audio_mix.normalize))
+                st.success("混音设置已保存")
+            except Exception as exc:
+                st.warning(_safe_error(exc, "混音设置保存失败"))
+        if music:
+            st.caption(f"当前 BGM：{_safe_relative_path(music.path)} · gain {music.gain:g}")
+        else:
+            st.caption("尚未选择 BGM（可选）")
+
+    if st.button("渲染最终后期成片", type="primary", key=f"post-render-{plan.id}"):
+        try:
+            attempt = service.render(project.id, plan.id, subtitle_track_id=subtitle_track.id if subtitle_track else None, music_track_id=music.id if music else None)
+            st.success("最终后期成片已生成")
+            st.session_state[f"post-latest-attempt-{plan.id}"] = attempt.id
+            st.rerun()
+        except PostProductionServiceError as exc:
+            st.warning(_safe_error(exc, "后期渲染未完成"))
+
+    latest = st.session_state.get(f"post-latest-attempt-{plan.id}")
+    attempts = service.list_render_attempts(project.id, plan.id)
+    successful = [item for item in attempts if _status_value(item) == "SUCCEEDED"]
+    selected = next((item for item in successful if _value(item, "id") == latest), successful[-1] if successful else None)
+    if selected:
+        output = service.resolve_output_path(project.id, plan.id, _value(selected, "id"))
+        if output:
+            st.video(str(output))
+            st.download_button("导出最终后期 MP4", data=output.read_bytes(), file_name=_safe_download_name(project.title).replace("-final", "-post"), mime="video/mp4", key=f"post-export-{selected.id}")
+    with st.expander("后期渲染历史", expanded=False):
+        for attempt in reversed(attempts):
+            st.caption(f"Attempt {_value(attempt, 'attempt_number', '—')} · {_status_value(attempt)}")
+
+
 def render() -> None:
     page_header("后期与成片", "POSTPRODUCTION", "完成已经通过 QC 的镜头合成，并预览最终视频。")
     project = current_project_or_stop()
@@ -439,6 +566,7 @@ def render() -> None:
     attempts = _render_history(project, assembly, runtime_service)
     if assembly is not None and _assembly_status(assembly) == "SUCCEEDED":
         _render_preview_and_export(project, assembly, runtime_service, attempts)
+        _render_post_workspace(project, job, assembly, getattr(manifest_service, "repository", None))
     _render_advanced(project, assembly, attempts)
 
 

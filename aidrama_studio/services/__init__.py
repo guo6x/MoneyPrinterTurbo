@@ -14,6 +14,29 @@ from .production_qc import ProductionQCService, ProductionQCServiceError
 from .production_orchestrator import ProductionOrchestrator, ProductionOrchestratorError
 from .final_assembly import FinalAssemblyService, FinalAssemblyServiceError
 from .final_assembly_runtime import FinalAssemblyRenderService, FinalAssemblyRuntimeService, FinalAssemblyRuntimeServiceError
+from .postproduction import FFmpegPostProductionAdapter, PostProductionMediaAdapter, PostProductionService, PostProductionServiceError, PostRenderRequest, PostRenderService
+from .director import DirectorService, DirectorServiceError
+from .producer import ProducerService, ProducerServiceError
+from .vision_qc import VisionQCResult, VisionQCService
+from .provider_readiness import ProviderReadinessService, CapabilityReadiness, ReadinessState
+from .ai_capabilities import (
+    CapabilityKind,
+    CapabilityStatus,
+    CapabilityUnavailable,
+    CapabilityRegistry,
+    LLMProvider,
+    ImageGenerationProvider,
+    VideoGenerationProvider,
+    VisionAnalysisProvider,
+    ImageCandidate,
+    VisionAnalysis,
+    MPTLLMProvider,
+    RuntimeVideoProvider,
+    UnavailableImageProvider,
+    UnavailableVisionProvider,
+    DeterministicMockVisionProvider,
+    default_capability_registry,
+)
 from .adapters import (
     MPTAdapterError,
     MPTInputMapper,
@@ -50,6 +73,15 @@ __all__ = [
     "ProductionQCService", "ProductionQCServiceError",
     "FinalAssemblyService", "FinalAssemblyServiceError",
     "FinalAssemblyRuntimeService", "FinalAssemblyRenderService", "FinalAssemblyRuntimeServiceError",
+    "PostProductionService", "PostRenderService", "PostProductionServiceError", "PostProductionMediaAdapter", "FFmpegPostProductionAdapter", "PostRenderRequest",
+    "DirectorService", "DirectorServiceError", "ProducerService", "ProducerServiceError",
+    "VisionQCResult", "VisionQCService",
+    "ProviderReadinessService", "CapabilityReadiness", "ReadinessState",
+    "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",
+    "LLMProvider", "ImageGenerationProvider", "VideoGenerationProvider", "VisionAnalysisProvider",
+    "ImageCandidate", "VisionAnalysis", "MPTLLMProvider", "RuntimeVideoProvider",
+    "UnavailableImageProvider", "UnavailableVisionProvider", "DeterministicMockVisionProvider",
+    "default_capability_registry",
     "ProductionOrchestrator", "ProductionOrchestratorError",
     "ProductionRuntimeAdapter", "RuntimeSubmission", "RuntimeEvent", "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
     "WanAdapterError", "WanInputMapper", "WanProductionAdapter", "WanPromptMapper",

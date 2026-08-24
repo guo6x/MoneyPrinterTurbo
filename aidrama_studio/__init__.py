@@ -1,3 +1,7 @@
-"""AIDrama Studio product layer built on the MoneyPrinterTurbo media engine."""
+"""AIDrama Studio product layer."""
 
-PRODUCT_NAME = "AIDrama Studio"
+from aidrama_studio.branding import BRAND, BrandConfig, get_brand_config
+
+PRODUCT_NAME = BRAND.product_name
+
+__all__ = ["BRAND", "BrandConfig", "PRODUCT_NAME", "get_brand_config"]

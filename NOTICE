@@ -1,0 +1,6 @@
+AIDrama Studio includes components derived from MoneyPrinterTurbo
+(https://github.com/harry0703/MoneyPrinterTurbo), distributed under the
+MIT License. The upstream LICENSE file is preserved in this repository.
+
+Product-facing branding is AIDrama Studio; internal integration modules may
+retain upstream names where required for compatibility.

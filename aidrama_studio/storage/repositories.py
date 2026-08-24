@@ -26,6 +26,26 @@ from aidrama_studio.domain.final_assembly import (
     FinalAssemblyRenderAttempt,
     FinalAssemblyRenderAttemptStatus,
 )
+from aidrama_studio.domain.post_production import (
+    AudioMixConfig,
+    MusicTrack,
+    PostProductionPlan,
+    PostRenderAttempt,
+    PostRenderAttemptStatus,
+    SubtitleCue,
+    SubtitleTrack,
+    VoiceTrack,
+)
+from aidrama_studio.domain.director import (
+    DirectorDecision,
+    DirectorDecisionStatus,
+    DirectorGoal,
+    DirectorGoalKind,
+    DirectorGoalStatus,
+    DirectorRecommendation,
+    DirectorSession,
+    DirectorSessionStatus,
+)
 
 from .database import DatabasePaths, connect, initialize_database
 
@@ -903,6 +923,133 @@ class ProjectRepository:
         return [self._production_review_from_row(row) for row in rows]
 
     @staticmethod
+    def _director_recommendation(value: dict[str, object] | None) -> DirectorRecommendation | None:
+        return DirectorRecommendation.model_validate(value) if value else None
+
+    @classmethod
+    def _director_session_from_row(cls, row) -> DirectorSession:
+        return DirectorSession(
+            id=row["id"], project_id=row["project_id"], status=DirectorSessionStatus(row["status"]),
+            current_goal=DirectorGoalKind(row["current_goal"]), blocking_reason=row["blocking_reason"] or "",
+            pending_recommendation=cls._director_recommendation(
+                json.loads(row["pending_recommendation_json"]) if row["pending_recommendation_json"] else None
+            ), created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _director_goal_from_row(row) -> DirectorGoal:
+        return DirectorGoal(
+            id=row["id"], session_id=row["session_id"], project_id=row["project_id"],
+            goal=DirectorGoalKind(row["goal"]), status=DirectorGoalStatus(row["status"]),
+            max_steps=row["max_steps"], completed_steps=row["completed_steps"],
+            created_at=row["created_at"], finished_at=row["finished_at"],
+        )
+
+    @staticmethod
+    def _director_decision_from_row(row) -> DirectorDecision:
+        return DirectorDecision(
+            id=row["id"], session_id=row["session_id"], project_id=row["project_id"], goal_id=row["goal_id"],
+            status=DirectorDecisionStatus(row["status"]), project_state=row["project_state"],
+            recommendation=DirectorRecommendation.model_validate(json.loads(row["recommendation_json"])),
+            state_snapshot=json.loads(row["state_snapshot_json"]), created_at=row["created_at"],
+        )
+
+    def create_director_session(self, session: DirectorSession) -> DirectorSession:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, session.project_id):
+                raise KeyError(f"项目不存在: {session.project_id}")
+            connection.execute(
+                "INSERT INTO director_sessions(id,project_id,status,current_goal,blocking_reason,pending_recommendation_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (session.id, session.project_id, session.status.value, session.current_goal.value,
+                 session.blocking_reason, json.dumps(session.pending_recommendation.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+                 if session.pending_recommendation else None, session.created_at, session.updated_at),
+            )
+        return self.get_director_session(session.id)
+
+    def get_director_session(self, session_id: str) -> DirectorSession | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM director_sessions WHERE id=?", (session_id,)).fetchone()
+        return self._director_session_from_row(row) if row else None
+
+    def list_director_sessions(self, project_id: str) -> list[DirectorSession]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM director_sessions WHERE project_id=? ORDER BY updated_at DESC,id", (project_id,)).fetchall()
+        return [self._director_session_from_row(row) for row in rows]
+
+    def update_director_session(self, session: DirectorSession) -> DirectorSession:
+        with connect(self.paths.database) as connection:
+            cursor = connection.execute(
+                "UPDATE director_sessions SET status=?,current_goal=?,blocking_reason=?,pending_recommendation_json=?,updated_at=? WHERE id=? AND project_id=?",
+                (session.status.value, session.current_goal.value, session.blocking_reason,
+                 json.dumps(session.pending_recommendation.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+                 if session.pending_recommendation else None, session.updated_at, session.id, session.project_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"DirectorSession 不存在: {session.id}")
+        return self.get_director_session(session.id)
+
+    def create_director_goal(self, goal: DirectorGoal) -> DirectorGoal:
+        with connect(self.paths.database) as connection:
+            session = connection.execute("SELECT project_id FROM director_sessions WHERE id=?", (goal.session_id,)).fetchone()
+            if session is None or session["project_id"] != goal.project_id:
+                raise ValueError("DirectorGoal session 不属于该项目")
+            connection.execute(
+                "INSERT INTO director_goals(id,session_id,project_id,goal,status,max_steps,completed_steps,created_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (goal.id, goal.session_id, goal.project_id, goal.goal.value, goal.status.value, goal.max_steps,
+                 goal.completed_steps, goal.created_at, goal.finished_at),
+            )
+        return self.get_director_goal(goal.id)
+
+    def get_director_goal(self, goal_id: str) -> DirectorGoal | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM director_goals WHERE id=?", (goal_id,)).fetchone()
+        return self._director_goal_from_row(row) if row else None
+
+    def list_director_goals(self, session_id: str) -> list[DirectorGoal]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM director_goals WHERE session_id=? ORDER BY created_at,id", (session_id,)).fetchall()
+        return [self._director_goal_from_row(row) for row in rows]
+
+    def update_director_goal(self, goal: DirectorGoal) -> DirectorGoal:
+        with connect(self.paths.database) as connection:
+            cursor = connection.execute(
+                "UPDATE director_goals SET status=?,max_steps=?,completed_steps=?,finished_at=? WHERE id=? AND project_id=?",
+                (goal.status.value, goal.max_steps, goal.completed_steps, goal.finished_at, goal.id, goal.project_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"DirectorGoal 不存在: {goal.id}")
+        return self.get_director_goal(goal.id)
+
+    def create_director_decision(self, decision: DirectorDecision) -> DirectorDecision:
+        with connect(self.paths.database) as connection:
+            session = connection.execute("SELECT project_id FROM director_sessions WHERE id=?", (decision.session_id,)).fetchone()
+            goal = connection.execute("SELECT project_id,session_id FROM director_goals WHERE id=?", (decision.goal_id,)).fetchone()
+            if session is None or goal is None or session["project_id"] != decision.project_id or goal["project_id"] != decision.project_id or goal["session_id"] != decision.session_id:
+                raise ValueError("DirectorDecision provenance 不属于该项目/session")
+            connection.execute(
+                "INSERT INTO director_decisions(id,session_id,project_id,goal_id,status,project_state,recommendation_json,state_snapshot_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (decision.id, decision.session_id, decision.project_id, decision.goal_id, decision.status.value,
+                 decision.project_state, json.dumps(decision.recommendation.model_dump(mode="json"), ensure_ascii=False, sort_keys=True),
+                 json.dumps(decision.state_snapshot, ensure_ascii=False, sort_keys=True), decision.created_at),
+            )
+        return self.get_director_decision(decision.id)
+
+    def get_director_decision(self, decision_id: str) -> DirectorDecision | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM director_decisions WHERE id=?", (decision_id,)).fetchone()
+        return self._director_decision_from_row(row) if row else None
+
+    def list_director_decisions(self, project_id: str, session_id: str | None = None) -> list[DirectorDecision]:
+        query = "SELECT * FROM director_decisions WHERE project_id=?"
+        args: list[str] = [project_id]
+        if session_id is not None:
+            query += " AND session_id=?"; args.append(session_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(args)).fetchall()
+        return [self._director_decision_from_row(row) for row in rows]
+
+    @staticmethod
     def _final_assembly_from_row(row) -> FinalAssembly:
         return FinalAssembly(
             id=row["id"],
@@ -1209,3 +1356,241 @@ class ProjectRepository:
                 (assembly_id,),
             ).fetchall()
         return [self._final_assembly_item_from_row(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Post-production persistence.  These methods intentionally expose
+    # models only; media/path policy belongs to PostProductionService.
+    @staticmethod
+    def _post_plan_from_row(row) -> PostProductionPlan:
+        return PostProductionPlan(
+            id=row["id"], project_id=row["project_id"],
+            source_final_assembly_id=row["source_final_assembly_id"],
+            subtitle_enabled=bool(row["subtitle_enabled"]),
+            audio_mix=AudioMixConfig.model_validate(json.loads(row["audio_mix_json"])),
+            created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _post_subtitle_from_row(row) -> SubtitleTrack:
+        return SubtitleTrack(
+            id=row["id"], project_id=row["project_id"], plan_id=row["plan_id"],
+            source_script_revision_id=row["source_script_revision_id"],
+            enabled=bool(row["enabled"]),
+            cues=[SubtitleCue.model_validate(item) for item in json.loads(row["cues_json"])],
+            created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _post_voice_from_row(row) -> VoiceTrack:
+        return VoiceTrack(
+            id=row["id"], project_id=row["project_id"], plan_id=row["plan_id"], path=row["path"],
+            voice_assignments=json.loads(row["voice_assignments_json"]),
+            metadata_json=json.loads(row["metadata_json"]), created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _post_music_from_row(row) -> MusicTrack:
+        return MusicTrack(
+            id=row["id"], project_id=row["project_id"], plan_id=row["plan_id"], path=row["path"],
+            start_seconds=row["start_seconds"], end_seconds=row["end_seconds"], gain=row["gain"],
+            loop=bool(row["loop"]), fade_in_seconds=row["fade_in_seconds"],
+            fade_out_seconds=row["fade_out_seconds"], metadata_json=json.loads(row["metadata_json"]),
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _post_attempt_from_row(row) -> PostRenderAttempt:
+        return PostRenderAttempt(
+            id=row["id"], project_id=row["project_id"], plan_id=row["plan_id"],
+            source_final_assembly_id=row["source_final_assembly_id"], attempt_number=row["attempt_number"],
+            status=PostRenderAttemptStatus(row["status"]), adapter_name=row["adapter_name"],
+            output_relative_path=row["output_relative_path"], metadata_json=json.loads(row["metadata_json"]),
+            error_message=row["error_message"], started_at=row["started_at"], finished_at=row["finished_at"],
+            created_at=row["created_at"],
+        )
+
+    def create_post_plan(self, plan: PostProductionPlan) -> PostProductionPlan:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, plan.project_id):
+                raise KeyError(f"项目不存在: {plan.project_id}")
+            assembly = connection.execute(
+                "SELECT project_id FROM final_assemblies WHERE id=?", (plan.source_final_assembly_id,)
+            ).fetchone()
+            if assembly is None:
+                raise KeyError("FinalAssembly 不存在")
+            if assembly["project_id"] != plan.project_id:
+                raise ValueError("FinalAssembly 不属于该项目")
+            connection.execute(
+                "INSERT INTO post_production_plans(id,project_id,source_final_assembly_id,subtitle_enabled,audio_mix_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                (plan.id, plan.project_id, plan.source_final_assembly_id, int(plan.subtitle_enabled),
+                 json.dumps(plan.audio_mix.model_dump(mode="json"), ensure_ascii=False, sort_keys=True), plan.created_at, plan.updated_at),
+            )
+        return self.get_post_plan(plan.id)
+
+    def get_post_plan(self, plan_id: str) -> PostProductionPlan | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM post_production_plans WHERE id=?", (plan_id,)).fetchone()
+        return self._post_plan_from_row(row) if row else None
+
+    def list_post_plans(self, project_id: str) -> list[PostProductionPlan]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM post_production_plans WHERE project_id=? ORDER BY created_at,id", (project_id,)).fetchall()
+        return [self._post_plan_from_row(row) for row in rows]
+
+    def update_post_plan(self, plan: PostProductionPlan) -> PostProductionPlan:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT project_id FROM post_production_plans WHERE id=?", (plan.id,)).fetchone()
+            if row is None:
+                raise KeyError("PostProductionPlan 不存在")
+            if row["project_id"] != plan.project_id:
+                raise ValueError("PostProductionPlan 不属于该项目")
+            connection.execute(
+                "UPDATE post_production_plans SET subtitle_enabled=?,audio_mix_json=?,updated_at=? WHERE id=?",
+                (int(plan.subtitle_enabled), json.dumps(plan.audio_mix.model_dump(mode="json"), ensure_ascii=False, sort_keys=True), plan.updated_at, plan.id),
+            )
+        return self.get_post_plan(plan.id)
+
+    def create_post_subtitle_track(self, track: SubtitleTrack) -> SubtitleTrack:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, track.project_id):
+                raise KeyError(f"项目不存在: {track.project_id}")
+            revision = connection.execute("SELECT project_id FROM structured_script_revisions WHERE id=?", (track.source_script_revision_id,)).fetchone()
+            if revision is None or revision["project_id"] != track.project_id:
+                raise ValueError("Structured Script revision 不属于该项目")
+            if track.plan_id is not None:
+                plan = connection.execute("SELECT project_id FROM post_production_plans WHERE id=?", (track.plan_id,)).fetchone()
+                if plan is None or plan["project_id"] != track.project_id:
+                    raise ValueError("PostProductionPlan 不属于该项目")
+            connection.execute(
+                "INSERT INTO post_subtitle_tracks(id,project_id,plan_id,source_script_revision_id,enabled,cues_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (track.id, track.project_id, track.plan_id, track.source_script_revision_id, int(track.enabled),
+                 json.dumps([cue.model_dump(mode="json") for cue in track.cues], ensure_ascii=False, sort_keys=True), track.created_at, track.updated_at),
+            )
+        return self.get_post_subtitle_track(track.id)
+
+    def get_post_subtitle_track(self, track_id: str) -> SubtitleTrack | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM post_subtitle_tracks WHERE id=?", (track_id,)).fetchone()
+        return self._post_subtitle_from_row(row) if row else None
+
+    def list_post_subtitle_tracks(self, project_id: str, plan_id: str | None = None) -> list[SubtitleTrack]:
+        query = "SELECT * FROM post_subtitle_tracks WHERE project_id=?"
+        params: list[object] = [project_id]
+        if plan_id is not None:
+            query += " AND plan_id=?"
+            params.append(plan_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [self._post_subtitle_from_row(row) for row in rows]
+
+    def update_post_subtitle_track(self, track: SubtitleTrack) -> SubtitleTrack:
+        current = self.get_post_subtitle_track(track.id)
+        if current is None:
+            raise KeyError("SubtitleTrack 不存在")
+        if current.project_id != track.project_id:
+            raise ValueError("SubtitleTrack 不属于该项目")
+        with connect(self.paths.database) as connection:
+            connection.execute(
+                "UPDATE post_subtitle_tracks SET enabled=?,cues_json=?,updated_at=? WHERE id=?",
+                (int(track.enabled), json.dumps([cue.model_dump(mode="json") for cue in track.cues], ensure_ascii=False, sort_keys=True), track.updated_at, track.id),
+            )
+        return self.get_post_subtitle_track(track.id)
+
+    def update_post_subtitle_track(self, track: SubtitleTrack) -> SubtitleTrack:
+        """Update the editable subtitle projection without changing its source script."""
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT project_id, source_script_revision_id, plan_id FROM post_subtitle_tracks WHERE id=?",
+                (track.id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("SubtitleTrack 不存在")
+            if row["project_id"] != track.project_id or row["plan_id"] != track.plan_id:
+                raise ValueError("SubtitleTrack 不属于该项目或计划")
+            if row["source_script_revision_id"] != track.source_script_revision_id:
+                raise ValueError("SubtitleTrack 的来源剧本不可变更")
+            connection.execute(
+                "UPDATE post_subtitle_tracks SET enabled=?, cues_json=?, updated_at=? WHERE id=?",
+                (
+                    int(track.enabled),
+                    json.dumps([cue.model_dump(mode="json") for cue in track.cues], ensure_ascii=False, sort_keys=True),
+                    track.updated_at,
+                    track.id,
+                ),
+            )
+        return self.get_post_subtitle_track(track.id)
+
+    def create_post_voice_track(self, track: VoiceTrack) -> VoiceTrack:
+        with connect(self.paths.database) as connection:
+            plan = connection.execute("SELECT project_id FROM post_production_plans WHERE id=?", (track.plan_id,)).fetchone()
+            if plan is None or plan["project_id"] != track.project_id:
+                raise ValueError("PostProductionPlan 不属于该项目")
+            connection.execute(
+                "INSERT INTO post_voice_tracks(id,project_id,plan_id,path,voice_assignments_json,metadata_json,created_at) VALUES (?,?,?,?,?,?,?)",
+                (track.id, track.project_id, track.plan_id, track.path, json.dumps(track.voice_assignments, ensure_ascii=False, sort_keys=True), json.dumps(track.metadata_json, ensure_ascii=False, sort_keys=True), track.created_at),
+            )
+        return self.get_post_voice_track(track.id)
+
+    def get_post_voice_track(self, track_id: str) -> VoiceTrack | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM post_voice_tracks WHERE id=?", (track_id,)).fetchone()
+        return self._post_voice_from_row(row) if row else None
+
+    def list_post_voice_tracks(self, project_id: str, plan_id: str) -> list[VoiceTrack]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM post_voice_tracks WHERE project_id=? AND plan_id=? ORDER BY created_at,id", (project_id, plan_id)).fetchall()
+        return [self._post_voice_from_row(row) for row in rows]
+
+    def create_post_music_track(self, track: MusicTrack) -> MusicTrack:
+        with connect(self.paths.database) as connection:
+            plan = connection.execute("SELECT project_id FROM post_production_plans WHERE id=?", (track.plan_id,)).fetchone()
+            if plan is None or plan["project_id"] != track.project_id:
+                raise ValueError("PostProductionPlan 不属于该项目")
+            connection.execute(
+                "INSERT INTO post_music_tracks(id,project_id,plan_id,path,start_seconds,end_seconds,gain,loop,fade_in_seconds,fade_out_seconds,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (track.id, track.project_id, track.plan_id, track.path, track.start_seconds, track.end_seconds, track.gain, int(track.loop), track.fade_in_seconds, track.fade_out_seconds, json.dumps(track.metadata_json, ensure_ascii=False, sort_keys=True), track.created_at),
+            )
+        return self.get_post_music_track(track.id)
+
+    def get_post_music_track(self, track_id: str) -> MusicTrack | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM post_music_tracks WHERE id=?", (track_id,)).fetchone()
+        return self._post_music_from_row(row) if row else None
+
+    def list_post_music_tracks(self, project_id: str, plan_id: str) -> list[MusicTrack]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM post_music_tracks WHERE project_id=? AND plan_id=? ORDER BY created_at,id", (project_id, plan_id)).fetchall()
+        return [self._post_music_from_row(row) for row in rows]
+
+    def create_post_render_attempt(self, attempt: PostRenderAttempt) -> PostRenderAttempt:
+        with connect(self.paths.database) as connection:
+            plan = connection.execute("SELECT project_id,source_final_assembly_id FROM post_production_plans WHERE id=?", (attempt.plan_id,)).fetchone()
+            if plan is None or plan["project_id"] != attempt.project_id or plan["source_final_assembly_id"] != attempt.source_final_assembly_id:
+                raise ValueError("PostRenderAttempt provenance 不属于该项目/plan")
+            connection.execute(
+                "INSERT INTO post_render_attempts(id,project_id,plan_id,source_final_assembly_id,attempt_number,status,adapter_name,output_relative_path,metadata_json,error_message,started_at,finished_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (attempt.id, attempt.project_id, attempt.plan_id, attempt.source_final_assembly_id, attempt.attempt_number, attempt.status.value, attempt.adapter_name, attempt.output_relative_path, json.dumps(attempt.metadata_json, ensure_ascii=False, sort_keys=True), attempt.error_message, attempt.started_at, attempt.finished_at, attempt.created_at),
+            )
+        return self.get_post_render_attempt(attempt.id)
+
+    def get_post_render_attempt(self, attempt_id: str) -> PostRenderAttempt | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM post_render_attempts WHERE id=?", (attempt_id,)).fetchone()
+        return self._post_attempt_from_row(row) if row else None
+
+    def list_post_render_attempts(self, project_id: str, plan_id: str) -> list[PostRenderAttempt]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute("SELECT * FROM post_render_attempts WHERE project_id=? AND plan_id=? ORDER BY attempt_number,id", (project_id, plan_id)).fetchall()
+        return [self._post_attempt_from_row(row) for row in rows]
+
+    def update_post_render_attempt(self, attempt_id: str, *, status: PostRenderAttemptStatus, output_relative_path: str | None = None, metadata_json: dict[str, object] | None = None, error_message: str | None = None, started_at: str | None = None, finished_at: str | None = None) -> PostRenderAttempt:
+        current = self.get_post_render_attempt(attempt_id)
+        if current is None:
+            raise KeyError("PostRenderAttempt 不存在")
+        with connect(self.paths.database) as connection:
+            connection.execute(
+                "UPDATE post_render_attempts SET status=?,output_relative_path=COALESCE(?,output_relative_path),metadata_json=?,error_message=COALESCE(?,error_message),started_at=COALESCE(?,started_at),finished_at=COALESCE(?,finished_at) WHERE id=?",
+                (status.value, output_relative_path, json.dumps(metadata_json if metadata_json is not None else current.metadata_json, ensure_ascii=False, sort_keys=True), error_message, started_at, finished_at, attempt_id),
+            )
+        return self.get_post_render_attempt(attempt_id)

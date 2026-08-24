@@ -44,8 +44,9 @@ def test_final_page_contains_product_facing_sections():
         "高级信息 / 调试信息",
     ):
         assert label in source
-    for forbidden in ("字幕", "TTS", "BGM", "水印"):
-        assert forbidden not in source
+    for label in ("最终后期", "字幕", "TTS", "BGM", "导出 SRT", "渲染最终后期成片"):
+        assert label in source
+    assert "水印" not in source
 
 
 def test_blocked_readiness_shows_clear_reasons_without_generate_action():

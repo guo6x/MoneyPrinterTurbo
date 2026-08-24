@@ -11,6 +11,18 @@ from .production_execution import ProductionArtifact, ProductionEvent, Productio
 from .production_qc import ProductionQCMetric, ProductionQCMetricStatus, ProductionQCResult, ProductionQCStatus, ProductionReview, ProductionReviewDecision
 from .production_snapshot import FrozenDict, ProductionInputSnapshot
 from .final_assembly import FinalAssembly, FinalAssemblyItem, FinalAssemblyManifest, FinalAssemblyReadiness, FinalAssemblySource, FinalAssemblyStatus, FinalAssemblyRenderAttempt, FinalAssemblyRenderAttemptStatus
+from .post_production import AudioMixConfig, BGMTrack, MusicTrack, PostProductionPlan, PostProductionProject, PostRenderAttempt, PostRenderAttemptStatus, SubtitleCue, SubtitleItem, SubtitleTrack, VoiceTrack
+from .director import (
+    DirectorDecision,
+    DirectorDecisionStatus,
+    DirectorGoal,
+    DirectorGoalKind,
+    DirectorGoalStatus,
+    DirectorRecommendation,
+    DirectorSession,
+    DirectorSessionStatus,
+)
+from .producer import ProducerPolicy, ProducerRecommendation, ProductionProgress
 
 __all__ = [
     "AspectRatio",
@@ -31,4 +43,8 @@ __all__ = [
     "FrozenDict", "ProductionInputSnapshot",
     "FinalAssembly", "FinalAssemblyItem", "FinalAssemblyManifest", "FinalAssemblyReadiness", "FinalAssemblySource", "FinalAssemblyStatus",
     "FinalAssemblyRenderAttempt", "FinalAssemblyRenderAttemptStatus",
+    "AudioMixConfig", "MusicTrack", "BGMTrack", "PostProductionPlan", "PostProductionProject", "PostRenderAttempt", "PostRenderAttemptStatus", "SubtitleCue", "SubtitleItem", "SubtitleTrack", "VoiceTrack",
+    "DirectorSession", "DirectorSessionStatus", "DirectorGoal", "DirectorGoalKind", "DirectorGoalStatus",
+    "DirectorDecision", "DirectorDecisionStatus", "DirectorRecommendation",
+    "ProducerPolicy", "ProducerRecommendation", "ProductionProgress",
 ]

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="80" viewBox="0 0 320 80" role="img" aria-labelledby="title desc">
+  <title id="title">AIDrama Studio</title>
+  <desc id="desc">A simple replaceable text mark for AIDrama Studio</desc>
+  <rect width="320" height="80" rx="16" fill="#0a0d12"/>
+  <path d="M34 56 48 23h11l14 33H62l-2.8-7H48.5l-2.7 7H34Zm18.2-15.1h4.1l-2-6-2.1 6Z" fill="#d6a35a"/>
+  <text x="86" y="51" fill="#edf1f7" font-family="Arial, sans-serif" font-size="28" font-weight="700" letter-spacing="1">AIDrama</text>
+  <text x="235" y="51" fill="#8f9bab" font-family="Arial, sans-serif" font-size="15" letter-spacing="1">STUDIO</text>
+</svg>

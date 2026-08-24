@@ -40,6 +40,14 @@ def test_all_aidrama_migrations_apply_in_order_and_create_revision_tables() -> N
         "final_assemblies",
         "final_assembly_items",
         "final_assembly_render_attempts",
+        "post_production_plans",
+        "post_subtitle_tracks",
+        "post_voice_tracks",
+        "post_music_tracks",
+        "post_render_attempts",
+        "director_sessions",
+        "director_goals",
+        "director_decisions",
     } <= tables
 
 
@@ -66,6 +74,14 @@ def test_migrations_are_idempotent_and_do_not_duplicate_schema_records() -> None
         "final_assemblies",
         "final_assembly_items",
         "final_assembly_render_attempts",
+        "post_production_plans",
+        "post_subtitle_tracks",
+        "post_voice_tracks",
+        "post_music_tracks",
+        "post_render_attempts",
+        "director_sessions",
+        "director_goals",
+        "director_decisions",
     ):
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from collections.abc import Callable
 
@@ -376,6 +378,253 @@ def _migration_011_final_assembly_render_attempts(connection: sqlite3.Connection
     )
 
 
+def _migration_012_post_production(connection: sqlite3.Connection) -> None:
+    """Persist project-scoped post plans, tracks, and append-only renders."""
+    connection.execute(
+        """
+        CREATE TABLE post_production_plans (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            source_final_assembly_id TEXT NOT NULL,
+            subtitle_enabled INTEGER NOT NULL DEFAULT 1,
+            audio_mix_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_final_assembly_id) REFERENCES final_assemblies(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE post_subtitle_tracks (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            plan_id TEXT,
+            source_script_revision_id TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            cues_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_id) REFERENCES post_production_plans(id) ON DELETE SET NULL,
+            FOREIGN KEY(source_script_revision_id) REFERENCES structured_script_revisions(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE post_voice_tracks (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            path TEXT,
+            voice_assignments_json TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_id) REFERENCES post_production_plans(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE post_music_tracks (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            start_seconds REAL NOT NULL DEFAULT 0,
+            end_seconds REAL,
+            gain REAL NOT NULL DEFAULT 1.0,
+            loop INTEGER NOT NULL DEFAULT 0,
+            fade_in_seconds REAL NOT NULL DEFAULT 0,
+            fade_out_seconds REAL NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_id) REFERENCES post_production_plans(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE post_render_attempts (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            source_final_assembly_id TEXT NOT NULL,
+            attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+            status TEXT NOT NULL CHECK (status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
+            adapter_name TEXT NOT NULL,
+            output_relative_path TEXT,
+            metadata_json TEXT NOT NULL,
+            error_message TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(plan_id, attempt_number),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_id) REFERENCES post_production_plans(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_final_assembly_id) REFERENCES final_assemblies(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute("CREATE INDEX idx_post_plans_project ON post_production_plans(project_id, created_at DESC)")
+    connection.execute("CREATE INDEX idx_post_subtitles_plan ON post_subtitle_tracks(plan_id, created_at DESC)")
+    connection.execute("CREATE INDEX idx_post_voice_plan ON post_voice_tracks(plan_id, created_at DESC)")
+    connection.execute("CREATE INDEX idx_post_music_plan ON post_music_tracks(plan_id, created_at DESC)")
+    connection.execute("CREATE INDEX idx_post_attempts_plan ON post_render_attempts(plan_id, attempt_number)")
+
+
+def _migration_013_director_state(connection: sqlite3.Connection) -> None:
+    """Persist bounded Director goals and append-only decisions.
+
+    This migration deliberately stores only Director control-plane state.  It
+    references a project but does not duplicate Story/Script/Shot/Production
+    truth; every run reconstructs its state from those canonical services.
+    """
+    connection.execute(
+        """
+        CREATE TABLE director_sessions (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'BLOCKED', 'COMPLETED', 'PAUSED')),
+            current_goal TEXT NOT NULL,
+            blocking_reason TEXT NOT NULL DEFAULT '',
+            pending_recommendation_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE director_goals (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            goal TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'COMPLETED', 'BLOCKED', 'CANCELLED')),
+            max_steps INTEGER NOT NULL CHECK (max_steps >= 1),
+            completed_steps INTEGER NOT NULL DEFAULT 0 CHECK (completed_steps >= 0),
+            created_at TEXT NOT NULL,
+            finished_at TEXT,
+            FOREIGN KEY(session_id) REFERENCES director_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE director_decisions (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            goal_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('RECOMMENDED', 'APPROVED', 'COMPLETED', 'REJECTED')),
+            project_state TEXT NOT NULL,
+            recommendation_json TEXT NOT NULL,
+            state_snapshot_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES director_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(goal_id) REFERENCES director_goals(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute("CREATE INDEX idx_director_sessions_project ON director_sessions(project_id, updated_at DESC)")
+    connection.execute("CREATE INDEX idx_director_goals_session ON director_goals(session_id, created_at DESC)")
+    connection.execute("CREATE INDEX idx_director_decisions_session ON director_decisions(session_id, created_at, id)")
+
+
+def _migration_014_reference_asset_schema_repair(connection: sqlite3.Connection) -> None:
+    """Repair databases created by the pre-005 reference-set prototype.
+
+    Early development builds recorded migration 005 while using
+    ``reference_asset_sets``/``reference_asset_images``.  A release candidate
+    must not fail when that durable database is reopened, so the canonical
+    asset tables are created idempotently and the legacy rows are projected
+    into them.  Fresh databases simply execute the CREATE IF NOT EXISTS path.
+    """
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS reference_assets (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL, asset_type TEXT NOT NULL,
+            current_version_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS reference_asset_versions (
+            id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, project_id TEXT NOT NULL,
+            version_number INTEGER NOT NULL, filename TEXT NOT NULL, mime_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, storage_path TEXT NOT NULL,
+            metadata_json TEXT NOT NULL, created_at TEXT NOT NULL,
+            UNIQUE(asset_id, version_number),
+            FOREIGN KEY(asset_id) REFERENCES reference_assets(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS reference_asset_bindings (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL, asset_version_id TEXT NOT NULL,
+            binding_type TEXT NOT NULL, binding_id TEXT NOT NULL, created_at TEXT NOT NULL,
+            UNIQUE(project_id, asset_version_id, binding_type, binding_id),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(asset_version_id) REFERENCES reference_asset_versions(id) ON DELETE CASCADE
+        )
+    """)
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_reference_assets_project ON reference_assets(project_id, asset_type)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_reference_versions_asset ON reference_asset_versions(asset_id, version_number DESC)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_reference_versions_hash ON reference_asset_versions(project_id, sha256)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_reference_bindings_target ON reference_asset_bindings(project_id, binding_type, binding_id)")
+
+    legacy_sets = connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='reference_asset_sets'").fetchone()
+    legacy_images = connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='reference_asset_images'").fetchone()
+    if not legacy_sets:
+        return
+    rows = connection.execute("SELECT * FROM reference_asset_sets ORDER BY project_id, subject_type, subject_id, version, id").fetchall()
+    grouped: dict[tuple[str, str, str], str] = {}
+    for row in rows:
+        key = (row["project_id"], row["subject_type"], row["subject_id"])
+        asset_id = grouped.setdefault(key, "legacy-" + hashlib.sha256("|".join(key).encode()).hexdigest()[:32])
+        asset_type = {
+            "CHARACTER": "CHARACTER_REFERENCE", "LOCATION": "LOCATION_REFERENCE",
+            "STYLE": "STYLE_REFERENCE", "PROP": "PROP_REFERENCE",
+        }.get(str(row["subject_type"]).upper(), "PROP_REFERENCE")
+        connection.execute(
+            "INSERT OR IGNORE INTO reference_assets(id,project_id,asset_type,created_at,updated_at) VALUES (?,?,?,?,?)",
+            (asset_id, row["project_id"], asset_type, row["created_at"], row["updated_at"]),
+        )
+        image = None
+        if legacy_images:
+            image = connection.execute("SELECT * FROM reference_asset_images WHERE asset_set_id=? ORDER BY id LIMIT 1", (row["id"],)).fetchone()
+        if image is None:
+            continue
+        raw_hash = str(image["sha256"] or "").lower()
+        sha256 = raw_hash if len(raw_hash) == 64 and all(char in "0123456789abcdef" for char in raw_hash) else hashlib.sha256(("legacy:" + str(image["id"])).encode()).hexdigest()
+        storage_path = str(image["relative_path"] or "").replace("\\", "/").lstrip("/")
+        if not storage_path or any(part in {"", ".", ".."} for part in storage_path.split("/")) or "://" in storage_path:
+            storage_path = "legacy/reference/" + str(image["id"]) + ".bin"
+        metadata = {
+            "source_story_revision_id": row["source_story_revision_id"],
+            "legacy_subject_type": row["subject_type"],
+            "legacy_subject_id": row["subject_id"],
+            "legacy_status": row["status"],
+        }
+        connection.execute(
+            "INSERT OR IGNORE INTO reference_asset_versions(id,asset_id,project_id,version_number,filename,mime_type,size_bytes,sha256,storage_path,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (str(image["id"]), asset_id, row["project_id"], int(row["version"]), str(image["original_filename"] or "reference"), str(image["media_type"] or "application/octet-stream"), max(1, int(image["size_bytes"] or 1)), sha256, storage_path, json.dumps(metadata, ensure_ascii=False, sort_keys=True), image["created_at"]),
+        )
+        if str(row["status"]).upper() == "LOCKED":
+            connection.execute("UPDATE reference_assets SET current_version_id=?, updated_at=? WHERE id=?", (str(image["id"]), row["updated_at"], asset_id))
+        binding_type = {"CHARACTER": "CHARACTER", "LOCATION": "LOCATION", "SHOT": "SHOT"}.get(str(row["subject_type"]).upper())
+        if binding_type:
+            binding_id = "legacy-binding-" + hashlib.sha256((asset_id + str(image["id"])).encode()).hexdigest()[:24]
+            connection.execute("INSERT OR IGNORE INTO reference_asset_bindings(id,project_id,asset_version_id,binding_type,binding_id,created_at) VALUES (?,?,?,?,?,?)", (binding_id, row["project_id"], str(image["id"]), binding_type, row["subject_id"], image["created_at"]))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -388,6 +637,9 @@ MIGRATIONS: tuple[Migration, ...] = (
     (9, _migration_009_production_qc),
     (10, _migration_010_final_assembly_manifest),
     (11, _migration_011_final_assembly_render_attempts),
+    (12, _migration_012_post_production),
+    (13, _migration_013_director_state),
+    (14, _migration_014_reference_asset_schema_repair),
 )
 
 

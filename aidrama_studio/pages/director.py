@@ -12,8 +12,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 import streamlit as st
 from aidrama_studio.components.page_header import page_header
 from aidrama_studio.pages._shared import current_project_or_stop
-from aidrama_studio.services import ScriptService
-from aidrama_studio.domain import ShotStatus
+from aidrama_studio.services import ScriptService, DirectorService, DirectorServiceError, ProducerService, ProducerServiceError
+from aidrama_studio.domain import ShotStatus, DirectorGoalKind
 
 def _shot_service():
     try:
@@ -81,9 +81,9 @@ def _editor(service, project, plan):
                 st.error(f"保存失败：{exc}")
 
 
-def render() -> None:
+def _render_shot_plan(project) -> None:
+    """Keep the canonical Shot Plan editor available below the product console."""
     page_header("分镜导演台", "SHOT DIRECTOR", "把剧本拆解为可执行、可审核的镜头列表。")
-    project = current_project_or_stop()
     approved = ScriptService().get_approved_revision(project.id)
     if not approved:
         st.warning("请先完成并确认结构化剧本。导演台只接受 APPROVED Structured Script。"); return
@@ -111,3 +111,110 @@ def render() -> None:
     if _status(plan) == "DRAFT" and st.button("Approve Shot Plan", key=f"approve-{current}"):
         try: _call(service, "approve_plan", current) or _call(service, "approve_revision", current); st.success("Shot Plan 已批准"); st.rerun()
         except Exception as exc: st.error(str(exc))
+
+
+def _render_director_console(project) -> None:
+    """Render a bounded, durable AI Director / Producer control plane.
+
+    This console is deliberately advisory: it reconstructs canonical project
+    state through services and exposes one primary next action.  It never
+    invokes a provider or mutates creative truth from the page.
+    """
+    st.subheader("AI 导演 / 制片")
+    st.caption(f"项目：{project.title} · 状态由 Story、Script、Shot、资产、生产与 QC 汇总")
+    director = DirectorService()
+    producer = ProducerService()
+    try:
+        state = director.inspect_project(project.id)
+    except (DirectorServiceError, ProducerServiceError, Exception) as exc:
+        st.warning("暂时无法读取导演状态，请检查项目数据后重试。")
+        st.caption(str(exc)[:180])
+        return
+
+    state_label = str(state.get("project_state", "UNKNOWN"))
+    readiness = state.get("readiness") or {}
+    try:
+        producer_recommendations = producer.recommendations(project.id)
+    except Exception:
+        producer_recommendations = []
+
+    # A durable session is created only by explicit user action; no provider
+    # call is implied by showing this page.
+    sessions = director.list_sessions(project.id)
+    session_id = st.session_state.get(f"director-session-{project.id}")
+    session = next((item for item in sessions if item.id == session_id), None)
+    if session is None and sessions:
+        session = sessions[0]
+        session_id = session.id
+        st.session_state[f"director-session-{project.id}"] = session_id
+
+    recommendation = session.pending_recommendation if session else None
+    if recommendation is None and producer_recommendations:
+        recommendation = producer_recommendations[0]
+    action = getattr(recommendation, "action", None) or "REVIEW_PROJECT_STATE"
+    reason = getattr(recommendation, "reason", None) or "先运行一次有界的导演检查，获得结构化下一步建议。"
+    target_id = getattr(recommendation, "target_id", None)
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("当前阶段", state_label)
+    metric_cols[1].metric("生产就绪", "是" if bool(readiness.get("ready")) else "否")
+    metric_cols[2].metric("高风险镜头", len(producer.high_risk_shots(project.id)))
+    metric_cols[3].metric("QC 失败", len(state.get("qc_failures", [])))
+
+    with st.container(border=True):
+        st.markdown("### 下一步建议")
+        st.markdown(f"**{action}**")
+        st.write(reason)
+        if target_id:
+            st.caption(f"目标：{target_id}")
+        st.info("导演建议不会绕过 Story、Script、Shot Plan、资产锁定或人审批准 gates。")
+        if st.button("分析当前项目", type="primary", key=f"director-run-{project.id}"):
+            try:
+                if session is None:
+                    session = director.start_session(project.id, DirectorGoalKind.MAKE_PRODUCTION_READY, max_steps=1)
+                    st.session_state[f"director-session-{project.id}"] = session.id
+                decision = director.run(project.id, session.id)
+                st.session_state[f"director-last-action-{project.id}"] = decision.recommendation.action
+                st.success("导演决策已保存，可在下方查看。")
+                st.rerun()
+            except Exception as exc:
+                st.warning("导演检查未完成，请先处理当前阻塞项。")
+                st.caption(str(exc)[:180])
+
+    blockers = readiness.get("blocked_reasons", []) or []
+    with st.container(border=True):
+        st.markdown("### 当前阻塞")
+        if blockers:
+            for blocker in blockers[:5]:
+                st.markdown(f"- {str(blocker)[:220]}")
+        elif state.get("qc_failures"):
+            st.markdown("- 存在 QC 失败，需要人工审查。")
+        else:
+            st.success("当前没有已知阻塞。")
+
+    high_risk = producer.high_risk_shots(project.id)
+    with st.container(border=True):
+        st.markdown("### 制作风险")
+        if high_risk:
+            st.write(f"高风险镜头 {len(high_risk)} 个")
+            st.caption("、".join(high_risk[:8]))
+        else:
+            st.caption("暂无标记为 HIGH 的镜头。")
+
+    with st.expander("最近导演决策", expanded=False):
+        if session is None:
+            st.caption("尚未运行导演检查。")
+        else:
+            for decision in reversed(director.list_decisions(project.id, session.id)[-10:]):
+                rec = decision.recommendation
+                st.markdown(f"**{rec.action}** · {decision.project_state}")
+                st.caption(rec.reason[:220])
+
+
+def render() -> None:
+    project = current_project_or_stop()
+    tabs = st.tabs(["AI 导演 / 制片", "Shot Plan / 分镜编辑"])
+    with tabs[0]:
+        _render_director_console(project)
+    with tabs[1]:
+        _render_shot_plan(project)

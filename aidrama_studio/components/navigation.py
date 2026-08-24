@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from aidrama_studio.branding import BRAND
 from aidrama_studio.pages import (
     assets,
     dashboard,
@@ -34,7 +35,7 @@ def build_navigation():
     st.session_state["_aidrama_pages"] = pages
     navigation = st.navigation(
         {
-            "AIDrama Studio": [
+            BRAND.product_name: [
                 pages["dashboard"],
                 pages["story"],
                 pages["assets"],
