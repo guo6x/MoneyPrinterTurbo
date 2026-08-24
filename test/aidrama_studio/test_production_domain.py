@@ -151,6 +151,8 @@ def test_production_shots_attempt_numbering_retry_and_immutable_history(context)
     assert len(shots) == 1 and shots[0].shot_id == "shot_001"
 
     first = service.start_attempt(project.id, shots[0].id, runtime_adapter="future-adapter", input_snapshot_json={"shot": "shot_001"})
+    with pytest.raises(ProductionServiceError, match="正在运行"):
+        service.start_attempt(project.id, shots[0].id, runtime_adapter="future-adapter")
     failed = service.fail_attempt(project.id, first.id, error_message="temporary failure")
     assert failed.attempt_number == 1 and failed.status.value == "FAILED"
     second = service.start_attempt(project.id, shots[0].id, runtime_adapter="future-adapter", input_snapshot_json={"retry": 2})

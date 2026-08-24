@@ -226,6 +226,8 @@ class ProductionService:
                 raise ProductionServiceError("ProductionJob 尚未 READY: " + "; ".join(readiness["blocked_reasons"]))
             job = self.repository.update_production_job_status(job.id, ProductionJobStatus.READY, updated_at=_now())
         attempts = self.repository.list_production_attempts(shot.id)
+        if any(item.status is ProductionAttemptStatus.STARTED for item in attempts):
+            raise ProductionServiceError("该 ProductionShot 已有正在运行的 attempt")
         attempt = self.repository.create_production_attempt(
             ProductionAttempt(
                 id=uuid4().hex,
