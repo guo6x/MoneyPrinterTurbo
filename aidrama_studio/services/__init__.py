@@ -14,7 +14,24 @@ from .production_qc import ProductionQCService, ProductionQCServiceError
 from .production_orchestrator import ProductionOrchestrator, ProductionOrchestratorError
 from .final_assembly import FinalAssemblyService, FinalAssemblyServiceError
 from .final_assembly_runtime import FinalAssemblyRenderService, FinalAssemblyRuntimeService, FinalAssemblyRuntimeServiceError
-from .adapters import MPTAdapterError, MPTInputMapper, MPTProductionAdapter, MockProductionAdapter, ProductionRuntimeAdapter, RuntimeEvent, RuntimeSubmission
+from .adapters import (
+    MPTAdapterError,
+    MPTInputMapper,
+    MPTProductionAdapter,
+    MockProductionAdapter,
+    ProductionRuntimeAdapter,
+    RuntimeEvent,
+    RuntimeSubmission,
+    WanAdapterError,
+    WanInputMapper,
+    WanProductionAdapter,
+    WanPromptMapper,
+    WanProviderConfig,
+    WanProviderHTTPError,
+    WanReferenceResolver,
+    WanReferenceSelection,
+    WanVideoClient,
+)
 
 __all__ = [
     "DeleteProjectResult",
@@ -35,4 +52,7 @@ __all__ = [
     "FinalAssemblyRuntimeService", "FinalAssemblyRenderService", "FinalAssemblyRuntimeServiceError",
     "ProductionOrchestrator", "ProductionOrchestratorError",
     "ProductionRuntimeAdapter", "RuntimeSubmission", "RuntimeEvent", "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
+    "WanAdapterError", "WanInputMapper", "WanProductionAdapter", "WanPromptMapper",
+    "WanProviderConfig", "WanProviderHTTPError", "WanReferenceResolver",
+    "WanReferenceSelection", "WanVideoClient",
 ]

@@ -275,17 +275,25 @@ class ProductionExecutionService:
                 raise ProductionExecutionServiceError("runtime adapter 拒绝 input snapshot")
             submission = adapter.submit(runtime_snapshot)
             runtime_reference = self._submission_reference(submission)
+            submission_metadata = self._submission_metadata(submission)
         except ProductionExecutionServiceError:
             raise
         except Exception as exc:
             self.fail_execution(project_id, execution.id, error_message=str(exc))
             raise ProductionExecutionServiceError(f"runtime submit 失败: {exc}") from exc
         self._adapters[execution.id] = adapter
-        return self.start_execution(
-            project_id,
-            execution.id,
-            {"adapter": getattr(adapter, "name", adapter.__class__.__name__), "runtime_reference": runtime_reference},
-        )
+        start_payload = {
+            "adapter": getattr(adapter, "name", adapter.__class__.__name__),
+            "runtime_reference": runtime_reference,
+        }
+        # Provider adapters may return non-secret request trace data (model,
+        # prompt, exact frozen reference version, and provider task id).  Keep
+        # it in the immutable STARTED event so a worker restart and later QC
+        # inspection retain the exact request without changing the snapshot
+        # or persisting credentials.
+        if submission_metadata:
+            start_payload["provider_metadata"] = submission_metadata
+        return self.start_execution(project_id, execution.id, start_payload)
 
     @staticmethod
     def _submission_reference(submission: RuntimeSubmission | str | Mapping[str, object]) -> str:
@@ -300,6 +308,25 @@ class ProductionExecutionService:
         if not isinstance(reference, str) or not reference.strip():
             raise ProductionExecutionServiceError("runtime submit 未返回有效 reference")
         return reference.strip()
+
+    @staticmethod
+    def _submission_metadata(submission: RuntimeSubmission | str | Mapping[str, object]) -> dict[str, object]:
+        """Extract JSON-safe, non-secret provider trace metadata.
+
+        ``RuntimeSubmission.metadata`` is the adapter boundary for request
+        traceability.  It is intentionally copied as a separate event field;
+        the provider adapter owns the rule that secrets never enter it.
+        Generic mappings are accepted for compatibility with older adapters.
+        """
+        if isinstance(submission, RuntimeSubmission):
+            raw = submission.metadata
+        elif isinstance(submission, Mapping):
+            raw = submission.get("metadata") or submission.get("provider_metadata") or {}
+        else:
+            raw = getattr(submission, "metadata", {})
+        if not isinstance(raw, Mapping):
+            return {}
+        return {str(key): value for key, value in raw.items() if str(key).lower() not in {"api_key", "apikey", "authorization", "token", "secret"}}
 
     def handle_runtime_event(
         self,
