@@ -18,8 +18,17 @@ from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from aidrama_studio.domain import SubtitleCue, VoiceTrack
-from aidrama_studio.services.ai_capabilities import CapabilityUnavailable, TTSProvider, TTSResult, default_capability_registry
+from aidrama_studio.services.ai_capabilities import (
+    CapabilityKind,
+    CapabilityRegistry,
+    CapabilityUnavailable,
+    TTSProvider,
+    TTSResult,
+    default_capability_registry,
+)
 from aidrama_studio.storage.repositories import ProjectRepository
+
+from .provider_profiles import ProviderDisclosure, ProviderProfileError, ProviderProfileService
 
 
 def _now() -> str:
@@ -31,9 +40,23 @@ class TTSRuntimeError(RuntimeError):
 
 
 class TTSRuntimeService:
-    def __init__(self, repository: ProjectRepository | None = None, *, provider: TTSProvider | None = None, ffmpeg_binary: str | None = None) -> None:
+    def __init__(
+        self,
+        repository: ProjectRepository | None = None,
+        *,
+        provider: TTSProvider | None = None,
+        ffmpeg_binary: str | None = None,
+        registry: CapabilityRegistry | None = None,
+        provider_profiles: ProviderProfileService | None = None,
+    ) -> None:
         self.repository = repository or ProjectRepository()
-        self.provider = provider or default_capability_registry().get("TTS")
+        self.registry = registry or (
+            CapabilityRegistry([provider]) if provider is not None else default_capability_registry()
+        )
+        self.provider_profiles = provider_profiles or ProviderProfileService(
+            self.repository, registry=self.registry
+        )
+        self.provider = provider or self.registry.get("TTS")
         self.ffmpeg_binary = ffmpeg_binary
 
     def synthesize_track(
@@ -47,6 +70,7 @@ class TTSRuntimeService:
         voice_assignments: Mapping[str, str] | None = None,
         default_voice: str = "zh-CN-XiaoxiaoMultilingualNeural-V2-Female",
         track_id: str | None = None,
+        disclosure: ProviderDisclosure | Mapping[str, object] | None = None,
     ) -> VoiceTrack:
         plan = self._require_plan(project_id, plan_id)
         self._require_script_chain(project_id, plan, script_revision_id)
@@ -60,10 +84,27 @@ class TTSRuntimeService:
             normalized,
             subtitle_track_id,
         )
-        if self.provider is None:
-            raise TTSRuntimeError("没有可用 TTS provider")
-        if not self.provider.status.available:
-            raise TTSRuntimeError(self.provider.status.reason)
+        try:
+            resolved = self.provider_profiles.resolve(
+                project_id, CapabilityKind.TTS, require_available=True
+            )
+            selected_provider = self.provider_profiles.provider_for_selection(resolved)
+            safe_disclosure = self.provider_profiles.require_disclosure(
+                project_id,
+                CapabilityKind.TTS,
+                disclosure,
+                transmitted_content_types=("TEXT_TIMELINE",),
+            )
+        except (ProviderProfileError, CapabilityUnavailable) as exc:
+            raise TTSRuntimeError(
+                "Provider disclosure/selection 不可用；不会调用 TTS Provider"
+            ) from exc
+        if not isinstance(selected_provider, TTSProvider):
+            raise TTSRuntimeError("选中的 TTS provider 无效")
+        # The concrete provider is selected from the exact profile; the
+        # constructor-injected provider is not a fallback once a selection is
+        # unavailable.
+        provider = selected_provider
         if any(
             normalized[index].end_seconds > normalized[index + 1].start_seconds
             for index in range(len(normalized) - 1)
@@ -77,7 +118,7 @@ class TTSRuntimeService:
             for index, cue in enumerate(normalized):
                 speaker = str(cue.beat_id or cue.shot_id or "narrator")
                 voice = assignments.get(speaker, assignments.get("narrator", default_voice))
-                result = self.provider.synthesize(cue.text, voice=voice)
+                result = provider.synthesize(cue.text, voice=voice)
                 path = self._write_segment(root, index, result)
                 segments.append({
                     "cue_id": cue.id,
@@ -106,7 +147,8 @@ class TTSRuntimeService:
                 "source_subtitle_track_id": subtitle_track.id,
                 "source_subtitle_cues_sha256": self._cues_sha256(subtitle_track.cues),
                 "segments": segments,
-                "provider": str(getattr(self.provider, "provider_name", result.provider)),
+                "provider": str(getattr(provider, "provider_name", result.provider)),
+                "provider_disclosure": safe_disclosure,
                 "voice_assignments": assignments,
                 "timeline_start_seconds": timeline_start,
                 "timeline_end_seconds": timeline_end,

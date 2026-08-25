@@ -112,6 +112,41 @@ class ResolvedProviderSelection:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderDisclosure:
+    """Safe, explicit notice required immediately before remote transfer.
+
+    The disclosure is deliberately limited to provider routing and the
+    *categories* of content being sent.  It never contains prompts, source
+    documents, credentials, endpoint URLs, or provider response data.
+    ``fingerprint`` binds the notice to the exact selected profile, so a
+    settings/profile change invalidates a previously prepared disclosure.
+    """
+
+    capability: str
+    provider_id: str
+    model_id: str
+    deployment_region: str
+    endpoint_profile_id: str
+    endpoint_class: str
+    transmitted_content_types: tuple[str, ...]
+    disclosure_version: str
+    fingerprint: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "capability": self.capability,
+            "provider_id": self.provider_id,
+            "model_id": self.model_id,
+            "deployment_region": self.deployment_region,
+            "endpoint_profile_id": self.endpoint_profile_id,
+            "endpoint_class": self.endpoint_class,
+            "transmitted_content_types": list(self.transmitted_content_types),
+            "disclosure_version": self.disclosure_version,
+            "fingerprint": self.fingerprint,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class DurationPlan:
     provider_duration_seconds: float
     target_creative_duration_seconds: float
@@ -129,6 +164,19 @@ class ReferenceTrace:
 
 class ProviderProfileService:
     """Select configured capabilities without embedding provider logic in UI."""
+
+    DISCLOSURE_VERSION = "provider-disclosure-v1"
+    # These are category labels, never user content.  Keeping an allow-list
+    # prevents a disclosure from becoming an accidental prompt/source dump.
+    DISCLOSURE_CONTENT_TYPES = frozenset({
+        "TEXT_BRIEF",
+        "TEXT_CONSTRAINTS",
+        "TEXT_TIMELINE",
+        "REFERENCE_VERSION",
+        "REFERENCE_IMAGE",
+        "VIDEO_ARTIFACT",
+        "SAMPLED_FRAME",
+    })
 
     PRODUCT_CAPABILITIES = (
         CapabilityKind.LLM,
@@ -445,6 +493,166 @@ class ProviderProfileService:
             for capability in self.PRODUCT_CAPABILITIES
         )
 
+    def create_disclosure(
+        self,
+        project_id: str,
+        capability: CapabilityKind | str,
+        *,
+        transmitted_content_types: tuple[str, ...] | list[str] = (),
+        provider_id: str | None = None,
+        endpoint_profile_id: str | None = None,
+    ) -> ProviderDisclosure:
+        """Freeze a safe routing/content notice for one exact profile.
+
+        This method performs no network operation.  It fails closed when the
+        selected profile is unavailable, ensuring callers cannot issue a
+        remote request through an implicit fallback.
+        """
+
+        resolved = self.resolve(
+            project_id,
+            capability,
+            provider_id=provider_id,
+            endpoint_profile_id=endpoint_profile_id,
+            require_available=True,
+        )
+        if resolved.profile is None or not resolved.available:
+            raise ProviderProfileError(resolved.detail)
+        content_types = self._normalize_disclosure_content_types(
+            transmitted_content_types
+        )
+        profile = resolved.profile
+        payload = self._disclosure_payload(
+            capability=CapabilityKind(capability).value,
+            profile=profile,
+            content_types=content_types,
+        )
+        fingerprint = _hash(payload)
+        return ProviderDisclosure(
+            capability=payload["capability"],
+            provider_id=payload["provider_id"],
+            model_id=payload["model_id"],
+            deployment_region=payload["deployment_region"],
+            endpoint_profile_id=payload["endpoint_profile_id"],
+            endpoint_class=payload["endpoint_class"],
+            transmitted_content_types=tuple(content_types),
+            disclosure_version=self.DISCLOSURE_VERSION,
+            fingerprint=fingerprint,
+        )
+
+    # Explicit aliases make the boundary easy to consume from adapters and
+    # preserve a single canonical implementation.
+    disclosure = create_disclosure
+
+    def require_disclosure(
+        self,
+        project_id: str,
+        capability: CapabilityKind | str,
+        disclosure: ProviderDisclosure | Mapping[str, object] | None = None,
+        *,
+        transmitted_content_types: tuple[str, ...] | list[str] = (),
+    ) -> dict[str, object]:
+        """Return a validated public disclosure or fail before any call."""
+
+        if disclosure is None:
+            return self.create_disclosure(
+                project_id,
+                capability,
+                transmitted_content_types=transmitted_content_types,
+            ).as_dict()
+        value = disclosure.as_dict() if isinstance(disclosure, ProviderDisclosure) else dict(disclosure)
+        if not self.validate_disclosure(project_id, capability, value):
+            raise ProviderProfileError("Provider disclosure 缺失或 fingerprint 已过期；不会调用 Provider")
+        return value
+
+    def validate_disclosure(
+        self,
+        project_id: str,
+        capability: CapabilityKind | str,
+        disclosure: ProviderDisclosure | Mapping[str, object] | None,
+    ) -> bool:
+        """Validate routing, content categories, and current profile hash."""
+
+        if disclosure is None:
+            return False
+        value = disclosure.as_dict() if isinstance(disclosure, ProviderDisclosure) else dict(disclosure)
+        try:
+            capability_value = CapabilityKind(capability).value
+            if str(value.get("capability")) != capability_value:
+                return False
+            if str(value.get("disclosure_version")) != self.DISCLOSURE_VERSION:
+                return False
+            content_types = self._normalize_disclosure_content_types(
+                value.get("transmitted_content_types") or ()
+            )
+            resolved = self.resolve(project_id, capability_value, require_available=True)
+            if resolved.profile is None or not resolved.available:
+                return False
+            payload = self._disclosure_payload(
+                capability=capability_value,
+                profile=resolved.profile,
+                content_types=content_types,
+            )
+            if any(str(value.get(key)) != str(expected) for key, expected in payload.items()):
+                return False
+            return str(value.get("fingerprint")) == _hash(payload)
+        except (ProviderProfileError, TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _normalize_disclosure_content_types(cls, values: object) -> tuple[str, ...]:
+        if isinstance(values, (str, bytes)):
+            raise ProviderProfileError("disclosure content types 必须为 category list")
+        try:
+            normalized = tuple(dict.fromkeys(str(item).strip().upper() for item in values))
+        except TypeError as exc:
+            raise ProviderProfileError("disclosure content types 无效") from exc
+        if any(not item or item not in cls.DISCLOSURE_CONTENT_TYPES for item in normalized):
+            raise ProviderProfileError("disclosure content type 不受支持")
+        return normalized
+
+    @staticmethod
+    def _disclosure_payload(*, capability: str, profile: CapabilityProfile, content_types: tuple[str, ...]) -> dict[str, object]:
+        return {
+            "capability": capability,
+            "provider_id": profile.provider_id,
+            "model_id": profile.model_id,
+            "deployment_region": profile.deployment_region.value,
+            "endpoint_profile_id": profile.endpoint_profile_id,
+            "endpoint_class": profile.endpoint_class,
+            "transmitted_content_types": list(content_types),
+        }
+
+    def provider_for_selection(self, resolved: ResolvedProviderSelection) -> object:
+        """Resolve the concrete registered runtime without cross-provider fallback."""
+
+        profile = resolved.profile
+        if profile is None or not resolved.available or self.registry is None:
+            raise ProviderProfileError("Provider selection 不可用；不会自动 fallback")
+        for provider in self.registry.list(profile.capability):
+            if str(getattr(provider, "provider_name", "")).casefold() != profile.provider_id.casefold():
+                continue
+            try:
+                status = provider.status
+            except Exception:
+                continue
+            metadata = dict(getattr(status, "metadata", {}) or {})
+            if str(metadata.get("model") or "runtime") != profile.model_id:
+                continue
+            endpoint_id = str(metadata.get("endpoint_profile_id") or "")
+            if endpoint_id and endpoint_id != profile.endpoint_profile_id:
+                continue
+            endpoint_class_raw = metadata.get("endpoint_class")
+            endpoint_class = str(endpoint_class_raw or "UNSPECIFIED")
+            if endpoint_class_raw is not None and profile.endpoint_class not in {"", "UNSPECIFIED"} and endpoint_class != profile.endpoint_class:
+                continue
+            region_raw = metadata.get("deployment_region")
+            region = str(region_raw or "UNSPECIFIED")
+            if region_raw is not None and profile.deployment_region is not ProviderDeploymentRegion.UNSPECIFIED and region != profile.deployment_region.value:
+                continue
+            return provider
+        raise ProviderProfileError("冻结 Provider/model/endpoint 不在当前 runtime inventory；不会自动 fallback")
+
     def _resolved(
         self,
         capability: str,
@@ -491,11 +699,15 @@ class ProviderProfileService:
                 runtime_endpoint = str(metadata.get("endpoint_profile_id") or "")
                 if runtime_endpoint and runtime_endpoint != profile.endpoint_profile_id:
                     continue
-            runtime_class = str(metadata.get("endpoint_class") or "UNSPECIFIED")
-            if profile.endpoint_class not in {"", "UNSPECIFIED"} and runtime_class != profile.endpoint_class:
+            runtime_class_raw = metadata.get("endpoint_class")
+            runtime_class = str(runtime_class_raw or "UNSPECIFIED")
+            if runtime_class_raw is not None and profile.endpoint_class not in {"", "UNSPECIFIED"} and runtime_class != profile.endpoint_class:
                 continue
-            runtime_region = str(metadata.get("deployment_region") or "UNSPECIFIED")
+            runtime_region_raw = metadata.get("deployment_region")
+            runtime_region = str(runtime_region_raw or "UNSPECIFIED")
             if (
+                runtime_region_raw is not None
+                and
                 profile.deployment_region is not ProviderDeploymentRegion.UNSPECIFIED
                 and runtime_region != profile.deployment_region.value
             ):
@@ -679,6 +891,7 @@ class ProviderProfileService:
 
 __all__ = [
     "DurationPlan",
+    "ProviderDisclosure",
     "ProviderProfileError",
     "ProviderProfileService",
     "ProviderSelectionState",

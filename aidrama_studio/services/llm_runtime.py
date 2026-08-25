@@ -17,7 +17,7 @@ from .ai_capabilities import (
     LLMProvider,
     default_capability_registry,
 )
-from .provider_profiles import ProviderProfileService
+from .provider_profiles import ProviderDisclosure, ProviderProfileService
 from .runtime_foundation import AIInvocationService
 from .security import sanitize_error, sanitize_persistent_metadata
 
@@ -55,6 +55,7 @@ class _FrozenLLMContext:
     selection_source: str
     correlation_id: str
     input_source_ids: tuple[str, ...]
+    disclosure: Mapping[str, object]
 
 
 class LLMInvocationGateway:
@@ -109,6 +110,7 @@ class LLMInvocationGateway:
         input_source_ids: tuple[str, ...] | list[str] = (),
         attempt_kind: str = "PRIMARY",
         correlation_id: str | None = None,
+        disclosure: ProviderDisclosure | Mapping[str, object] | None = None,
     ) -> str:
         """Run one audited call whose only validation is non-empty text."""
 
@@ -116,6 +118,7 @@ class LLMInvocationGateway:
             project_id,
             input_source_ids=input_source_ids,
             correlation_id=correlation_id,
+            disclosure=disclosure,
         )
 
         def validate(raw: str) -> str:
@@ -147,6 +150,7 @@ class LLMInvocationGateway:
         repair_prompt_builder: Callable[[str, Exception], str] | None = None,
         input_source_ids: tuple[str, ...] | list[str] = (),
         correlation_id: str | None = None,
+        disclosure: ProviderDisclosure | Mapping[str, object] | None = None,
     ) -> ValidatedValue:
         """Return domain-validated structured output with at most one repair."""
 
@@ -156,6 +160,7 @@ class LLMInvocationGateway:
             project_id,
             input_source_ids=input_source_ids,
             correlation_id=correlation_id,
+            disclosure=disclosure,
         )
         try:
             return self._invoke_validated(
@@ -200,6 +205,7 @@ class LLMInvocationGateway:
         *,
         input_source_ids: tuple[str, ...] | list[str],
         correlation_id: str | None,
+        disclosure: ProviderDisclosure | Mapping[str, object] | None,
     ) -> _FrozenLLMContext:
         if self.repository.get_project(project_id) is None:
             raise LLMInvocationError(f"项目不存在: {project_id}")
@@ -211,6 +217,17 @@ class LLMInvocationGateway:
         profile = resolved.profile
         if profile is None or not resolved.available:
             raise LLMInvocationError(resolved.detail)
+        try:
+            safe_disclosure = self.provider_profiles.require_disclosure(
+                project_id,
+                CapabilityKind.LLM,
+                disclosure,
+                transmitted_content_types=("TEXT_BRIEF", "TEXT_CONSTRAINTS"),
+            )
+        except Exception as exc:
+            raise LLMInvocationError(
+                "Provider disclosure 缺失或已过期；不会调用 Provider"
+            ) from exc
         provider, metadata = self._resolve_provider(profile)
         actual_provider_id = str(
             metadata.get("upstream_provider_id") or profile.provider_id
@@ -229,6 +246,7 @@ class LLMInvocationGateway:
             selection_source=resolved.source,
             correlation_id=correlation_id or uuid4().hex,
             input_source_ids=tuple(str(item) for item in input_source_ids),
+            disclosure=safe_disclosure,
         )
 
     def _invoke_validated(
@@ -246,6 +264,15 @@ class LLMInvocationGateway:
         attempt = str(attempt_kind or "PRIMARY").strip().upper()
         if attempt not in {"PRIMARY", "REPAIR"}:
             raise LLMInvocationError("LLM attempt kind 无效")
+        # Re-check immediately before recording/sending the request.  A
+        # settings change between preparation and the first transfer makes
+        # the frozen disclosure stale and must result in zero provider calls.
+        if attempt == "PRIMARY" and not self.provider_profiles.validate_disclosure(
+            project_id, CapabilityKind.LLM, context.disclosure
+        ):
+            raise LLMInvocationError(
+                "Provider disclosure fingerprint 已过期；不会调用 Provider"
+            )
         base_id = f"{context.correlation_id[:48]}-{attempt.lower()}"
         started_at = _now()
         safe_summary = sanitize_persistent_metadata(
@@ -261,6 +288,7 @@ class LLMInvocationGateway:
                 "deployment_region": context.deployment_region,
                 "endpoint_class": context.endpoint_class,
                 "credential_reference": context.credential_reference,
+                "provider_disclosure": dict(context.disclosure),
             }
         )
         summary = dict(safe_summary) if isinstance(safe_summary, Mapping) else {}

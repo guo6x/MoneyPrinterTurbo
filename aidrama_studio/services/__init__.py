@@ -22,10 +22,12 @@ from .producer import ProducerService, ProducerServiceError
 from .runtime_foundation import AIInvocationService, GenerationBriefCompiler, GenerationBriefService, OutputProfileService, RuntimeFoundationError, RuntimePlanService
 from .creative_control import CreativeControlError, CreativeLockService
 from .llm_runtime import LLMInvocationError, LLMInvocationGateway
+from .image_runtime import ImageRuntimeError, ImageRuntimeService
 from .creative_intake import CreativeIntakeError, CreativeIntakeService, DocumentIngestionService, IntakeAnalyzer, SourcePackService
 from .reference_profiles import ReferenceProfileService, ReferenceProfileServiceError
 from .provider_profiles import (
     DurationPlan,
+    ProviderDisclosure,
     ProviderProfileError,
     ProviderProfileService,
     ProviderSelectionState,
@@ -132,9 +134,10 @@ __all__ = [
     "OutputProfileService", "GenerationBriefCompiler", "GenerationBriefService", "RuntimePlanService", "AIInvocationService", "RuntimeFoundationError",
     "CreativeControlError", "CreativeLockService",
     "LLMInvocationGateway", "LLMInvocationError",
+    "ImageRuntimeService", "ImageRuntimeError",
     "CreativeIntakeService", "CreativeIntakeError", "SourcePackService", "DocumentIngestionService", "IntakeAnalyzer",
     "ReferenceProfileService", "ReferenceProfileServiceError",
-    "ProviderProfileService", "ProviderProfileError", "ProviderSelectionState",
+    "ProviderProfileService", "ProviderProfileError", "ProviderSelectionState", "ProviderDisclosure",
     "ResolvedProviderSelection", "DurationPlan", "ReferenceTrace",
     "BackgroundProductionRunner", "BackgroundRunnerError", "SingleInstanceGuard",
     "HeavyJobService", "HeavyJobServiceError", "LocalResourcePreflight",

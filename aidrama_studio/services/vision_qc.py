@@ -22,12 +22,15 @@ from typing import Mapping, Sequence
 from uuid import uuid4
 
 from .ai_capabilities import (
+    CapabilityKind,
+    CapabilityRegistry,
     UnavailableVisionProvider,
     VisionAnalysisProvider,
     VisionAnalysisRequest,
     VisionMediaInput,
 )
 from .production_qc import ProductionQCService
+from .provider_profiles import ProviderDisclosure, ProviderProfileError, ProviderProfileService
 from .reference_assets import ReferenceAssetService
 from .runtime_foundation import AIInvocationService
 from .security import sanitize_error, sanitize_persistent_metadata
@@ -258,9 +261,19 @@ class VisionQCService:
         *,
         provider: VisionAnalysisProvider | None = None,
         sampler: VisionFrameSamplingService | None = None,
+        registry: CapabilityRegistry | None = None,
+        provider_profiles: ProviderProfileService | None = None,
     ) -> None:
         self.repository = repository or ProjectRepository()
-        self.provider = provider or UnavailableVisionProvider()
+        self.registry = registry or (
+            CapabilityRegistry([provider])
+            if provider is not None
+            else CapabilityRegistry([UnavailableVisionProvider()])
+        )
+        self.provider_profiles = provider_profiles or ProviderProfileService(
+            self.repository, registry=self.registry
+        )
+        self.provider = provider or self.registry.get(CapabilityKind.VISION)
         self._deterministic = ProductionQCService(self.repository)
         self.sampler = sampler or VisionFrameSamplingService(self.repository)
         self.references = ReferenceAssetService(self.repository)
@@ -273,6 +286,7 @@ class VisionQCService:
         artifact_id: str | None = None,
         *,
         context: Mapping[str, object] | None = None,
+        disclosure: ProviderDisclosure | Mapping[str, object] | None = None,
     ) -> VisionQCResult:
         execution = self._deterministic._get_execution(project_id, execution_id)
         artifact = self._deterministic._select_artifact(execution_id, artifact_id)
@@ -289,14 +303,27 @@ class VisionQCService:
                 "artifact 不存在",
             )
         try:
-            status = self.provider.status
+            resolved = self.provider_profiles.resolve(
+                project_id, CapabilityKind.VISION, require_available=True
+            )
+            provider = self.provider_profiles.provider_for_selection(resolved)
+            safe_disclosure = self.provider_profiles.require_disclosure(
+                project_id,
+                CapabilityKind.VISION,
+                disclosure,
+                transmitted_content_types=(
+                    "VIDEO_ARTIFACT", "SAMPLED_FRAME", "REFERENCE_VERSION"
+                ),
+            )
+            status = provider.status
+            provider_name = str(getattr(provider, "provider_name", provider_name))
         except Exception as exc:
             return self._failure(
                 project_id,
                 execution_id,
                 artifact.id,
                 provider_name,
-                "FAILED",
+                "NOT_RUN" if isinstance(exc, ProviderProfileError) else "FAILED",
                 exc,
             )
         if not status.available:
@@ -334,10 +361,12 @@ class VisionQCService:
                 artifact,
                 frame_manifest,
                 context=context,
+                provider=provider,
             )
             request_summary = {
                 "correlation_id": invocation_id,
                 "input_provenance": request.public_dict(),
+                "provider_disclosure": safe_disclosure,
             }
             self.invocations.record(
                 project_id,
@@ -354,7 +383,7 @@ class VisionQCService:
                 started_at=started_at,
                 invocation_id=f"{invocation_id}-started",
             )
-            analysis = self.provider.analyze(request=request)
+            analysis = provider.analyze(request=request)
             metadata = (
                 dict(analysis.metadata)
                 if isinstance(analysis.metadata, Mapping)
@@ -467,6 +496,7 @@ class VisionQCService:
         frame_manifest: VisionFrameManifest,
         *,
         context: Mapping[str, object] | None,
+        provider: VisionAnalysisProvider | None = None,
     ) -> VisionAnalysisRequest:
         project_root = (self.repository.paths.projects / project_id).resolve()
         video_path = self._deterministic._resolve_artifact_path(
@@ -586,7 +616,7 @@ class VisionQCService:
             generation_brief_hash=generation_brief_hash,
             prompt_template_version=str(
                 getattr(
-                    self.provider,
+                    provider or self.provider,
                     "prompt_template_version",
                     "aidrama-vision-qc-v1",
                 )
