@@ -29,6 +29,16 @@ def test_director_console_has_required_user_facing_sections():
     assert "生成视频" not in source
 
 
+def test_shot_board_exposes_source_candidates_and_explicit_creative_actions():
+    source = Path(page.__file__).read_text(encoding="utf-8")
+    for label in ("Shot sources", "Current decision", "Source decision history", "Promote Preview", "Regenerate creative attempt"):
+        assert label in source
+    # The page must delegate retries with the frozen snapshot; it must not
+    # construct a new ProductionInputSnapshot or call a provider directly.
+    assert "request_creative_regeneration" in source
+    assert "The existing immutable snapshot is passed through unchanged" in source
+
+
 def test_default_flow_precedes_technical_job_controls():
     source = Path(page.__file__).read_text(encoding="utf-8")
     readiness = source.index("_render_readiness_console(readiness)")
