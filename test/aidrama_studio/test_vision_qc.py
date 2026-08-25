@@ -47,6 +47,39 @@ def test_mock_vision_qc_is_structured_and_project_scoped(context):
         VisionQCService(repository).analyze("other-project", execution.id, artifact.id)
 
 
+def test_failed_vision_analysis_persists_safe_remote_file_lifecycle(context):
+    repository, project, execution, artifact = _artifact_context(context)
+
+    class FailingProvider(DeterministicMockVisionProvider):
+        def analyze(self, *, request):
+            error = RuntimeError("structured response invalid")
+            error.safe_metadata = {
+                "remote_file_lifecycle": {
+                    "uploaded_file_count": 4,
+                    "deleted_file_count": 3,
+                    "delete_failure_count": 1,
+                    "fallback_retention": "AUTO_EXPIRES_WITHIN_48_HOURS",
+                    "interaction_store": False,
+                }
+            }
+            raise error
+
+    result = VisionQCService(repository, provider=FailingProvider()).analyze(
+        project.id, execution.id, artifact.id
+    )
+
+    assert result.status == "FAILED"
+    record = repository.get_vision_analysis(result.analysis_id)
+    lifecycle = record.input_provenance["remote_file_lifecycle"]
+    assert lifecycle["uploaded_file_count"] == 4
+    assert lifecycle["deleted_file_count"] == 3
+    assert lifecycle["delete_failure_count"] == 1
+    assert lifecycle["fallback_retention"] == "AUTO_EXPIRES_WITHIN_48_HOURS"
+    ledger = repository.list_ai_invocations(project.id, execution.id)
+    assert [item.status for item in ledger] == ["STARTED", "FAILED"]
+    assert ledger[-1].request_summary["remote_file_lifecycle"] == lifecycle
+
+
 def test_vision_analysis_history_and_frame_files_are_append_only(context):
     repository, project, execution, artifact = _artifact_context(context)
     service = VisionQCService(repository, provider=DeterministicMockVisionProvider())

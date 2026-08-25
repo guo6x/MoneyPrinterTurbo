@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import re
 from collections.abc import Mapping
@@ -337,7 +338,9 @@ class WanInputMapper:
             raise WanAdapterError("wan_duration_seconds must be an integer from 2 to 15")
         if resolution not in {"720P", "1080P"}:
             raise WanAdapterError("wan_resolution must be 720P or 1080P")
-        image_data = base64.b64encode(reference.path.read_bytes()).decode("ascii")
+        image_bytes = reference.path.read_bytes()
+        image_sha256 = hashlib.sha256(image_bytes).hexdigest()
+        image_data = base64.b64encode(image_bytes).decode("ascii")
         image_uri = f"data:{reference.mime_type};base64,{image_data}"
         payload = {
             "model": config.model,
@@ -350,6 +353,14 @@ class WanInputMapper:
             },
             "parameters": {"duration": int(duration), "resolution": resolution},
         }
+        canonical_request_sha256 = hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         metadata = {
             "provider": "alibaba_model_studio",
             "provider_name": "Wan / DashScope",
@@ -358,10 +369,26 @@ class WanInputMapper:
             "reference_role": reference.role,
             "reference_binding_key": reference.binding_key,
             "reference_asset_version_id": reference.version_id,
-            "prompt": prompt,
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "canonical_request_sha256": canonical_request_sha256,
             "duration": int(duration),
             "resolution": resolution,
             "reference_mime_type": reference.mime_type,
+            "snapshot_references_available": {
+                str(key): str(value)
+                for key, value in snapshot.reference_asset_versions.items()
+            },
+            "provider_references_actually_used": [
+                {
+                    "order": 1,
+                    "role": reference.role,
+                    "binding_key": reference.binding_key,
+                    "reference_asset_version_id": reference.version_id,
+                    "request_media_sha256": image_sha256,
+                    "mime_type": reference.mime_type,
+                    "size_bytes": len(image_bytes),
+                }
+            ],
         }
         return payload, metadata
 

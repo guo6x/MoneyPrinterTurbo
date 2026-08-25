@@ -105,6 +105,14 @@ def test_wan_input_mapping_uses_exact_frozen_reference_and_structured_prompt(tmp
     assert trace["production_shot_id"] == "shot-1"
     assert trace["reference_asset_version_id"] == "version-1"
     assert trace["provider"] == "alibaba_model_studio"
+    assert trace["prompt_sha256"] == hashlib.sha256(
+        payload["input"]["prompt"].encode("utf-8")
+    ).hexdigest()
+    assert len(trace["canonical_request_sha256"]) == 64
+    used = trace["provider_references_actually_used"]
+    assert used[0]["request_media_sha256"] == hashlib.sha256(JPEG).hexdigest()
+    assert used[0]["reference_asset_version_id"] == "version-1"
+    assert "prompt" not in trace
     assert "api_key" not in trace
 
 
@@ -216,6 +224,7 @@ def test_provider_trace_metadata_is_persistable_without_credentials():
     metadata = ProductionExecutionService._submission_metadata(submission)
     assert metadata["provider_task_id"] == "wan-task-1"
     assert "api_key" not in metadata
+    assert "prompt" not in metadata
 
 
 def test_wan_provider_failure_is_not_treated_as_a_result(tmp_path):

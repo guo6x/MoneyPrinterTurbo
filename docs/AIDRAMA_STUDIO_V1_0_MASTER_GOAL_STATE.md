@@ -147,6 +147,17 @@ with `git rev-parse HEAD` after checkout.
   historical Windows separator baseline.
 - Complete repository regression after reconciliation: `944 passed, 11
   skipped, 14 warnings, 4402 subtests passed`; new regressions: `0`.
+- Wan request trace now persists the SHA-256 of the exact prompt, canonical
+  provider request and actually transmitted reference media plus its frozen
+  asset-version identity. Raw prompts and media bytes are not durable provider
+  metadata.
+- Gemini remote File API cleanup evidence is retained for successful and
+  failed analysis: upload/delete/failure counts, `store=false`, and the
+  documented 48-hour automatic-expiry fallback when deletion fails. Remote
+  file names and URIs are never persisted.
+- Provider-provenance focused tests pass with `24 passed`; the complete
+  AIDrama suite passes with `314 passed, 11 warnings`, and Python compile plus
+  `git diff --check` pass.
 
 ## Externally blocked gates
 
@@ -159,8 +170,6 @@ with `git rev-parse HEAD` after checkout.
 
 ## Known remaining work
 
-- Close provider-specific cloud input provenance and remote-file lifecycle
-  evidence that remain incomplete for Wan/Gemini paths.
 - Complete distribution license/SBOM and build/installer definitions without
   installing tools.
 - Run full non-live E2E, portable restore E2E, browser acceptance at both
@@ -170,8 +179,17 @@ with `git rev-parse HEAD` after checkout.
 
 ## Next safe implementation step
 
-Close remaining safe provider-provenance and non-live E2E work, then complete
+Complete non-live E2E and portable/cold-resume evidence, then close
 release/legal/build definitions, browser acceptance and the final self-audit.
+
+## Provider provenance and remote lifecycle acceptance
+
+- `PROVIDER_REQUEST_REPRODUCIBILITY=PASS`
+- `ACTUAL_PROVIDER_REFERENCE_TRACE=PASS`
+- `CLOUD_INPUT_PROVENANCE=PASS`
+- `REMOTE_FILE_LIFECYCLE=PASS`
+- Wan raw prompt persisted: `NO`
+- Gemini remote identities/URIs persisted: `NO`
 
 ## Upstream reconciliation acceptance
 

@@ -236,10 +236,16 @@ def test_gemini_interactions_contract_preserves_exact_inputs_and_deletes_remote_
 def test_invalid_structured_response_still_deletes_every_remote_file(tmp_path):
     transport = FakeTransport(response="not-json")
 
-    with pytest.raises(GeminiVisionError, match="invalid JSON"):
+    with pytest.raises(GeminiVisionError, match="invalid JSON") as error:
         _provider(transport).analyze(request=_request(tmp_path))
 
     assert len(transport.deleted) == 4
+    lifecycle = error.value.safe_metadata["remote_file_lifecycle"]
+    assert lifecycle["uploaded_file_count"] == 4
+    assert lifecycle["deleted_file_count"] == 4
+    assert lifecycle["delete_failure_count"] == 0
+    assert lifecycle["fallback_retention"] == "NONE"
+    assert "files/file" not in str(lifecycle)
 
 
 def test_processing_failure_after_upload_still_deletes_known_remote_file(tmp_path):
@@ -253,10 +259,13 @@ def test_processing_failure_after_upload_still_deletes_known_remote_file(tmp_pat
 
     transport = ProcessingFailureTransport()
 
-    with pytest.raises(GeminiVisionError, match="processing failed"):
+    with pytest.raises(GeminiVisionError, match="processing failed") as error:
         _provider(transport).analyze(request=_request(tmp_path))
 
     assert transport.deleted == ["files/file-1"]
+    lifecycle = error.value.safe_metadata["remote_file_lifecycle"]
+    assert lifecycle["uploaded_file_count"] == 1
+    assert lifecycle["deleted_file_count"] == 1
 
 
 def test_reference_provenance_mismatch_is_rejected(tmp_path):

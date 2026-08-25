@@ -475,7 +475,7 @@ class ProductionExecutionService:
             "runtime_reference": runtime_reference,
         }
         # Provider adapters may return non-secret request trace data (model,
-        # prompt, exact frozen reference version, and provider task id).  Keep
+        # prompt hash, exact frozen reference version, and provider task id). Keep
         # it in the immutable STARTED event so a worker restart and later QC
         # inspection retain the exact request without changing the snapshot
         # or persisting credentials.
@@ -568,7 +568,14 @@ class ProductionExecutionService:
         if not isinstance(raw, Mapping):
             return {}
         safe = sanitize_persistent_metadata(raw)
-        return dict(safe) if isinstance(safe, Mapping) else {}
+        if not isinstance(safe, Mapping):
+            return {}
+        result = dict(safe)
+        # Raw creative prompts are provider inputs, not durable operational
+        # metadata. Adapters publish hashes and frozen source IDs instead.
+        result.pop("prompt", None)
+        result.pop("raw_prompt", None)
+        return result
 
     def handle_runtime_event(
         self,

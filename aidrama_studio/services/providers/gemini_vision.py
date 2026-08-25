@@ -395,6 +395,8 @@ class GeminiVisionProvider(VisionAnalysisProvider):
         remote_inputs: list[dict[str, object]] = []
         deletion_failures = 0
         interaction: Mapping[str, object] | None = None
+        parsed: dict[str, object] | None = None
+        analysis_error: Exception | None = None
         try:
             for item in media:
                 raw_file = self.transport.upload_file(
@@ -439,6 +441,8 @@ class GeminiVisionProvider(VisionAnalysisProvider):
             }
             interaction = self.transport.create_interaction(payload)
             parsed = self._parse_interaction(interaction, request)
+        except Exception as exc:
+            analysis_error = exc
         finally:
             for name in reversed(uploaded_names):
                 try:
@@ -448,8 +452,6 @@ class GeminiVisionProvider(VisionAnalysisProvider):
                     # Do not leak the remote name/URI into logs or metadata.
                     deletion_failures += 1
 
-        if interaction is None:
-            raise GeminiVisionError("Gemini Vision interaction did not complete")
         remote_lifecycle = {
             "uploaded_file_count": len(uploaded_names),
             "deleted_file_count": len(uploaded_names) - deletion_failures,
@@ -459,6 +461,17 @@ class GeminiVisionProvider(VisionAnalysisProvider):
             ),
             "interaction_store": False,
         }
+        if analysis_error is not None:
+            # Persist only bounded cleanup evidence. Remote file identities and
+            # URIs remain process-local even when analysis fails.
+            setattr(
+                analysis_error,
+                "safe_metadata",
+                {"remote_file_lifecycle": remote_lifecycle},
+            )
+            raise analysis_error
+        if interaction is None or parsed is None:
+            raise GeminiVisionError("Gemini Vision interaction did not complete")
         metadata = {
             "model": self.config.model,
             "interaction_id": self._safe_interaction_id(interaction.get("id")),

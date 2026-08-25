@@ -410,8 +410,24 @@ class VisionQCService:
             )
         except Exception as exc:
             reason = sanitize_error(exc)
+            provider_failure_metadata: dict[str, object] = {}
+            raw_failure_metadata = getattr(exc, "safe_metadata", None)
+            if isinstance(raw_failure_metadata, Mapping):
+                lifecycle = raw_failure_metadata.get("remote_file_lifecycle")
+                if isinstance(lifecycle, Mapping):
+                    safe_lifecycle = sanitize_persistent_metadata(dict(lifecycle))
+                    if isinstance(safe_lifecycle, Mapping):
+                        provider_failure_metadata["remote_file_lifecycle"] = dict(
+                            safe_lifecycle
+                        )
             if request is not None:
                 try:
+                    failure_summary = {
+                        "correlation_id": invocation_id,
+                        "input_provenance": request.public_dict(),
+                        "error": reason,
+                    }
+                    failure_summary.update(provider_failure_metadata)
                     self.invocations.record(
                         project_id,
                         capability="VISION",
@@ -423,11 +439,7 @@ class VisionQCService:
                         reference_version_ids=request.reference_version_ids,
                         generation_brief_hash=request.generation_brief_hash,
                         runtime_plan=runtime_plan,
-                        request_summary={
-                            "correlation_id": invocation_id,
-                            "input_provenance": request.public_dict(),
-                            "error": reason,
-                        },
+                        request_summary=failure_summary,
                         started_at=started_at,
                         finished_at=_now(),
                         invocation_id=f"{invocation_id}-failed",
@@ -444,6 +456,7 @@ class VisionQCService:
                 frame_manifest=frame_manifest,
                 request=request,
                 model_id=model_id,
+                provider_metadata=provider_failure_metadata,
             )
 
     def _build_request(
@@ -652,13 +665,14 @@ class VisionQCService:
         frame_manifest: VisionFrameManifest | None = None,
         request: VisionAnalysisRequest | None = None,
         model_id: str = "unavailable",
+        provider_metadata: Mapping[str, object] | None = None,
     ) -> VisionQCResult:
         safe_reason = sanitize_error(reason)
-        metadata: dict[str, object] = {
-            "prompt_template_sha256": getattr(
-                self.provider, "prompt_template_sha256", None
-            )
-        }
+        metadata: dict[str, object] = dict(provider_metadata or {})
+        metadata["prompt_template_sha256"] = (
+            metadata.get("prompt_template_sha256")
+            or getattr(self.provider, "prompt_template_sha256", None)
+        )
         try:
             record = self._persist_analysis(
                 project_id,
