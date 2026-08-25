@@ -120,6 +120,44 @@ def test_forward_migrations_add_director_events_and_post_source_pin() -> None:
     assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == len(MIGRATIONS)
 
 
+def test_upgrade_from_023_adds_append_only_vision_provenance_and_is_idempotent() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    for version, migration in MIGRATIONS[:-1]:
+        migration(connection)
+    connection.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    connection.executemany(
+        "INSERT INTO schema_migrations VALUES (?,?)",
+        [(version, "2026-08-25") for version, _ in MIGRATIONS[:-1]],
+    )
+    before = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(vision_analysis_results)")
+    }
+    assert "reference_version_ids_json" not in before
+
+    assert apply_migrations(connection) == 1
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(vision_analysis_results)")
+    }
+    assert {
+        "reference_version_ids_json",
+        "prompt_template_sha256",
+        "input_provenance_json",
+        "provider_interaction_id",
+    } <= columns
+    assert [
+        row[0]
+        for row in connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        )
+    ] == [version for version, _ in MIGRATIONS]
+    assert apply_migrations(connection) == 0
+
+
 def _legacy_reference_schema(connection: sqlite3.Connection) -> None:
     """Build the pre-canonical reference tables used by migration 015."""
     connection.execute("CREATE TABLE projects (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, status TEXT NOT NULL, aspect_ratio TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")

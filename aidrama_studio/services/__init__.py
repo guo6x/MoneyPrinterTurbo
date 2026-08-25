@@ -25,7 +25,7 @@ from .background_runner import BackgroundProductionRunner, BackgroundRunnerError
 from .credentials import CredentialReadinessService, CredentialStoreError, WindowsCredentialStore
 from .project_archive import ProjectArchiveError, ProjectArchiveService
 from .current_state import CurrentProductionState, CurrentProductionStateService
-from .vision_qc import VisionQCResult, VisionQCService
+from .vision_qc import VisionFrameSamplingService, VisionQCResult, VisionQCService
 from .diagnostics import DiagnosticsError, DiagnosticsService, DiskSpaceService
 from .tts_runtime import TTSRuntimeError, TTSRuntimeService
 from .production_queue import ProductionAuthorizationPreview, ProductionQueueError, ProductionQueueService
@@ -49,6 +49,8 @@ from .ai_capabilities import (
     TTSResult,
     ImageCandidate,
     VisionAnalysis,
+    VisionAnalysisRequest,
+    VisionMediaInput,
     MPTLLMProvider,
     RuntimeVideoProvider,
     UnavailableImageProvider,
@@ -56,6 +58,12 @@ from .ai_capabilities import (
     UnavailableTTSProvider,
     DeterministicMockVisionProvider,
     default_capability_registry,
+)
+from .providers import (
+    GeminiHTTPTransport,
+    GeminiVisionError,
+    GeminiVisionProvider,
+    GeminiVisionProviderConfig,
 )
 from .adapters import (
     MPTAdapterError,
@@ -111,7 +119,7 @@ __all__ = [
     "BackgroundProductionRunner", "BackgroundRunnerError", "SingleInstanceGuard",
     "WindowsCredentialStore", "CredentialStoreError", "CredentialReadinessService",
     "ProjectArchiveService", "ProjectArchiveError",
-    "VisionQCResult", "VisionQCService",
+    "VisionFrameSamplingService", "VisionQCResult", "VisionQCService",
     "DiagnosticsError", "DiagnosticsService", "DiskSpaceService",
     "TTSRuntimeError", "TTSRuntimeService",
     "ProductionAuthorizationPreview", "ProductionQueueError", "ProductionQueueService",
@@ -120,9 +128,10 @@ __all__ = [
     "ProviderReadinessService", "CapabilityReadiness", "ReadinessState",
     "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",
     "LLMProvider", "ImageGenerationProvider", "VideoGenerationProvider", "VisionAnalysisProvider", "TTSProvider",
-    "ImageCandidate", "VisionAnalysis", "TTSResult", "MPTLLMProvider", "RuntimeVideoProvider",
+    "ImageCandidate", "VisionAnalysis", "VisionAnalysisRequest", "VisionMediaInput", "TTSResult", "MPTLLMProvider", "RuntimeVideoProvider",
     "UnavailableImageProvider", "UnavailableVisionProvider", "UnavailableTTSProvider", "DeterministicMockVisionProvider",
     "default_capability_registry",
+    "GeminiHTTPTransport", "GeminiVisionError", "GeminiVisionProvider", "GeminiVisionProviderConfig",
     "ProductionOrchestrator", "ProductionOrchestratorError",
     "ProductionRuntimeAdapter", "RuntimeSubmission", "RuntimeEvent", "RuntimeTransientError", "RuntimeReconciliationRequired", "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
     "WanAdapterError", "WanInputMapper", "WanProductionAdapter", "WanPromptMapper",

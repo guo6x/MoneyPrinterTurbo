@@ -69,6 +69,12 @@ class VisionAnalysisRecord(BaseModel):
     status: str = Field(min_length=1, max_length=40)
     metrics: dict[str, Any] = Field(default_factory=dict)
     reference_comparison: dict[str, Any] = Field(default_factory=dict)
+    reference_version_ids: tuple[str, ...] = ()
+    prompt_template_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    input_provenance: dict[str, Any] = Field(default_factory=dict)
+    provider_interaction_id: str | None = Field(default=None, max_length=240)
     created_at: str = Field(min_length=1, max_length=80)
 
 

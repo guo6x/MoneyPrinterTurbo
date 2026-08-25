@@ -112,7 +112,7 @@ class VisionAnalysisProvider(ABC):
     def status(self) -> CapabilityStatus: ...
 
     @abstractmethod
-    def analyze(self, *, artifact_path: str, context: Mapping[str, object] | None = None) -> "VisionAnalysis": ...
+    def analyze(self, *, request: "VisionAnalysisRequest") -> "VisionAnalysis": ...
 
 
 class TTSProvider(ABC):
@@ -150,6 +150,90 @@ class VisionAnalysis:
     metrics: Mapping[str, Mapping[str, object]]
     analysis_kind: str = "AI_ANALYSIS"
     metadata: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class VisionMediaInput:
+    """One immutable local input selected for a Vision request.
+
+    ``path`` is deliberately excluded from :meth:`public_dict`; durable
+    provenance records contain the canonical source id/hash, never a private
+    absolute filesystem path.
+    """
+
+    source_kind: str
+    source_id: str
+    path: Path
+    mime_type: str
+    sha256: str
+    role: str = ""
+    time_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.source_kind.strip() or not self.source_id.strip():
+            raise ValueError("Vision media source identity 不能为空")
+        if not self.mime_type.strip():
+            raise ValueError("Vision media MIME 不能为空")
+        if len(self.sha256) != 64 or any(character not in "0123456789abcdef" for character in self.sha256):
+            raise ValueError("Vision media SHA-256 无效")
+        if self.time_seconds is not None and self.time_seconds < 0:
+            raise ValueError("Vision frame timestamp 无效")
+
+    def public_dict(self) -> dict[str, object]:
+        value: dict[str, object] = {
+            "source_kind": self.source_kind,
+            "source_id": self.source_id,
+            "mime_type": self.mime_type,
+            "sha256": self.sha256,
+            "role": self.role,
+        }
+        if self.time_seconds is not None:
+            value["time_seconds"] = self.time_seconds
+        return value
+
+
+@dataclass(frozen=True)
+class VisionAnalysisRequest:
+    """Provider-neutral, exact Vision input snapshot."""
+
+    project_id: str
+    execution_id: str
+    artifact_id: str
+    video: VisionMediaInput
+    frames: tuple[VisionMediaInput, ...] = ()
+    references: tuple[VisionMediaInput, ...] = ()
+    frame_manifest_id: str | None = None
+    generation_brief_hash: str | None = None
+    prompt_template_version: str = "aidrama-vision-qc-v1"
+    creative_context: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.project_id.strip() or not self.execution_id.strip() or not self.artifact_id.strip():
+            raise ValueError("Vision request scope 不能为空")
+        if self.video.source_kind != "VIDEO_ARTIFACT":
+            raise ValueError("Vision request video source kind 无效")
+        if self.generation_brief_hash is not None and (
+            len(self.generation_brief_hash) != 64
+            or any(character not in "0123456789abcdef" for character in self.generation_brief_hash)
+        ):
+            raise ValueError("Vision GenerationBrief hash 无效")
+
+    @property
+    def reference_version_ids(self) -> tuple[str, ...]:
+        return tuple(item.source_id for item in self.references)
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "project_id": self.project_id,
+            "execution_id": self.execution_id,
+            "artifact_id": self.artifact_id,
+            "frame_manifest_id": self.frame_manifest_id,
+            "generation_brief_hash": self.generation_brief_hash,
+            "prompt_template_version": self.prompt_template_version,
+            "video": self.video.public_dict(),
+            "frames": [item.public_dict() for item in self.frames],
+            "references": [item.public_dict() for item in self.references],
+        }
 
 
 @dataclass(frozen=True)
@@ -248,7 +332,7 @@ class UnavailableVisionProvider(VisionAnalysisProvider):
     def status(self) -> CapabilityStatus:
         return CapabilityStatus(CapabilityKind.VISION, self.provider_name, False, "no Vision provider configured")
 
-    def analyze(self, *, artifact_path: str, context: Mapping[str, object] | None = None) -> VisionAnalysis:
+    def analyze(self, *, request: VisionAnalysisRequest) -> VisionAnalysis:
         raise CapabilityUnavailable(self.status.reason)
 
 
@@ -327,8 +411,22 @@ class DeterministicMockVisionProvider(VisionAnalysisProvider):
     def status(self) -> CapabilityStatus:
         return CapabilityStatus(CapabilityKind.VISION, self.provider_name, True, "deterministic test provider", {"test_only": True})
 
-    def analyze(self, *, artifact_path: str, context: Mapping[str, object] | None = None) -> VisionAnalysis:
-        return VisionAnalysis(self.provider_name, self._metrics, metadata={"artifact_path": artifact_path, "test_only": True})
+    def analyze(self, *, request: VisionAnalysisRequest) -> VisionAnalysis:
+        reference_ids = list(request.reference_version_ids)
+        return VisionAnalysis(
+            self.provider_name,
+            self._metrics,
+            metadata={
+                "model": "deterministic-vision-v1",
+                "test_only": True,
+                "prompt_template_sha256": "0" * 64,
+                "reference_comparison": {
+                    "compared_reference_version_ids": reference_ids,
+                    "findings": [],
+                },
+                "input_provenance": request.public_dict(),
+            },
+        )
 
 
 class CapabilityRegistry:
@@ -405,7 +503,7 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
     never turns an absent credential into a live-model claim.
     """
     from .adapters import MPTProductionAdapter, SeedanceProductionAdapter, WanProductionAdapter
-    from .providers.openai_image import OpenAIImageProvider
+    from .providers import GeminiVisionProvider, OpenAIImageProvider
 
     values = dict(os.environ if env is None else env)
     if env is None:
@@ -413,7 +511,7 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
             from .credentials import WindowsCredentialStore
             from aidrama_studio.storage.database import get_default_paths
             store = WindowsCredentialStore(get_default_paths().root)
-            for key in ("OPENAI_API_KEY", "DASHSCOPE_API_KEY", "ARK_API_KEY"):
+            for key in ("OPENAI_API_KEY", "DASHSCOPE_API_KEY", "ARK_API_KEY", "GEMINI_API_KEY"):
                 secret = store.get(key)
                 if secret:
                     values[key] = secret
@@ -444,12 +542,22 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
     # Preserve the existing Wan capability as the default compatibility
     # provider; a configured Seedance profile is selected explicitly through
     # ProviderProfileService without hiding the preserved Wan boundary.
-    return CapabilityRegistry([MPTLLMProvider(), wan, seedance, stock, OpenAIImageProvider(env=values), UnavailableVisionProvider(), MPTTTSProvider()])
+    return CapabilityRegistry(
+        [
+            MPTLLMProvider(),
+            wan,
+            seedance,
+            stock,
+            OpenAIImageProvider(env=values),
+            GeminiVisionProvider(env=values),
+            MPTTTSProvider(),
+        ]
+    )
 
 
 __all__ = [
     "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",
     "LLMProvider", "ImageGenerationProvider", "VideoGenerationProvider", "VisionAnalysisProvider", "TTSProvider",
-    "ImageCandidate", "VisionAnalysis", "TTSResult", "MPTLLMProvider", "RuntimeVideoProvider",
+    "ImageCandidate", "VisionAnalysis", "VisionAnalysisRequest", "VisionMediaInput", "TTSResult", "MPTLLMProvider", "RuntimeVideoProvider",
     "UnavailableImageProvider", "UnavailableVisionProvider", "UnavailableTTSProvider", "MPTTTSProvider", "DeterministicMockVisionProvider", "default_capability_registry",
 ]

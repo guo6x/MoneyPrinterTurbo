@@ -2549,7 +2549,12 @@ class ProjectRepository:
             id=row["id"], project_id=row["project_id"], execution_id=row["execution_id"], artifact_id=row["artifact_id"],
             frame_manifest_id=row["frame_manifest_id"], provider_id=row["provider_id"], model_id=row["model_id"],
             status=row["status"], metrics=json.loads(row["metrics_json"]),
-            reference_comparison=json.loads(row["reference_comparison_json"]), created_at=row["created_at"],
+            reference_comparison=json.loads(row["reference_comparison_json"]),
+            reference_version_ids=tuple(json.loads(row["reference_version_ids_json"])),
+            prompt_template_sha256=row["prompt_template_sha256"],
+            input_provenance=json.loads(row["input_provenance_json"]),
+            provider_interaction_id=row["provider_interaction_id"],
+            created_at=row["created_at"],
         )
 
     def create_vision_analysis(self, analysis: VisionAnalysisRecord) -> VisionAnalysisRecord:
@@ -2561,11 +2566,16 @@ class ProjectRepository:
             if execution is None or execution["project_id"] != analysis.project_id:
                 raise ValueError("VisionAnalysis execution 不属于该项目")
             connection.execute(
-                "INSERT INTO vision_analysis_results(id,project_id,execution_id,artifact_id,frame_manifest_id,provider_id,model_id,status,metrics_json,reference_comparison_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO vision_analysis_results(id,project_id,execution_id,artifact_id,frame_manifest_id,provider_id,model_id,status,metrics_json,reference_comparison_json,reference_version_ids_json,prompt_template_sha256,input_provenance_json,provider_interaction_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (analysis.id, analysis.project_id, analysis.execution_id, analysis.artifact_id, analysis.frame_manifest_id,
                  analysis.provider_id, analysis.model_id, analysis.status,
                  json.dumps(analysis.metrics, ensure_ascii=False, sort_keys=True),
-                 json.dumps(analysis.reference_comparison, ensure_ascii=False, sort_keys=True), analysis.created_at),
+                 json.dumps(analysis.reference_comparison, ensure_ascii=False, sort_keys=True),
+                 json.dumps(list(analysis.reference_version_ids), ensure_ascii=False),
+                 analysis.prompt_template_sha256,
+                 json.dumps(analysis.input_provenance, ensure_ascii=False, sort_keys=True),
+                 analysis.provider_interaction_id,
+                 analysis.created_at),
             )
         return self.get_vision_analysis(analysis.id)
 

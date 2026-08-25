@@ -74,11 +74,19 @@ def render() -> None:
         st.caption("凭据使用当前 Windows 用户的 DPAPI 加密；不会写入 SQLite、项目包、日志或截图。配置凭据不会自动发起付费请求。")
         try:
             store = WindowsCredentialStore(paths.root)
-            configured = CredentialReadinessService(store).status(["OPENAI_API_KEY", "ARK_API_KEY", "DASHSCOPE_API_KEY"])
+            configured = CredentialReadinessService(store).status(
+                [
+                    "OPENAI_API_KEY",
+                    "ARK_API_KEY",
+                    "DASHSCOPE_API_KEY",
+                    "GEMINI_API_KEY",
+                ]
+            )
             labels = {
                 "OPENAI_API_KEY": "OpenAI Image",
                 "ARK_API_KEY": "Seedance / Ark",
                 "DASHSCOPE_API_KEY": "Wan / DashScope",
+                "GEMINI_API_KEY": "Google Gemini Vision",
             }
             for provider_id, label in labels.items():
                 state = "已配置" if configured[provider_id]["configured"] else "未配置"

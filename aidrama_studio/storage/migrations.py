@@ -1135,6 +1135,30 @@ def _migration_023_final_assembly_provenance(connection: sqlite3.Connection) -> 
     connection.execute("CREATE INDEX IF NOT EXISTS idx_final_assembly_items_timeline ON final_assembly_items(final_assembly_id, order_index)")
 
 
+def _migration_024_vision_analysis_provenance(connection: sqlite3.Connection) -> None:
+    """Pin exact Vision inputs without storing local paths or remote URLs."""
+
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(vision_analysis_results)")
+    }
+    additions = (
+        ("reference_version_ids_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("prompt_template_sha256", "TEXT"),
+        ("input_provenance_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("provider_interaction_id", "TEXT"),
+    )
+    for name, definition in additions:
+        if name not in columns:
+            connection.execute(
+                f"ALTER TABLE vision_analysis_results ADD COLUMN {name} {definition}"
+            )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_vision_analysis_provider_interaction "
+        "ON vision_analysis_results(provider_id, provider_interaction_id)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1159,6 +1183,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (21, _migration_021_reference_profiles),
     (22, _migration_022_runtime_operations),
     (23, _migration_023_final_assembly_provenance),
+    (24, _migration_024_vision_analysis_provenance),
 )
 
 

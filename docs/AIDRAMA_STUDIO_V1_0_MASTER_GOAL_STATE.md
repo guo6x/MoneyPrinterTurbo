@@ -9,8 +9,8 @@ with `git rev-parse HEAD` after checkout.
 - Target branch: `goal/aidrama-studio-v1-0-final-product-release`
 - Goal base: `3ce90aad6a70e6173a3826bd4e8eb6c039e0221b`
 - Current head: `HEAD`
-- Active checkpoint: real Vision provider boundary and canonical AI invocation
-  provenance.
+- Active checkpoint: regional provider preset/per-capability switching and
+  canonical selection precedence.
 - No dependency was installed and no live provider request was made.
 
 ## Completed checkpoints with current local evidence
@@ -42,9 +42,22 @@ with `git rev-parse HEAD` after checkout.
   paid submission.
 - Nested provider metadata and operator errors drop credentials and result
   URLs before persistence.
+- The primary Vision boundary now pins the officially documented stable
+  `gemini-3.7-flash` Interactions API contract. It sends one physical video,
+  immutable deterministic sampled frames, the frozen GenerationBrief and exact
+  ordered RuntimePlan reference versions; it requests schema-constrained
+  `AI_ANALYSIS` output with `store=false`.
+- Vision File API inputs are streaming/size/hash checked, memory-only remote
+  URIs are explicitly deleted in `finally`, and delete failure records only a
+  count plus the documented 48-hour expiry fallback. Analysis, frame manifests
+  and canonical AI invocation-ledger states remain append-only and
+  project-scoped.
+- Migration 024 adds exact Vision reference IDs, prompt-template hash, safe
+  cloud-input provenance and interaction identity without storing credentials,
+  local absolute paths or remote file URLs.
 - Current validation: Python compile PASS, `git diff --check` PASS, focused
   provider/runtime/security tests PASS, complete AIDrama suite
-  `241 passed, 10 warnings`.
+  `252 passed, 10 warnings`.
 
 ## Externally blocked gates
 
@@ -57,8 +70,11 @@ with `git rev-parse HEAD` after checkout.
 
 ## Known remaining work
 
-- Finish the real Gemini Vision provider/document audit and canonical LLM
-  invocation-ledger integration.
+- Implement the newly required Mainland/International/Custom provider preset
+  layer, per-capability selection, region/endpoint metadata, deterministic
+  precedence and no-silent-cross-region-fallback policy without creating a
+  second provider truth.
+- Finish canonical LLM invocation-ledger integration.
 - Close final subtitle timing, cloud disclosure/input provenance, remote file
   lifecycle, portable project restore/delete recovery and diagnostics repair
   actions.
@@ -71,6 +87,8 @@ with `git rev-parse HEAD` after checkout.
 
 ## Next safe implementation step
 
-Verify current official Gemini video-understanding documentation, select one
-exact V1 Vision model/input path, and implement the non-live provider contract,
-frame/reference provenance and persistence tests without making a live call.
+Add provider region/endpoint profiles and preset resolution on top of the
+canonical CapabilityRegistry/provider inventory. Prove preset switching affects
+only new RuntimePlans, mixed per-capability selection works, missing providers
+remain unavailable, and no cross-region fallback occurs without explicit user
+approval.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from pathlib import Path
 from dataclasses import replace
 
@@ -15,6 +17,8 @@ from aidrama_studio.services import (
     RuntimeVideoProvider,
     UnavailableImageProvider,
     UnavailableVisionProvider,
+    VisionAnalysisRequest,
+    VisionMediaInput,
     DirectorService,
     default_capability_registry,
 )
@@ -29,13 +33,28 @@ def context(tmp_path: Path):
     return execution_context.__wrapped__(tmp_path)
 
 
-def test_capability_registry_exposes_safe_readiness_and_test_vision_only():
+def test_capability_registry_exposes_safe_readiness_and_test_vision_only(tmp_path):
     registry = CapabilityRegistry([UnavailableImageProvider(), UnavailableVisionProvider(), DeterministicMockVisionProvider()])
     status = registry.public_status()
     assert status["IMAGE"]["available"] is False
     assert status["VISION"]["available"] is True
     assert "api_key" not in str(status).lower()
-    analysis = registry.get(CapabilityKind.VISION).analyze(artifact_path="shot.mp4")
+    artifact = tmp_path / "shot.mp4"
+    artifact.write_bytes(b"test-video")
+    media = VisionMediaInput(
+        source_kind="VIDEO_ARTIFACT",
+        source_id="artifact-1",
+        path=artifact.resolve(),
+        mime_type="video/mp4",
+        sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+    )
+    request = VisionAnalysisRequest(
+        project_id="project-1",
+        execution_id="execution-1",
+        artifact_id="artifact-1",
+        video=media,
+    )
+    analysis = registry.get(CapabilityKind.VISION).analyze(request=request)
     assert analysis.analysis_kind == "AI_ANALYSIS"
 
 
