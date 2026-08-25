@@ -169,6 +169,25 @@ def test_worker_adapter_error_marks_execution_failed(context):
     assert service.list_events(project.id, execution.id)[-1].payload_json["error"]
 
 
+def test_provider_task_intent_is_durable_and_submission_is_not_repeated(context):
+    repository, project = context
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    adapter = ImmediateMockAdapter()
+    execution = service.enqueue_job(project.id, job.id)
+    result = ProductionWorker(service, adapter).run(project.id, execution.id)
+    assert result.status is ProductionExecutionStatus.SUCCEEDED
+    tasks = repository.list_provider_tasks(project.id)
+    assert len(tasks) == 1
+    assert tasks[0].execution_id == execution.id
+    assert tasks[0].state == "SUCCEEDED"
+    assert tasks[0].provider_task_id
+    # A second submit against the terminal execution is rejected before any
+    # adapter call; the durable task remains the sole provider identity.
+    with pytest.raises(Exception):
+        service.submit_execution(project.id, execution.id, adapter)
+
+
 def test_worker_cancel_notifies_adapter_and_persists_cancelled_event(context):
     repository, project = context
     job = _ready_job(repository, project)

@@ -18,12 +18,13 @@ from aidrama_studio.services import (
     ProductionExecutionServiceError,
     ProductionOrchestrator,
     ProductionOrchestratorError,
+    ProductionQueueError,
+    ProductionQueueService,
     ProductionQCService,
     ProductionQCServiceError,
     ProductionService,
     ProductionServiceError,
 )
-from aidrama_studio.services.adapters import MPTProductionAdapter
 
 
 def _value(item, key: str, default=None):
@@ -530,12 +531,9 @@ def _render_shot_board(
 
 
 def _make_orchestrator(production_service, execution_service, qc_service):
-    return ProductionOrchestrator(
-        production_service=production_service,
-        execution_service=execution_service,
-        qc_service=qc_service,
-        adapter=MPTProductionAdapter(),
-    )
+    # The Streamlit request only persists a durable queue intent.  Provider
+    # resolution, submit/poll/QC and retry live in the background runner.
+    return ProductionQueueService(production_service=production_service)
 
 
 class _UnavailableOrchestrator:
@@ -567,7 +565,7 @@ def _orchestrator_action(orchestrator, action: str, project, job=None, *, ensure
             if job is None:
                 raise ProductionOrchestratorError("停止制作需要一个正在运行的 ProductionJob")
             orchestrator.cancel_job(project.id, _value(job, "id"), reason="user")
-    except (ProductionOrchestratorError, ProductionServiceError, ProductionExecutionServiceError, NotImplementedError) as exc:
+    except (ProductionQueueError, ProductionOrchestratorError, ProductionServiceError, ProductionExecutionServiceError, NotImplementedError) as exc:
         st.error(f"Production action unavailable: {exc}")
         return
     st.rerun()

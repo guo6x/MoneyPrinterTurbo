@@ -9,6 +9,9 @@ the deterministic mock Vision provider without making a live-model claim.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+from pathlib import Path
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -256,6 +259,58 @@ class UnavailableTTSProvider(TTSProvider):
         raise CapabilityUnavailable(self.status.reason)
 
 
+class MPTTTSProvider(TTSProvider):
+    """Canonical boundary over the existing MPT voice implementation.
+
+    TTS is opt-in so opening a page never causes a remote request.  The
+    provider only returns redacted metadata; credentials remain in the
+    existing provider configuration/environment seam.
+    """
+
+    provider_name = "MPT_TTS"
+
+    def __init__(self, *, enabled: bool | None = None, voice: str | None = None, voice_rate: float = 1.0, voice_volume: float = 1.0):
+        self.enabled = (os.environ.get("AIDRAMA_TTS_ENABLED", "") == "1") if enabled is None else bool(enabled)
+        self.voice = voice or os.environ.get("AIDRAMA_TTS_VOICE", "zh-CN-XiaoxiaoMultilingualNeural-V2-Female")
+        self.voice_rate = float(voice_rate)
+        self.voice_volume = float(voice_volume)
+
+    @property
+    def status(self) -> CapabilityStatus:
+        try:
+            import app.services.voice  # noqa: F401
+        except Exception:
+            return CapabilityStatus(CapabilityKind.TTS, self.provider_name, False, "MPT TTS seam unavailable")
+        if not self.enabled:
+            return CapabilityStatus(CapabilityKind.TTS, self.provider_name, False, "TTS 未启用；设置 AIDRAMA_TTS_ENABLED=1 后才会调用语音服务", {"voice": self.voice})
+        return CapabilityStatus(CapabilityKind.TTS, self.provider_name, True, "configured", {"voice": self.voice, "model": "MPT voice seam"})
+
+    def synthesize(self, text: str, *, voice: str, language: str = "zh-CN", sample_rate: int = 48000) -> TTSResult:
+        if not self.status.available:
+            raise CapabilityUnavailable(self.status.reason)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("TTS text 不能为空")
+        selected_voice = str(voice or self.voice).strip()
+        if not selected_voice:
+            raise ValueError("voice 不能为空")
+        from app.services.voice import tts
+
+        descriptor, filename = tempfile.mkstemp(prefix="aidrama-tts-", suffix=".mp3")
+        os.close(descriptor)
+        path = Path(filename)
+        try:
+            result = tts(text, selected_voice, self.voice_rate, str(path), self.voice_volume)
+            if not path.is_file() or path.stat().st_size <= 0:
+                raise CapabilityUnavailable("TTS provider returned no audio")
+            duration = getattr(result, "audio_duration_seconds", None) if result is not None else None
+            return TTSResult(self.provider_name, path.read_bytes(), "audio/mpeg", duration, {"voice": selected_voice, "language": language, "sample_rate": sample_rate})
+        finally:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
 class DeterministicMockVisionProvider(VisionAnalysisProvider):
     """Deterministic fake used only for unit tests and local decision plumbing."""
 
@@ -348,30 +403,47 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
     from .adapters import MPTProductionAdapter, SeedanceProductionAdapter, WanProductionAdapter
     from .providers.openai_image import OpenAIImageProvider
 
+    values = dict(os.environ if env is None else env)
     if env is None:
-        wan_adapter = WanProductionAdapter()
-    else:
-        from .adapters.wan_video import WanProviderConfig
+        try:
+            from .credentials import WindowsCredentialStore
+            from aidrama_studio.storage.database import get_default_paths
+            store = WindowsCredentialStore(get_default_paths().root)
+            for key in ("OPENAI_API_KEY", "DASHSCOPE_API_KEY", "ARK_API_KEY"):
+                secret = store.get(key)
+                if secret:
+                    values[key] = secret
+        except Exception:
+            # Environment configuration remains a development fallback. A
+            # locked/corrupt credential store must not prevent offline use.
+            pass
+    from .adapters.wan_video import WanProviderConfig
+    from .adapters.seedance_video import SeedanceProviderConfig
 
-        wan_adapter = WanProductionAdapter(
-            config=WanProviderConfig(
-                api_key=str(env.get("DASHSCOPE_API_KEY", "")).strip(),
-                base_url=str(env.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")).strip(),
-                model=str(env.get("WAN_VIDEO_MODEL", "wan2.7-i2v-2026-04-25")).strip(),
-            )
+    wan_adapter = WanProductionAdapter(
+        config=WanProviderConfig(
+            api_key=str(values.get("DASHSCOPE_API_KEY", "")).strip(),
+            base_url=str(values.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")).strip(),
+            model=str(values.get("WAN_VIDEO_MODEL", "wan2.7-i2v-2026-04-25")).strip(),
         )
+    )
     wan = RuntimeVideoProvider(wan_adapter, provider_name="WAN_VIDEO", mode=CapabilityKind.VIDEO_GENERATIVE)
-    seedance = RuntimeVideoProvider(SeedanceProductionAdapter(), provider_name="SEEDANCE", mode=CapabilityKind.VIDEO_GENERATIVE)
+    seedance = RuntimeVideoProvider(SeedanceProductionAdapter(config=SeedanceProviderConfig(
+        api_key=str(values.get("ARK_API_KEY", "")).strip(),
+        base_url=str(values.get("SEEDANCE_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")).strip(),
+        model=str(values.get("SEEDANCE_VIDEO_MODEL", "seedance-1-0-pro")).strip(),
+        allow_paid_live_tests=str(values.get("AIDRAMA_ALLOW_PAID_LIVE_TESTS", "")) == "1",
+    )), provider_name="SEEDANCE", mode=CapabilityKind.VIDEO_GENERATIVE)
     stock = RuntimeVideoProvider(MPTProductionAdapter(), provider_name="MPT_STOCK", mode=CapabilityKind.VIDEO_STOCK)
     # Preserve the existing Wan capability as the default compatibility
     # provider; a configured Seedance profile is selected explicitly through
     # ProviderProfileService without hiding the preserved Wan boundary.
-    return CapabilityRegistry([MPTLLMProvider(), wan, seedance, stock, OpenAIImageProvider(), UnavailableVisionProvider(), UnavailableTTSProvider()])
+    return CapabilityRegistry([MPTLLMProvider(), wan, seedance, stock, OpenAIImageProvider(env=values), UnavailableVisionProvider(), MPTTTSProvider()])
 
 
 __all__ = [
     "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",
     "LLMProvider", "ImageGenerationProvider", "VideoGenerationProvider", "VisionAnalysisProvider", "TTSProvider",
     "ImageCandidate", "VisionAnalysis", "TTSResult", "MPTLLMProvider", "RuntimeVideoProvider",
-    "UnavailableImageProvider", "UnavailableVisionProvider", "UnavailableTTSProvider", "DeterministicMockVisionProvider", "default_capability_registry",
+    "UnavailableImageProvider", "UnavailableVisionProvider", "UnavailableTTSProvider", "MPTTTSProvider", "DeterministicMockVisionProvider", "default_capability_registry",
 ]

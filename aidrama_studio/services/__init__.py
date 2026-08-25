@@ -26,6 +26,10 @@ from .credentials import CredentialReadinessService, CredentialStoreError, Windo
 from .project_archive import ProjectArchiveError, ProjectArchiveService
 from .current_state import CurrentProductionState, CurrentProductionStateService
 from .vision_qc import VisionQCResult, VisionQCService
+from .diagnostics import DiagnosticsError, DiagnosticsService, DiskSpaceService
+from .tts_runtime import TTSRuntimeError, TTSRuntimeService
+from .production_queue import ProductionQueueError, ProductionQueueService
+from .security import configure_runtime_logging, sanitize_error
 from .provider_readiness import ProviderReadinessService, CapabilityReadiness, ReadinessState
 from .ai_capabilities import (
     CapabilityKind,
@@ -99,6 +103,10 @@ __all__ = [
     "WindowsCredentialStore", "CredentialStoreError", "CredentialReadinessService",
     "ProjectArchiveService", "ProjectArchiveError",
     "VisionQCResult", "VisionQCService",
+    "DiagnosticsError", "DiagnosticsService", "DiskSpaceService",
+    "TTSRuntimeError", "TTSRuntimeService",
+    "ProductionQueueError", "ProductionQueueService",
+    "configure_runtime_logging", "sanitize_error",
     "ProviderReadinessService", "CapabilityReadiness", "ReadinessState",
     "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",
     "LLMProvider", "ImageGenerationProvider", "VideoGenerationProvider", "VisionAnalysisProvider", "TTSProvider",

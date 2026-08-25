@@ -13,7 +13,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from aidrama_studio.components.navigation import build_navigation  # noqa: E402
 from aidrama_studio.branding import BRAND  # noqa: E402
-from aidrama_studio.storage.database import initialize_database  # noqa: E402
+from aidrama_studio.storage.database import get_default_paths, initialize_database  # noqa: E402
+from aidrama_studio.services.security import configure_runtime_logging  # noqa: E402
 
 
 st.set_page_config(
@@ -34,6 +35,7 @@ def _load_styles() -> None:
 
 
 def main() -> None:
+    configure_runtime_logging(get_default_paths().root)
     _load_styles()
     st.session_state.setdefault("current_project_id", None)
     if not st.session_state.get("current_project_id"):

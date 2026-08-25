@@ -91,7 +91,13 @@ class ProductionWorker:
         except Exception as exc:
             # submit_execution durably records FAILED for adapter errors. A
             # failed execution is returned so a queue caller can inspect it.
+            # An uncertain provider POST is different: keep the execution
+            # recoverable and let startup reconciliation inspect the original
+            # provider task rather than issuing a duplicate paid request.
             current = self.execution_service.get_execution(project_id, execution.id)
+            task = next((item for item in self.execution_service.repository.list_provider_tasks(project_id) if item.execution_id == execution.id), None)
+            if task is not None and task.state in {"SUBMISSION_UNCERTAIN", "RECONCILIATION_REQUIRED"}:
+                return current
             if current.status is ProductionExecutionStatus.FAILED:
                 return current
             return self._fail(project_id, current, f"adapter submit failed: {exc}")

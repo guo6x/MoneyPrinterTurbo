@@ -1114,6 +1114,27 @@ def _migration_022_runtime_operations(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_vision_analysis_scope ON vision_analysis_results(project_id, execution_id, created_at DESC)")
 
 
+def _migration_023_final_assembly_provenance(connection: sqlite3.Connection) -> None:
+    """Freeze source hashes and deterministic timeline positions."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(final_assembly_items)")}
+    additions = (
+        ("source_sha256", "TEXT"),
+        ("source_duration_seconds", "REAL"),
+        ("timeline_start_seconds", "REAL"),
+        ("timeline_end_seconds", "REAL"),
+        ("trimmed_duration_seconds", "REAL"),
+    )
+    for name, kind in additions:
+        if name not in columns:
+            connection.execute(f"ALTER TABLE final_assembly_items ADD COLUMN {name} {kind}")
+    assembly_columns = {row[1] for row in connection.execute("PRAGMA table_info(final_assemblies)")}
+    if "output_profile_id" not in assembly_columns:
+        connection.execute("ALTER TABLE final_assemblies ADD COLUMN output_profile_id TEXT")
+    if "output_profile_hash" not in assembly_columns:
+        connection.execute("ALTER TABLE final_assemblies ADD COLUMN output_profile_hash TEXT")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_final_assembly_items_timeline ON final_assembly_items(final_assembly_id, order_index)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1137,6 +1158,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (20, _migration_020_creative_intake),
     (21, _migration_021_reference_profiles),
     (22, _migration_022_runtime_operations),
+    (23, _migration_023_final_assembly_provenance),
 )
 
 

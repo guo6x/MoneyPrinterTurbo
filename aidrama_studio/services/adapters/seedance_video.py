@@ -90,6 +90,7 @@ class SeedanceInputMapper:
 
 class SeedanceProductionAdapter(ProductionRuntimeAdapter):
     name = "seedance"
+    submission_uncertain_on_error = True
     STATUS_MAP = {
         "waiting": "QUEUED", "queued": "QUEUED", "submitted": "QUEUED",
         "processing": "RUNNING", "running": "RUNNING", "in_progress": "RUNNING",

@@ -430,6 +430,7 @@ class WanProductionAdapter(ProductionRuntimeAdapter):
     """ProductionRuntimeAdapter for one Wan image-to-video shot."""
 
     name = "wan_video"
+    submission_uncertain_on_error = True
     STATUS_MAP = {
         "PENDING": "QUEUED",
         "QUEUED": "QUEUED",

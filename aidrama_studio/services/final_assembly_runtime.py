@@ -68,7 +68,9 @@ class FinalAssemblyRuntimeService:
         temporary_path: Path | None = None
         try:
             source_paths = tuple(self._resolve_source_path(project_id, item.source_path) for item in manifest.items)
-            request = FinalAssemblyRenderRequest.from_manifest(manifest, source_paths)
+            profile = self.repository.get_output_profile(self._assembly(project_id, assembly_id).output_profile_id) if self._assembly(project_id, assembly_id).output_profile_id else None
+            profile_data = profile.model_dump(mode="json") if profile is not None else None
+            request = FinalAssemblyRenderRequest.from_manifest(manifest, source_paths, output_profile=profile_data)
             # Validate all frozen paths before changing assembly state to
             # ASSEMBLING.  No latest production data is read here.
             validation = adapter.validate_sources(request)
@@ -77,7 +79,7 @@ class FinalAssemblyRuntimeService:
             source_metadata = [adapter.probe_output(path) for path in source_paths]
             expected_duration = sum(self._duration(meta) for meta in source_metadata)
             request = FinalAssemblyRenderRequest.from_manifest(
-                manifest, source_paths, expected_duration=expected_duration
+                manifest, source_paths, expected_duration=expected_duration, output_profile=profile_data
             )
             output_path, output_relative_path = self._choose_output_path(project_id, assembly_id, attempt_id)
             temporary_path = output_path.with_name(f".{attempt_id}.in-progress.mp4")

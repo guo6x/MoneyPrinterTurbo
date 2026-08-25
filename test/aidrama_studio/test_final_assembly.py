@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 from pathlib import Path
 from uuid import uuid4
 
@@ -131,6 +132,24 @@ def test_freezes_ordered_three_shot_manifest_with_exact_provenance(context):
     assert [item.production_execution_id for item in manifest.items] == [item[0].id for item in sources]
     assert [item.production_artifact_id for item in manifest.items] == [item[1].id for item in sources]
     assert [item.qc_result_id for item in manifest.items] == [item[2].id for item in sources]
+    assert [item.timeline_start_seconds for item in manifest.items] == [0, 2, 4]
+    assert [item.timeline_end_seconds for item in manifest.items] == [2, 4, 6]
+    assert all(item.source_sha256 == hashlib.sha256(b"video-bytes").hexdigest() for item in manifest.items)
+
+
+def test_tampered_source_hash_blocks_new_manifest(context):
+    repository, project = context
+    job, shots = _shots(repository, project, 1)
+    execution, artifact, _result, _review = _source(repository, project, job, shots[0], suffix="1")
+    artifact.metadata_json["sha256"] = hashlib.sha256(b"original").hexdigest()
+    with repository.transaction() as connection:
+        import json
+        connection.execute("UPDATE production_artifacts SET metadata_json=? WHERE id=?", (json.dumps(artifact.metadata_json), artifact.id))
+    path = repository.paths.projects / project.id / artifact.path
+    path.write_bytes(b"tampered")
+    readiness = FinalAssemblyService(repository).calculate_readiness(project.id, job.id)
+    assert readiness.ready is False
+    assert "SHA256" in " ".join(readiness.blocked_reasons)
 
 
 @pytest.mark.parametrize(

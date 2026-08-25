@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from uuid import uuid4
@@ -115,11 +117,15 @@ class FinalAssemblyService:
         """Create a new DRAFT assembly; optionally freeze it immediately."""
         job = self._get_job(project_id, production_job_id)
         now = _now()
+        profile = self.repository.get_output_profile(job.output_profile_id) if job.output_profile_id else None
+        profile_hash = hashlib.sha256(json.dumps(profile.model_dump(mode="json"), ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest() if profile is not None else None
         assembly = self.repository.create_final_assembly(
             FinalAssembly(
                 id=assembly_id or uuid4().hex,
                 project_id=project_id,
                 production_job_id=job.id,
+                output_profile_id=job.output_profile_id,
+                output_profile_hash=profile_hash,
                 status=FinalAssemblyStatus.DRAFT,
                 created_at=now,
                 updated_at=now,
@@ -156,8 +162,14 @@ class FinalAssemblyService:
             (shot, self.select_qualified_source(project_id, job.id, shot.id))
             for shot in self._ordered_shots(job.id)
         ]
-        items = [
-            FinalAssemblyItem(
+        timeline = 0.0
+        items = []
+        for shot, source in selected_sources:
+            duration = float(source.source_duration_seconds if source.source_duration_seconds is not None else source.estimated_duration)
+            start = timeline
+            end = start + max(0.0, duration)
+            timeline = end
+            items.append(FinalAssemblyItem(
                 id=uuid4().hex,
                 final_assembly_id=assembly.id,
                 # Preserve the canonical ProductionShot order exactly;
@@ -170,9 +182,12 @@ class FinalAssemblyService:
                 review_id=source.review_id,
                 source_path=source.source_path,
                 created_at=_now(),
-            )
-            for shot, source in selected_sources
-        ]
+                source_sha256=source.source_sha256,
+                source_duration_seconds=duration,
+                timeline_start_seconds=round(start, 6),
+                timeline_end_seconds=round(end, 6),
+                trimmed_duration_seconds=duration,
+            ))
         try:
             return self.repository.freeze_final_assembly_atomic(
                 assembly.id, items, updated_at=_now()
@@ -232,6 +247,11 @@ class FinalAssemblyService:
                 if not source_path.is_file():
                     last_reason = "artifact source 文件不存在"
                     continue
+                actual_sha = self._sha256(source_path)
+                expected_sha = artifact.metadata_json.get("sha256")
+                if isinstance(expected_sha, str) and expected_sha and actual_sha != expected_sha:
+                    last_reason = "artifact SHA256 与持久化 metadata 不一致"
+                    continue
                 matching_results = [item for item in qc_results if item.artifact_id == artifact.id]
                 if not matching_results:
                     last_reason = "artifact 没有 QC result"
@@ -264,6 +284,8 @@ class FinalAssemblyService:
                     review_id=selected_review.id if selected_review else None,
                     source_path=artifact.path.replace("\\", "/"),
                     estimated_duration=self._duration(artifact.metadata_json, execution, shot),
+                    source_sha256=actual_sha,
+                    source_duration_seconds=self._duration(artifact.metadata_json, execution, shot),
                 )
                 candidates.append(
                     ((execution_index, artifact_index, qc_results.index(qc_result)), accepted_review is not None, source)
@@ -345,6 +367,14 @@ class FinalAssemblyService:
         if root not in target.parents:
             raise FinalAssemblyServiceError("source path 不属于该项目")
         return target
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
 
     @staticmethod
     def _duration(metadata: Mapping[str, object] | None, execution=None, shot=None) -> float:

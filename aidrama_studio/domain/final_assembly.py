@@ -39,6 +39,8 @@ class FinalAssembly(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     project_id: str = Field(min_length=1, max_length=64)
     production_job_id: str = Field(min_length=1, max_length=64)
+    output_profile_id: str | None = Field(default=None, max_length=80)
+    output_profile_hash: str | None = Field(default=None, max_length=64)
     status: FinalAssemblyStatus = FinalAssemblyStatus.DRAFT
     created_at: str = Field(min_length=1, max_length=80)
     updated_at: str = Field(min_length=1, max_length=80)
@@ -58,6 +60,11 @@ class FinalAssemblyItem(BaseModel):
     qc_result_id: str = Field(min_length=1, max_length=64)
     review_id: str | None = Field(default=None, max_length=64)
     source_path: str = Field(min_length=1, max_length=1000)
+    source_sha256: str | None = Field(default=None, max_length=64)
+    source_duration_seconds: float | None = Field(default=None, ge=0)
+    timeline_start_seconds: float | None = Field(default=None, ge=0)
+    timeline_end_seconds: float | None = Field(default=None, ge=0)
+    trimmed_duration_seconds: float | None = Field(default=None, ge=0)
     created_at: str = Field(min_length=1, max_length=80)
 
 
@@ -102,6 +109,8 @@ class FinalAssemblySource(BaseModel):
     qc_result_id: str = Field(min_length=1, max_length=64)
     review_id: str | None = Field(default=None, max_length=64)
     source_path: str = Field(min_length=1, max_length=1000)
+    source_sha256: str | None = Field(default=None, max_length=64)
+    source_duration_seconds: float | None = Field(default=None, ge=0)
     estimated_duration: float = Field(default=0.0, ge=0)
 
     def __getitem__(self, key: str) -> Any:

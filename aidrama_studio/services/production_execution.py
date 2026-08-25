@@ -8,6 +8,8 @@ renderer, FFmpeg, an AI provider, or the MoneyPrinterTurbo runtime.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import json
 from collections.abc import Iterable, Mapping
 from pathlib import PurePosixPath, PureWindowsPath
 from uuid import uuid4
@@ -23,12 +25,15 @@ from aidrama_studio.domain import (
     ProductionJobStatus,
     ProductionShotStatus,
     ProductionInputSnapshot,
+    ProviderTask,
     ReferenceBindingType,
 )
 from aidrama_studio.services.adapters import ProductionRuntimeAdapter, RuntimeEvent, RuntimeSubmission
 from aidrama_studio.storage.repositories import ProjectRepository
 
 from .production import ProductionService, ProductionServiceError
+from .provider_profiles import ProviderProfileService
+from .security import sanitize_error
 
 
 def _now() -> str:
@@ -55,6 +60,7 @@ class ProductionExecutionService:
             self.repository = repository or ProjectRepository()
             self.production_service = ProductionService(self.repository)
         self._adapters: dict[str, ProductionRuntimeAdapter] = {}
+        self.provider_profiles = ProviderProfileService(self.repository)
 
     def _require_project(self, project_id: str):
         project = self.repository.get_project(project_id)
@@ -267,7 +273,7 @@ class ProductionExecutionService:
             payload_json=payload_json or {},
             created_at=now,
         )
-        return self.repository.transition_production_execution_atomic(
+        result = self.repository.transition_production_execution_atomic(
             execution.id,
             expected_status=ProductionExecutionStatus.QUEUED,
             status=ProductionExecutionStatus.RUNNING,
@@ -275,6 +281,7 @@ class ProductionExecutionService:
             job_status=ProductionJobStatus.RUNNING,
             event=event,
         )
+        return result
 
     def create_input_snapshot(self, project_id: str, production_job_id: str) -> ProductionInputSnapshot:
         """Capture the approved Story → Script → Shot Plan input graph once."""
@@ -356,19 +363,42 @@ class ProductionExecutionService:
         runtime_snapshot = input_snapshot or execution.input_snapshot
         if runtime_snapshot is None:
             raise ProductionExecutionServiceError("execution 缺少 immutable input snapshot")
+        task = self._provider_task_intent(project_id, execution, adapter, runtime_snapshot)
+        # A durable provider identity is the recovery boundary.  If the
+        # process was restarted after a successful provider POST, never issue
+        # another paid POST; resume polling the original task instead.
+        if task.state in {"SUBMISSION_UNCERTAIN", "RECONCILIATION_REQUIRED"} and not task.provider_task_id:
+            raise ProductionExecutionServiceError("provider submission 状态不确定，必须先 reconciliation")
+        self._adapters[execution.id] = adapter
+        if task.provider_task_id:
+            runtime_reference = task.provider_task_id
+            submission_metadata = dict(task.metadata)
+            if execution.status is ProductionExecutionStatus.QUEUED:
+                return self.start_execution(project_id, execution.id, {"adapter": getattr(adapter, "name", adapter.__class__.__name__), "runtime_reference": runtime_reference, "provider_metadata": submission_metadata})
+            return execution
         try:
             accepted = adapter.validate(runtime_snapshot)
             if accepted is False:
+                self._update_provider_task(task, state="FAILED", error_message="runtime adapter 拒绝 input snapshot")
+                self.fail_execution(project_id, execution.id, error_message="runtime adapter 拒绝 input snapshot")
                 raise ProductionExecutionServiceError("runtime adapter 拒绝 input snapshot")
+            self._update_provider_task(task, state="SUBMITTING")
             submission = adapter.submit(runtime_snapshot)
             runtime_reference = self._submission_reference(submission)
             submission_metadata = self._submission_metadata(submission)
+            task = self._update_provider_task(task, state="PROVIDER_ACCEPTED", provider_task_id=runtime_reference, metadata=submission_metadata, submitted_at=_now())
         except ProductionExecutionServiceError:
             raise
         except Exception as exc:
-            self.fail_execution(project_id, execution.id, error_message=str(exc))
-            raise ProductionExecutionServiceError(f"runtime submit 失败: {exc}") from exc
-        self._adapters[execution.id] = adapter
+            # The adapter may have accepted the request before the transport
+            # raised.  Persist uncertainty and require explicit reconciliation
+            # instead of turning an unknown paid request into an auto-retry.
+            if bool(getattr(adapter, "submission_uncertain_on_error", False)):
+                self._update_provider_task(task, state="SUBMISSION_UNCERTAIN", error_message=self._safe_error(exc))
+                raise ProductionExecutionServiceError(f"runtime submit 状态不确定: {type(exc).__name__}") from exc
+            self._update_provider_task(task, state="FAILED", error_message=self._safe_error(exc))
+            self.fail_execution(project_id, execution.id, error_message=self._safe_error(exc))
+            raise ProductionExecutionServiceError(f"runtime submit 失败: {type(exc).__name__}") from exc
         start_payload = {
             "adapter": getattr(adapter, "name", adapter.__class__.__name__),
             "runtime_reference": runtime_reference,
@@ -381,6 +411,44 @@ class ProductionExecutionService:
         if submission_metadata:
             start_payload["provider_metadata"] = submission_metadata
         return self.start_execution(project_id, execution.id, start_payload)
+
+    def _provider_task_intent(self, project_id: str, execution: ProductionExecution, adapter: ProductionRuntimeAdapter, snapshot: ProductionInputSnapshot) -> ProviderTask:
+        provider_id = str(getattr(adapter, "provider_id", getattr(adapter, "name", adapter.__class__.__name__)))
+        config = getattr(adapter, "config", None)
+        model_id = str(getattr(config, "model", getattr(adapter, "model_id", "runtime")))
+        plan_id = execution.runtime_plan_id or "snapshot"
+        plan_hash = ""
+        if execution.runtime_plan_id:
+            plan = self.repository.get_runtime_plan(execution.runtime_plan_id)
+            plan_hash = plan.plan_hash if plan is not None else ""
+        key_payload = {"project_id": project_id, "execution_id": execution.id, "provider_id": provider_id, "model_id": model_id, "plan_id": plan_id, "plan_hash": plan_hash, "snapshot": snapshot.to_json_dict()}
+        key = hashlib.sha256(json.dumps(key_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        existing = self.repository.get_provider_task_by_idempotency(project_id, key)
+        if existing is not None:
+            return existing
+        now = _now()
+        return self.repository.create_provider_task(ProviderTask(
+            id=uuid4().hex, project_id=project_id, execution_id=execution.id,
+            capability="VIDEO_GENERATIVE", provider_id=provider_id, model_id=model_id,
+            idempotency_key=key, state="PENDING_SUBMISSION",
+            request_summary={"execution_id": execution.id, "snapshot_hash": hashlib.sha256(json.dumps(snapshot.to_json_dict(), ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()},
+            created_at=now, updated_at=now,
+        ))
+
+    def _update_provider_task(self, task: ProviderTask, *, state: str | None = None, provider_task_id: str | None = None, metadata: Mapping[str, object] | None = None, submitted_at: str | None = None, error_message: str | None = None) -> ProviderTask:
+        updated = task.model_copy(update={
+            "state": state or task.state,
+            "provider_task_id": provider_task_id if provider_task_id is not None else task.provider_task_id,
+            "metadata": dict(task.metadata) | dict(metadata or {}),
+            "submitted_at": submitted_at if submitted_at is not None else task.submitted_at,
+            "error_message": error_message,
+            "updated_at": _now(),
+        })
+        return self.repository.update_provider_task(updated)
+
+    @staticmethod
+    def _safe_error(exc: Exception) -> str:
+        return sanitize_error(exc, max_length=1000)
 
     @staticmethod
     def _submission_reference(submission: RuntimeSubmission | str | Mapping[str, object]) -> str:
@@ -571,7 +639,7 @@ class ProductionExecutionService:
             payload_json={"reason": reason or ""},
             created_at=now,
         )
-        return self.repository.transition_production_execution_atomic(
+        result = self.repository.transition_production_execution_atomic(
             execution.id,
             expected_status=execution.status,
             status=ProductionExecutionStatus.CANCELLED,
@@ -579,6 +647,8 @@ class ProductionExecutionService:
             job_status=ProductionJobStatus.CANCELLED,
             event=event,
         )
+        self._sync_provider_task_terminal(project_id, execution.id, "CANCELLED")
+        return result
 
     def complete_execution(
         self,
@@ -596,7 +666,7 @@ class ProductionExecutionService:
             payload_json=payload_json or {},
             created_at=now,
         )
-        return self.repository.transition_production_execution_atomic(
+        result = self.repository.transition_production_execution_atomic(
             execution.id,
             expected_status=ProductionExecutionStatus.RUNNING,
             status=ProductionExecutionStatus.SUCCEEDED,
@@ -604,6 +674,13 @@ class ProductionExecutionService:
             job_status=ProductionJobStatus.SUCCEEDED,
             event=event,
         )
+        self._sync_provider_task_terminal(project_id, execution.id, "SUCCEEDED")
+        return result
+
+    def _sync_provider_task_terminal(self, project_id: str, execution_id: str, state: str) -> None:
+        for task in self.repository.list_provider_tasks(project_id):
+            if task.execution_id == execution_id and task.state not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                self._update_provider_task(task, state=state)
 
     def fail_execution(
         self,
@@ -626,7 +703,7 @@ class ProductionExecutionService:
             payload_json=payload,
             created_at=now,
         )
-        return self.repository.transition_production_execution_atomic(
+        result = self.repository.transition_production_execution_atomic(
             execution.id,
             expected_status=execution.status,
             status=ProductionExecutionStatus.FAILED,
@@ -634,6 +711,8 @@ class ProductionExecutionService:
             job_status=ProductionJobStatus.FAILED,
             event=event,
         )
+        self._sync_provider_task_terminal(project_id, execution.id, "FAILED")
+        return result
 
     def list_events(self, project_id: str, execution_id: str) -> list[ProductionEvent]:
         execution, _ = self._get_execution(project_id, execution_id)

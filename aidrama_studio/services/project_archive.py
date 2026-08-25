@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from aidrama_studio.storage.database import backup_database
 from aidrama_studio.storage.repositories import ProjectRepository
+from aidrama_studio.services.security import sanitize_error
 
 
 class ProjectArchiveError(RuntimeError):
@@ -68,6 +69,8 @@ class ProjectArchiveService:
         source = Path(archive_path)
         if not source.is_file():
             raise ProjectArchiveError("项目归档不存在")
+        if source.stat().st_size > self.MAX_ARCHIVE_BYTES:
+            raise ProjectArchiveError("项目归档超过大小限制")
         with zipfile.ZipFile(source) as archive:
             self._validate_archive(archive)
             try:
@@ -76,6 +79,11 @@ class ProjectArchiveService:
                 raise ProjectArchiveError("项目归档 manifest 无效") from exc
             if manifest.get("format") != "AIDRAMA_PROJECT_ARCHIVE" or not isinstance(manifest.get("tables"), dict):
                 raise ProjectArchiveError("项目归档格式不受支持")
+            if int(manifest.get("version", 0) or 0) != 1:
+                raise ProjectArchiveError("项目归档版本不受支持")
+            archive_schema = int(manifest.get("schema_version", 0) or 0)
+            if archive_schema > self._schema_version():
+                raise ProjectArchiveError("项目归档 schema 高于当前应用支持版本")
             old_id = str(manifest.get("project_id") or "")
             new_id = project_id or old_id
             if not self._safe_component(new_id):
@@ -122,6 +130,7 @@ class ProjectArchiveService:
                 "production_artifacts": ("execution_id", "production_executions"),
                 "production_qc_metrics": ("result_id", "production_qc_results"),
                 "final_assembly_items": ("final_assembly_id", "final_assemblies"),
+                "final_assembly_render_attempts": ("final_assembly_id", "final_assemblies"),
                 "reference_profile_items": ("profile_id", "reference_profiles"),
             }
             for table, (foreign_key, parent) in relations.items():
@@ -188,7 +197,10 @@ class ProjectArchiveService:
                     if not isinstance(raw, dict):
                         raise ProjectArchiveError("归档行格式无效")
                     values = [self._rewrite_value(raw.get(column), rewrite) for column in columns]
-                    connection.execute(f'INSERT OR IGNORE INTO "{table}" ({",".join(columns)}) VALUES ({",".join("?" for _ in columns)})', tuple(values))
+                    try:
+                        connection.execute(f'INSERT INTO "{table}" ({",".join(columns)}) VALUES ({",".join("?" for _ in columns)})', tuple(values))
+                    except sqlite3.IntegrityError as exc:
+                        raise ProjectArchiveError(f"项目归档包含 ID collision 或无效关系: {table}") from exc
 
     def _validate_archive(self, archive: zipfile.ZipFile) -> None:
         if len(archive.infolist()) > self.MAX_ENTRIES:
@@ -250,6 +262,8 @@ class ProjectArchiveService:
             return {str(key): cls._redact(item) for key, item in value.items() if str(key).lower() not in {"api_key", "token", "authorization", "secret", "signed_url", "password"}}
         if isinstance(value, list):
             return [cls._redact(item) for item in value]
+        if isinstance(value, str):
+            return sanitize_error(value, max_length=max(2000, len(value)))
         return value
 
 

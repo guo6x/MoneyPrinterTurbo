@@ -1463,6 +1463,8 @@ class ProjectRepository:
             id=row["id"],
             project_id=row["project_id"],
             production_job_id=row["production_job_id"],
+            output_profile_id=row["output_profile_id"] if "output_profile_id" in row.keys() else None,
+            output_profile_hash=row["output_profile_hash"] if "output_profile_hash" in row.keys() else None,
             status=row["status"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -1480,6 +1482,11 @@ class ProjectRepository:
             qc_result_id=row["qc_result_id"],
             review_id=row["review_id"],
             source_path=row["source_path"],
+            source_sha256=row["source_sha256"] if "source_sha256" in row.keys() else None,
+            source_duration_seconds=row["source_duration_seconds"] if "source_duration_seconds" in row.keys() else None,
+            timeline_start_seconds=row["timeline_start_seconds"] if "timeline_start_seconds" in row.keys() else None,
+            timeline_end_seconds=row["timeline_end_seconds"] if "timeline_end_seconds" in row.keys() else None,
+            trimmed_duration_seconds=row["trimmed_duration_seconds"] if "trimmed_duration_seconds" in row.keys() else None,
             created_at=row["created_at"],
         )
 
@@ -1495,11 +1502,13 @@ class ProjectRepository:
             if job["project_id"] != assembly.project_id:
                 raise ValueError("ProductionJob 不属于该项目")
             connection.execute(
-                "INSERT INTO final_assemblies(id,project_id,production_job_id,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                "INSERT INTO final_assemblies(id,project_id,production_job_id,output_profile_id,output_profile_hash,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
                 (
                     assembly.id,
                     assembly.project_id,
                     assembly.production_job_id,
+                    assembly.output_profile_id,
+                    assembly.output_profile_hash,
                     assembly.status.value,
                     assembly.created_at,
                     assembly.updated_at,
@@ -1551,8 +1560,9 @@ class ProjectRepository:
                 connection.execute(
                     "INSERT INTO final_assembly_items("
                     "id,final_assembly_id,order_index,production_shot_id,production_execution_id,"
-                    "production_artifact_id,qc_result_id,review_id,source_path,created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "production_artifact_id,qc_result_id,review_id,source_path,source_sha256,source_duration_seconds,"
+                    "timeline_start_seconds,timeline_end_seconds,trimmed_duration_seconds,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         item.id,
                         item.final_assembly_id,
@@ -1563,6 +1573,11 @@ class ProjectRepository:
                         item.qc_result_id,
                         item.review_id,
                         item.source_path,
+                        item.source_sha256,
+                        item.source_duration_seconds,
+                        item.timeline_start_seconds,
+                        item.timeline_end_seconds,
+                        item.trimmed_duration_seconds,
                         item.created_at,
                     ),
                 )
@@ -1783,8 +1798,9 @@ class ProjectRepository:
                 INSERT INTO final_assembly_items(
                     id,final_assembly_id,order_index,production_shot_id,
                     production_execution_id,production_artifact_id,qc_result_id,
-                    review_id,source_path,created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    review_id,source_path,source_sha256,source_duration_seconds,
+                    timeline_start_seconds,timeline_end_seconds,trimmed_duration_seconds,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     item.id,
@@ -1796,6 +1812,11 @@ class ProjectRepository:
                     item.qc_result_id,
                     item.review_id,
                     normalized,
+                    item.source_sha256,
+                    item.source_duration_seconds,
+                    item.timeline_start_seconds,
+                    item.timeline_end_seconds,
+                    item.trimmed_duration_seconds,
                     item.created_at,
                 ),
             )

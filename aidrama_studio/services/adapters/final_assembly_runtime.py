@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import re
 import subprocess
+import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 from aidrama_studio.domain import FinalAssemblyItem, FinalAssemblyManifest
 
@@ -26,6 +28,7 @@ class FinalAssemblyRenderRequest:
     items: tuple[FinalAssemblyItem, ...]
     source_paths: tuple[Path, ...]
     expected_duration: float = 0.0
+    output_profile: Mapping[str, object] | None = None
 
     @classmethod
     def from_manifest(
@@ -34,6 +37,7 @@ class FinalAssemblyRenderRequest:
         source_paths: tuple[Path, ...] | list[Path],
         *,
         expected_duration: float = 0.0,
+        output_profile: Mapping[str, object] | None = None,
     ) -> "FinalAssemblyRenderRequest":
         ordered = tuple(sorted(manifest.items, key=lambda item: (item.order_index, item.id)))
         return cls(
@@ -42,6 +46,7 @@ class FinalAssemblyRenderRequest:
             items=ordered,
             source_paths=tuple(Path(path) for path in source_paths),
             expected_duration=float(expected_duration or 0.0),
+            output_profile=dict(output_profile or {}),
         )
 
 
@@ -114,12 +119,33 @@ class MPTFinalAssemblyAdapter(FinalAssemblyRuntimeAdapter):
         # existing MPT helper but does not invoke MPT's generation pipeline.
         from app.services.video import concat_video_clips_with_ffmpeg
 
-        concat_video_clips_with_ffmpeg(
-            [str(path) for path in request.source_paths],
-            str(output_path),
-            self.threads,
-            str(output_path.parent),
-        )
+        profile = dict(request.output_profile or {})
+        if not profile:
+            concat_video_clips_with_ffmpeg([str(path) for path in request.source_paths], str(output_path), self.threads, str(output_path.parent))
+            return
+        temporary = output_path.with_name(f".{output_path.stem}.concat.mp4")
+        temporary.unlink(missing_ok=True)
+        try:
+            concat_video_clips_with_ffmpeg([str(path) for path in request.source_paths], str(temporary), self.threads, str(output_path.parent))
+            binary = self.ffmpeg_binary or self._resolve_ffmpeg()
+            resolution = str(profile.get("target_resolution") or "").lower()
+            match = re.fullmatch(r"(\d{2,5})x(\d{2,5})", resolution)
+            if match is None:
+                raise FinalAssemblyRuntimeError("OutputProfile target_resolution 无效")
+            width, height = match.groups()
+            fps = float(profile.get("fps") or 30)
+            if fps <= 0 or fps > 240:
+                raise FinalAssemblyRuntimeError("OutputProfile fps 无效")
+            codec = str(profile.get("video_codec_target") or "h264").lower()
+            video_codec = "libx265" if "265" in codec or "hevc" in codec else "libx264"
+            command = [binary, "-hide_banner", "-loglevel", "error", "-y", "-i", str(temporary), "-map", "0:v:0", "-map", "0:a?", "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps:g}", "-c:v", video_codec, "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", str(int(profile.get("audio_sample_rate") or 48000)), "-ac", str(int(profile.get("audio_channels") or 2)), str(output_path)]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=900, check=False)
+            if result.returncode != 0 or not output_path.is_file() or output_path.stat().st_size <= 0:
+                raise FinalAssemblyRuntimeError("Final Assembly OutputProfile normalization failed")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise FinalAssemblyRuntimeError("Final Assembly media normalization unavailable") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def probe_output(self, output_path: Path) -> dict[str, object]:
         path = Path(output_path)

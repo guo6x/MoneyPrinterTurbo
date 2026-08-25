@@ -108,9 +108,7 @@ class ProviderReadinessService:
         return self._from_registry(CapabilityKind.VISION)
 
     def _tts(self) -> CapabilityReadiness:
-        if importlib.util.find_spec("edge_tts") is not None:
-            return CapabilityReadiness("TTS", "本地 Edge TTS seam", ReadinessState.READY, "本地 TTS 模块可用")
-        return CapabilityReadiness("TTS", "未配置", ReadinessState.UNAVAILABLE, "TTS runtime 不可用")
+        return self._from_registry(CapabilityKind.TTS)
 
     def list_capabilities(self) -> tuple[CapabilityReadiness, ...]:
         return (self._llm(), self._image(), self._video(), self._stock_video(), self._vision(), self._tts())

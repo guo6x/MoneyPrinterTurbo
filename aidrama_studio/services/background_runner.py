@@ -14,7 +14,11 @@ from typing import Callable
 from uuid import uuid4
 
 from aidrama_studio.domain import ProductionExecutionStatus, ProviderTask
+from aidrama_studio.services.adapters.production_adapter import ProductionRuntimeAdapter
 from aidrama_studio.services.production_worker import ProductionWorker, ProductionWorkerError
+from aidrama_studio.services.production_orchestrator import ProductionOrchestrator
+from aidrama_studio.services.production import ProductionService
+from aidrama_studio.services.security import sanitize_error
 from aidrama_studio.storage.repositories import ProjectRepository
 
 
@@ -88,9 +92,11 @@ class BackgroundProductionRunner:
         repository: ProjectRepository | None = None,
         *,
         worker_factory: Callable[[], ProductionWorker] | None = None,
+        adapter_factory: Callable[[ProviderTask], ProductionRuntimeAdapter] | None = None,
     ) -> None:
         self.repository = repository or ProjectRepository()
         self.worker_factory = worker_factory or (lambda: ProductionWorker())
+        self.adapter_factory = adapter_factory
         self.guard = SingleInstanceGuard(self.repository.paths.root)
 
     def enqueue(self, project_id: str, execution_id: str) -> ProviderTask:
@@ -122,19 +128,34 @@ class BackgroundProductionRunner:
         completed: list[ProviderTask] = []
         with self.guard:
             for task in tasks:
-                if task.execution_id is None:
+                if task.state in {"SUBMISSION_UNCERTAIN", "RECONCILIATION_REQUIRED"}:
+                    # Never automatically retry an uncertain paid side effect.
+                    completed.append(task)
                     continue
                 running = task.model_copy(update={"state": "RUNNING", "updated_at": _now()})
                 self.repository.update_provider_task(running)
                 try:
-                    result = self.worker_factory().run(task.project_id, task.execution_id)
-                    state = {
-                        ProductionExecutionStatus.SUCCEEDED: "SUCCEEDED",
-                        ProductionExecutionStatus.FAILED: "FAILED",
-                        ProductionExecutionStatus.CANCELLED: "CANCELLED",
-                    }.get(result.status, "RUNNING")
+                    worker = self.worker_factory()
+                    adapter = self.adapter_factory(task) if self.adapter_factory is not None else None
+                    if task.execution_id is None:
+                        job_id = str(task.request_summary.get("production_job_id") or "")
+                        if not job_id:
+                            raise BackgroundRunnerError("后台 job task 缺少 ProductionJob identity")
+                        if adapter is None:
+                            raise BackgroundRunnerError("后台 job task 没有 configured runtime adapter")
+                        production = ProductionService(self.repository)
+                        orchestrator = ProductionOrchestrator(production_service=production, worker=worker, adapter=adapter)
+                        result = orchestrator.run_job(task.project_id, job_id, adapter=adapter)
+                        state = {"SUCCEEDED": "SUCCEEDED", "FAILED": "FAILED", "CANCELLED": "CANCELLED"}.get(result.status.value, "RUNNING")
+                    else:
+                        result = worker.run(task.project_id, task.execution_id, adapter=adapter) if adapter is not None else worker.run(task.project_id, task.execution_id)
+                        state = {
+                            ProductionExecutionStatus.SUCCEEDED: "SUCCEEDED",
+                            ProductionExecutionStatus.FAILED: "FAILED",
+                            ProductionExecutionStatus.CANCELLED: "CANCELLED",
+                        }.get(result.status, "RUNNING")
                     updated = running.model_copy(update={"state": state, "updated_at": _now()})
-                except (ProductionWorkerError, Exception) as exc:
+                except Exception as exc:
                     updated = running.model_copy(update={"state": "FAILED", "error_message": self._safe_error(exc), "updated_at": _now()})
                 completed.append(self.repository.update_provider_task(updated))
         return completed
@@ -183,7 +204,7 @@ class BackgroundProductionRunner:
 
     @staticmethod
     def _safe_error(exc: Exception) -> str:
-        return str(exc).replace("\\", "/")[:4000]
+        return sanitize_error(exc, max_length=4000)
 
 
 __all__ = ["BackgroundProductionRunner", "BackgroundRunnerError", "SingleInstanceGuard"]
