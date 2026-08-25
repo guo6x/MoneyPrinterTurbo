@@ -1741,6 +1741,25 @@ def _migration_029_candidate_and_shot_source_truth(
     )
 
 
+def _migration_030_final_duration_control(connection: sqlite3.Connection) -> None:
+    """Freeze physical-source versus final-timeline duration separately."""
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(final_assembly_items)")
+    }
+    if "timeline_duration_seconds" not in columns:
+        connection.execute(
+            "ALTER TABLE final_assembly_items ADD COLUMN "
+            "timeline_duration_seconds REAL CHECK (timeline_duration_seconds IS NULL OR timeline_duration_seconds >= 0)"
+        )
+    if "duration_strategy" not in columns:
+        connection.execute(
+            "ALTER TABLE final_assembly_items ADD COLUMN duration_strategy TEXT "
+            "CHECK (duration_strategy IS NULL OR duration_strategy IN ("
+            "'NONE','SOURCE_SHORTFALL','TRIM_TO_CREATIVE','HOLD_TO_CREATIVE','TRIM_TO_TARGET','HOLD_TO_TARGET'"
+            "))"
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1771,6 +1790,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (27, _migration_027_human_editability_provenance),
     (28, _migration_028_durable_heavy_jobs),
     (29, _migration_029_candidate_and_shot_source_truth),
+    (30, _migration_030_final_duration_control),
 )
 
 

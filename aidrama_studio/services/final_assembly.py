@@ -37,6 +37,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+def _output_profile_hash(profile) -> str:
+    profile_data = profile.model_dump(mode="json")
+    # Project-default is a mutable selector projection, not part of the
+    # immutable delivery specification pinned by historical work.
+    profile_data.pop("is_project_default", None)
+    return hashlib.sha256(
+        json.dumps(
+            profile_data, ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 class FinalAssemblyServiceError(RuntimeError):
     """Raised when manifest creation crosses a production or path boundary."""
 
@@ -225,7 +237,7 @@ class FinalAssemblyService:
         job = self._get_job(project_id, production_job_id)
         now = _now()
         profile = self.repository.get_output_profile(job.output_profile_id) if job.output_profile_id else None
-        profile_hash = hashlib.sha256(json.dumps(profile.model_dump(mode="json"), ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest() if profile is not None else None
+        profile_hash = _output_profile_hash(profile) if profile is not None else None
         assembly = self.repository.create_final_assembly(
             FinalAssembly(
                 id=assembly_id or uuid4().hex,
@@ -269,13 +281,90 @@ class FinalAssemblyService:
             (shot, self.select_qualified_source(project_id, job.id, shot.id))
             for shot in self._ordered_shots(job.id)
         ]
+        shot_plan = self.repository.get_shot_revision(job.shot_plan_revision_id)
+        creative_durations = {
+            plan_shot.id: float(plan_shot.duration_seconds)
+            for plan_shot in (
+                shot_plan["content"].shots if shot_plan is not None else ()
+            )
+        }
+        physical_durations = [
+            float(
+                source.source_duration_seconds
+                if source.source_duration_seconds is not None
+                else source.estimated_duration
+            )
+            for _, source in selected_sources
+        ]
+        requested_durations = []
+        source_shortfalls: list[bool] = []
+        creative_duration_values: list[float] = []
+        for (shot, _), physical_duration in zip(
+            selected_sources, physical_durations
+        ):
+            creative_duration = max(
+                0.0,
+                creative_durations.get(shot.shot_id, physical_duration),
+            )
+            creative_duration_values.append(creative_duration)
+            hold_limit = min(0.5, max(0.1, creative_duration * 0.10))
+            shortfall = creative_duration - physical_duration > hold_limit + 0.001
+            source_shortfalls.append(shortfall)
+            requested_durations.append(
+                physical_duration if shortfall else creative_duration
+            )
+        profile = (
+            self.repository.get_output_profile(assembly.output_profile_id)
+            if assembly.output_profile_id
+            else None
+        )
+        if profile is not None:
+            if profile.project_id != project_id:
+                raise FinalAssemblyServiceError(
+                    "FinalAssembly OutputProfile 不属于该项目"
+                )
+            if (
+                assembly.output_profile_hash
+                and _output_profile_hash(profile) != assembly.output_profile_hash
+            ):
+                raise FinalAssemblyServiceError(
+                    "FinalAssembly OutputProfile hash 与冻结身份不匹配"
+                )
+        elif assembly.output_profile_id is not None:
+            raise FinalAssemblyServiceError("FinalAssembly 冻结的 OutputProfile 不存在")
+        target_duration = (
+            float(profile.target_episode_duration_seconds)
+            if profile is not None
+            else None
+        )
+        timeline_durations, target_adjustments = self._plan_final_durations(
+            requested_durations, target_duration
+        )
         timeline = 0.0
         items = []
-        for shot, source in selected_sources:
-            duration = float(source.source_duration_seconds if source.source_duration_seconds is not None else source.estimated_duration)
+        for index, (shot, source) in enumerate(selected_sources):
+            source_duration = physical_durations[index]
+            duration = timeline_durations[index]
             start = timeline
             end = start + max(0.0, duration)
             timeline = end
+            adjusted_to_target = target_adjustments[index] != "NONE"
+            if source_duration > duration + 0.001:
+                strategy = (
+                    "TRIM_TO_TARGET" if adjusted_to_target else "TRIM_TO_CREATIVE"
+                )
+            elif source_duration + 0.001 < duration:
+                strategy = (
+                    "HOLD_TO_TARGET" if adjusted_to_target else "HOLD_TO_CREATIVE"
+                )
+            else:
+                strategy = (
+                    "SOURCE_SHORTFALL"
+                    if source_shortfalls[index]
+                    and duration == source_duration
+                    and creative_duration_values[index] > source_duration
+                    else "NONE"
+                )
             items.append(FinalAssemblyItem(
                 id=uuid4().hex,
                 final_assembly_id=assembly.id,
@@ -291,10 +380,12 @@ class FinalAssemblyService:
                 source_path=source.source_path,
                 created_at=_now(),
                 source_sha256=source.source_sha256,
-                source_duration_seconds=duration,
+                source_duration_seconds=source_duration,
                 timeline_start_seconds=round(start, 6),
                 timeline_end_seconds=round(end, 6),
-                trimmed_duration_seconds=duration,
+                trimmed_duration_seconds=min(source_duration, duration),
+                timeline_duration_seconds=duration,
+                duration_strategy=strategy,
             ))
         try:
             return self.repository.freeze_final_assembly_atomic(
@@ -423,6 +514,9 @@ class FinalAssemblyService:
                     continue
                 accepted_review = latest_review if latest_decision in {"APPROVED", "ACCEPTED"} else None
                 selected_review = latest_review
+                source_duration = self._qualified_source_duration(
+                    qc_result, artifact.metadata_json, execution, shot
+                )
                 source = FinalAssemblySource(
                     production_shot_id=shot.id,
                     production_execution_id=execution.id,
@@ -430,9 +524,9 @@ class FinalAssemblyService:
                     qc_result_id=qc_result.id,
                     review_id=selected_review.id if selected_review else None,
                     source_path=artifact.path.replace("\\", "/"),
-                    estimated_duration=self._duration(artifact.metadata_json, execution, shot),
+                    estimated_duration=source_duration,
                     source_sha256=actual_sha,
-                    source_duration_seconds=self._duration(artifact.metadata_json, execution, shot),
+                    source_duration_seconds=source_duration,
                 )
                 candidates.append(
                     ((execution_index, artifact_index, qc_results.index(qc_result)), accepted_review is not None, source)
@@ -580,6 +674,96 @@ class FinalAssemblyService:
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
             return 0.0
         return float(value)
+
+    def _qualified_source_duration(
+        self,
+        qc_result,
+        metadata: Mapping[str, object] | None,
+        execution,
+        shot,
+    ) -> float:
+        # A passing physical-media QC probe is stronger than provider/request
+        # metadata or the creative-duration fallback. Freeze that measured
+        # fact so runtime can independently re-probe the same bytes.
+        for metric in reversed(
+            self.repository.list_production_qc_metrics(qc_result.id)
+        ):
+            status = getattr(metric.status, "value", metric.status)
+            value = metric.value_json.get("duration_seconds")
+            if (
+                metric.metric_name == "video_duration"
+                and status == "PASS"
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and value > 0
+            ):
+                return float(value)
+        return self._duration(metadata, execution, shot)
+
+    @staticmethod
+    def _plan_final_durations(
+        creative_durations: list[float],
+        target_duration: float | None,
+    ) -> tuple[list[float], list[str]]:
+        """Apply bounded trim/hold only when target is already reasonably close.
+
+        Large creative mismatches are left truthful for pre-production
+        rebalance; FinalAssembly must not manufacture a long episode from a
+        tiny plan by holding one frame for minutes.
+        """
+        durations = [round(max(0.0, float(value)), 6) for value in creative_durations]
+        strategies = ["NONE" for _ in durations]
+        if not durations or target_duration is None or target_duration <= 0:
+            return durations, strategies
+        current = sum(durations)
+        difference = round(float(target_duration) - current, 6)
+        tolerance = max(1.0, float(target_duration) * 0.10)
+        if abs(difference) <= 0.001 or abs(difference) > tolerance:
+            return durations, strategies
+        if difference > 0:
+            # A near-target plan may use small intentional holds, distributed
+            # across Shots.  Never turn one final frame into a long synthetic
+            # tail just because the overall target is within ten percent.
+            capacities = [
+                min(0.5, max(0.1, duration * 0.10)) for duration in durations
+            ]
+            amount = difference
+            direction = 1.0
+        else:
+            # Likewise, bounded trimming may close a small gap, but a material
+            # pacing mismatch belongs back in pre-production rebalance.
+            capacities = [
+                min(max(0.0, duration - 0.1), duration * 0.10)
+                for duration in durations
+            ]
+            amount = -difference
+            direction = -1.0
+        total_capacity = sum(capacities)
+        if total_capacity + 0.001 < amount:
+            return [round(max(0.0, float(value)), 6) for value in creative_durations], [
+                "NONE" for _ in creative_durations
+            ]
+        remaining_amount = amount
+        remaining_capacity = total_capacity
+        for index, capacity in enumerate(capacities):
+            if capacity <= 0 or remaining_amount <= 0.000001:
+                remaining_capacity -= capacity
+                continue
+            adjustment = (
+                remaining_amount
+                if remaining_capacity <= capacity + 0.000001
+                else remaining_amount * capacity / remaining_capacity
+            )
+            adjustment = min(capacity, adjustment)
+            durations[index] = round(
+                durations[index] + direction * adjustment, 6
+            )
+            strategies[index] = (
+                "HOLD_TO_TARGET" if direction > 0 else "TRIM_TO_TARGET"
+            )
+            remaining_amount -= adjustment
+            remaining_capacity -= capacity
+        return durations, strategies
 
     @staticmethod
     def _review_decision(review) -> str:

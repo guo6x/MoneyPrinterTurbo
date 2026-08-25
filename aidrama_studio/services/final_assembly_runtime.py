@@ -21,7 +21,11 @@ from aidrama_studio.services.adapters.final_assembly_runtime import (
 )
 from aidrama_studio.storage.repositories import ProjectRepository
 
-from .final_assembly import FinalAssemblyService, FinalAssemblyServiceError
+from .final_assembly import (
+    FinalAssemblyService,
+    FinalAssemblyServiceError,
+    _output_profile_hash,
+)
 
 
 def _now() -> str:
@@ -111,7 +115,8 @@ class FinalAssemblyRuntimeService:
                     raise FinalAssemblyRuntimeServiceError(
                         "frozen FinalAssembly source SHA256 校验失败"
                     )
-            profile = self.repository.get_output_profile(self._assembly(project_id, assembly_id).output_profile_id) if self._assembly(project_id, assembly_id).output_profile_id else None
+            assembly = self._assembly(project_id, assembly_id)
+            profile = self._frozen_output_profile(project_id, assembly)
             profile_data = profile.model_dump(mode="json") if profile is not None else None
             request = FinalAssemblyRenderRequest.from_manifest(manifest, source_paths, output_profile=profile_data)
             # Validate all frozen paths before changing assembly state to
@@ -120,7 +125,15 @@ class FinalAssemblyRuntimeService:
             if validation is False:
                 raise FinalAssemblyRuntimeError("frozen source validation failed")
             source_metadata = [adapter.probe_output(path) for path in source_paths]
-            expected_duration = sum(self._duration(meta) for meta in source_metadata)
+            self._validate_frozen_source_metadata(manifest.items, source_metadata)
+            expected_duration = sum(
+                float(
+                    item.timeline_duration_seconds
+                    if item.timeline_duration_seconds is not None
+                    else self._duration(metadata)
+                )
+                for item, metadata in zip(manifest.items, source_metadata)
+            )
             source_trace = self._source_trace(
                 manifest,
                 source_metadata=source_metadata,
@@ -149,7 +162,9 @@ class FinalAssemblyRuntimeService:
             )
             adapter.render(request, temporary_path)
             probed = dict(adapter.probe_output(temporary_path))
-            self._validate_rendered_output(probed, expected_duration)
+            self._validate_rendered_output(
+                probed, expected_duration, output_profile=profile_data
+            )
             actual_duration = self._duration(probed)
             source_trace = self._align_source_trace(
                 source_trace,
@@ -161,6 +176,69 @@ class FinalAssemblyRuntimeService:
             probed["render_attempt_id"] = attempt_id
             probed["expected_duration_seconds"] = expected_duration
             probed["source_items"] = source_trace
+            target_duration = (
+                float(profile.target_episode_duration_seconds)
+                if profile is not None
+                else None
+            )
+            target_tolerance = (
+                max(0.35, target_duration * 0.01)
+                if target_duration is not None
+                else None
+            )
+            probed["target_episode_duration_seconds"] = target_duration
+            probed["duration_control"] = {
+                "strategy": "DETERMINISTIC_TRIM_HOLD_NO_SPEED_CHANGE",
+                "planned_timeline_duration_seconds": expected_duration,
+                "actual_duration_seconds": actual_duration,
+                "target_duration_seconds": target_duration,
+                "target_met": (
+                    None
+                    if target_duration is None
+                    else bool(
+                        target_tolerance is not None
+                        and abs(actual_duration - target_duration)
+                        <= target_tolerance
+                    )
+                ),
+                "truth": (
+                    "NO_TARGET_PROFILE"
+                    if target_duration is None
+                    else (
+                        "TARGET_MET"
+                        if target_tolerance is not None
+                        and abs(actual_duration - target_duration)
+                        <= target_tolerance
+                        else "ACTUAL_DIFFERS_FROM_TARGET"
+                    )
+                ),
+            }
+            source_resolutions = [
+                str(item.get("resolution") or "UNKNOWN")
+                for item in source_metadata
+            ]
+            probed["native_source_resolutions"] = source_resolutions
+            probed["native_source_fps"] = [
+                item.get("fps") for item in source_metadata
+            ]
+            probed["requested_delivery_resolution"] = (
+                f"{profile.delivery_width}x{profile.delivery_height}"
+                if profile is not None
+                else None
+            )
+            probed["requested_delivery_fps"] = (
+                float(profile.target_fps) if profile is not None else None
+            )
+            probed["delivery_resolution"] = str(
+                probed.get("resolution") or "UNKNOWN"
+            )
+            probed["delivery_fps"] = probed.get("fps")
+            probed["delivery_strategy"] = self._delivery_strategy(
+                source_metadata, profile
+            )
+            probed["source_delivery_transforms"] = self._source_delivery_transforms(
+                source_metadata, profile
+            )
             self._atomic_finalize(temporary_path, output_path, project_id)
             temporary_path = None
             finished_at = _now()
@@ -303,6 +381,25 @@ class FinalAssemblyRuntimeService:
         except FinalAssemblyServiceError as exc:
             raise FinalAssemblyRuntimeServiceError(str(exc)) from exc
 
+    def _frozen_output_profile(self, project_id: str, assembly):
+        if assembly.output_profile_id is None:
+            if assembly.output_profile_hash is not None:
+                raise FinalAssemblyRuntimeServiceError(
+                    "FinalAssembly OutputProfile identity 不完整"
+                )
+            return None
+        profile = self.repository.get_output_profile(assembly.output_profile_id)
+        if profile is None or profile.project_id != project_id:
+            raise FinalAssemblyRuntimeServiceError(
+                "FinalAssembly 冻结的 OutputProfile 不存在或项目不匹配"
+            )
+        actual_hash = _output_profile_hash(profile)
+        if assembly.output_profile_hash and actual_hash != assembly.output_profile_hash:
+            raise FinalAssemblyRuntimeServiceError(
+                "FinalAssembly OutputProfile hash 与冻结身份不匹配"
+            )
+        return profile
+
     def _project_root(self, project_id: str) -> Path:
         self._assembly_project(project_id)
         if not self._safe_component(project_id):
@@ -364,7 +461,12 @@ class FinalAssemblyRuntimeService:
         metadata_items = source_metadata or [{} for _ in manifest.items]
         hashes = source_hashes or tuple(item.source_sha256 or "" for item in manifest.items)
         for item, metadata, source_sha256 in zip(manifest.items, metadata_items, hashes):
-            duration = FinalAssemblyRuntimeService._duration(metadata)
+            source_duration = FinalAssemblyRuntimeService._duration(metadata)
+            duration = float(
+                item.timeline_duration_seconds
+                if item.timeline_duration_seconds is not None
+                else source_duration
+            )
             start = timeline
             end = start + duration
             timeline = end
@@ -377,11 +479,70 @@ class FinalAssemblyRuntimeService:
                 "review_id": item.review_id,
                 "source_relative_path": item.source_path.replace("\\", "/"),
                 "source_sha256": source_sha256 or None,
-                "source_duration_seconds": duration,
+                "source_duration_seconds": source_duration,
+                "planned_timeline_duration_seconds": duration,
+                "actual_timeline_duration_seconds": duration,
+                "timeline_duration_seconds": duration,
+                "trimmed_duration_seconds": item.trimmed_duration_seconds,
+                "duration_strategy": item.duration_strategy or "NONE",
+                "planned_timeline_start_seconds": round(start, 6),
+                "planned_timeline_end_seconds": round(end, 6),
+                "actual_timeline_start_seconds": round(start, 6),
+                "actual_timeline_end_seconds": round(end, 6),
                 "timeline_start_seconds": round(start, 6),
                 "timeline_end_seconds": round(end, 6),
             })
         return trace
+
+    @staticmethod
+    def _delivery_strategy(source_metadata, profile) -> str:
+        if profile is None:
+            return "NATIVE_OR_LEGACY"
+        delivery_width = int(profile.delivery_width)
+        delivery_height = int(profile.delivery_height)
+        transforms = []
+        for item in source_metadata:
+            width = item.get("width")
+            height = item.get("height")
+            if isinstance(width, int) and isinstance(height, int):
+                if width < delivery_width or height < delivery_height:
+                    transforms.append("UPSCALE")
+                elif width > delivery_width or height > delivery_height:
+                    transforms.append("DOWNSCALE")
+                else:
+                    transforms.append("NATIVE")
+        if "UPSCALE" in transforms:
+            return "DETERMINISTIC_UPSCALE"
+        if "DOWNSCALE" in transforms:
+            return "DETERMINISTIC_SCALE"
+        return "NATIVE_OR_NORMALIZE"
+
+    @staticmethod
+    def _source_delivery_transforms(source_metadata, profile) -> list[dict[str, object]]:
+        result: list[dict[str, object]] = []
+        for item in source_metadata:
+            width = item.get("width")
+            height = item.get("height")
+            if profile is None or not isinstance(width, int) or not isinstance(height, int):
+                transform = "UNKNOWN_OR_LEGACY"
+            elif width < int(profile.delivery_width) or height < int(profile.delivery_height):
+                transform = "DETERMINISTIC_UPSCALE"
+            elif width > int(profile.delivery_width) or height > int(profile.delivery_height):
+                transform = "DETERMINISTIC_SCALE"
+            else:
+                transform = "NATIVE_OR_NORMALIZE"
+            result.append(
+                {
+                    "native_resolution": (
+                        f"{width}x{height}"
+                        if isinstance(width, int) and isinstance(height, int)
+                        else "UNKNOWN"
+                    ),
+                    "native_fps": item.get("fps"),
+                    "transform": transform,
+                }
+            )
+        return result
 
     @staticmethod
     def _align_source_trace(
@@ -405,14 +566,41 @@ class FinalAssemblyRuntimeService:
         aligned: list[dict[str, object]] = []
         for index, item in enumerate(trace):
             value = dict(item)
-            start = float(value.get("timeline_start_seconds", 0) or 0)
-            end = float(value.get("timeline_end_seconds", 0) or 0)
-            value["timeline_start_seconds"] = round(start * scale, 6)
-            value["timeline_end_seconds"] = (
+            start = float(
+                value.get(
+                    "planned_timeline_start_seconds",
+                    value.get("timeline_start_seconds", 0),
+                )
+                or 0
+            )
+            end = float(
+                value.get(
+                    "planned_timeline_end_seconds",
+                    value.get("timeline_end_seconds", 0),
+                )
+                or 0
+            )
+            actual_start = round(start * scale, 6)
+            actual_end = (
                 round(actual_duration, 6)
                 if index == len(trace) - 1
                 else round(end * scale, 6)
             )
+            value.setdefault("planned_timeline_start_seconds", round(start, 6))
+            value.setdefault("planned_timeline_end_seconds", round(end, 6))
+            value.setdefault(
+                "planned_timeline_duration_seconds", round(end - start, 6)
+            )
+            value["actual_timeline_start_seconds"] = actual_start
+            value["actual_timeline_end_seconds"] = actual_end
+            value["actual_timeline_duration_seconds"] = round(
+                actual_end - actual_start, 6
+            )
+            value["timeline_start_seconds"] = actual_start
+            value["timeline_end_seconds"] = actual_end
+            value["timeline_duration_seconds"] = value[
+                "actual_timeline_duration_seconds"
+            ]
             aligned.append(value)
         return aligned
 
@@ -422,7 +610,12 @@ class FinalAssemblyRuntimeService:
         return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else 0.0
 
     @staticmethod
-    def _validate_rendered_output(metadata: dict[str, object], expected_duration: float) -> None:
+    def _validate_rendered_output(
+        metadata: dict[str, object],
+        expected_duration: float,
+        *,
+        output_profile: dict[str, object] | None = None,
+    ) -> None:
         if not metadata.get("video_stream"):
             raise FinalAssemblyRuntimeServiceError("final output 缺少 video stream")
         if not isinstance(metadata.get("size_bytes"), int) or int(metadata["size_bytes"]) <= 0:
@@ -437,10 +630,47 @@ class FinalAssemblyRuntimeService:
         actual = FinalAssemblyRuntimeService._duration(metadata)
         if actual <= 0:
             raise FinalAssemblyRuntimeServiceError("final output duration 无效")
-        if expected_duration > 0 and abs(actual - expected_duration) > max(0.35, expected_duration * 0.12):
+        profile = dict(output_profile or {})
+        expected_fps = float(profile.get("target_fps") or profile.get("fps") or 30)
+        duration_tolerance = max(0.12, 2.0 / expected_fps)
+        if expected_duration > 0 and abs(actual - expected_duration) > duration_tolerance:
             raise FinalAssemblyRuntimeServiceError(
                 f"final output duration 不匹配（expected={expected_duration:.3f}, actual={actual:.3f}）"
             )
+        if profile:
+            expected_width = int(profile.get("delivery_width") or 0)
+            expected_height = int(profile.get("delivery_height") or 0)
+            if (
+                int(metadata.get("width") or 0) != expected_width
+                or int(metadata.get("height") or 0) != expected_height
+            ):
+                raise FinalAssemblyRuntimeServiceError(
+                    "final output resolution 与冻结 OutputProfile 不匹配"
+                )
+            actual_fps = metadata.get("fps")
+            if (
+                not isinstance(actual_fps, (int, float))
+                or isinstance(actual_fps, bool)
+                or abs(float(actual_fps) - expected_fps)
+                > max(0.2, expected_fps * 0.01)
+            ):
+                raise FinalAssemblyRuntimeServiceError(
+                    "final output fps 与冻结 OutputProfile 不匹配"
+                    f"（expected={expected_fps:g}, actual={actual_fps}）"
+                )
+
+    @staticmethod
+    def _validate_frozen_source_metadata(items, metadata_items) -> None:
+        for item, metadata in zip(items, metadata_items):
+            frozen = item.source_duration_seconds
+            actual = FinalAssemblyRuntimeService._duration(metadata)
+            if frozen is None or frozen <= 0:
+                continue
+            tolerance = max(0.12, float(frozen) * 0.05)
+            if actual <= 0 or abs(actual - float(frozen)) > tolerance:
+                raise FinalAssemblyRuntimeServiceError(
+                    "physical source duration 与冻结 artifact metadata 不匹配"
+                )
 
     @staticmethod
     def _sha256(path: Path) -> str:

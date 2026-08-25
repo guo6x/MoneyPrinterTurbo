@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from aidrama_studio.storage.migrations import MIGRATIONS, apply_migrations, _migration_015_reference_asset_repair_completion
 
 
@@ -140,7 +142,7 @@ def test_migration_029_adds_candidate_and_current_shot_source_truth() -> None:
         [(version, "2026-08-25") for version, _ in prior],
     )
 
-    assert apply_migrations(connection) == 1
+    assert apply_migrations(connection) == len(MIGRATIONS) - len(prior)
     tables = _tables(connection)
     assert {
         "reference_image_candidates",
@@ -160,7 +162,87 @@ def test_migration_029_adds_candidate_and_current_shot_source_truth() -> None:
         "creative_rejection_review_id",
     } <= execution_columns
     assert "source_decision_id" in final_item_columns
+    assert [
+        row[0]
+        for row in connection.execute(
+            "SELECT version FROM schema_migrations WHERE version>=29 ORDER BY version"
+        )
+    ] == [version for version, _ in MIGRATIONS if version >= 29]
     assert apply_migrations(connection) == 0
+
+
+def test_migration_030_adds_final_duration_control_in_order_and_is_idempotent() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    assert MIGRATIONS[-1][0] == 30
+    assert [version for version, _ in MIGRATIONS] == list(range(1, 31))
+    prior = [(version, migration) for version, migration in MIGRATIONS if version < 30]
+    for _, migration in prior:
+        migration(connection)
+    connection.execute(
+        "INSERT INTO final_assemblies("
+        "id,project_id,production_job_id,status,created_at,updated_at) "
+        "VALUES ('assembly-legacy','project-legacy','job-legacy','READY','now','now')"
+    )
+    connection.execute(
+        "INSERT INTO final_assembly_items("
+        "id,final_assembly_id,order_index,production_shot_id,"
+        "production_execution_id,production_artifact_id,qc_result_id,review_id,"
+        "source_path,created_at,source_duration_seconds) "
+        "VALUES ('item-legacy','assembly-legacy',1,'shot-legacy','execution-legacy',"
+        "'artifact-legacy','qc-legacy',NULL,'production/source.mp4','now',2.0)"
+    )
+    connection.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    connection.executemany(
+        "INSERT INTO schema_migrations VALUES (?,?)",
+        [(version, "2026-08-25") for version, _ in prior],
+    )
+    before = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(final_assembly_items)")
+    }
+    assert "timeline_duration_seconds" not in before
+    assert "duration_strategy" not in before
+
+    assert apply_migrations(connection) == len(MIGRATIONS) - len(prior)
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(final_assembly_items)")
+    }
+    assert {"timeline_duration_seconds", "duration_strategy"} <= columns
+    legacy = connection.execute(
+        "SELECT timeline_duration_seconds,duration_strategy "
+        "FROM final_assembly_items WHERE id='item-legacy'"
+    ).fetchone()
+    assert legacy["timeline_duration_seconds"] is None
+    assert legacy["duration_strategy"] is None
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "UPDATE final_assembly_items SET timeline_duration_seconds=-1 "
+            "WHERE id='item-legacy'"
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "UPDATE final_assembly_items SET duration_strategy='INVALID' "
+            "WHERE id='item-legacy'"
+        )
+    connection.execute(
+        "UPDATE final_assembly_items SET timeline_duration_seconds=2.0,"
+        "duration_strategy='SOURCE_SHORTFALL' WHERE id='item-legacy'"
+    )
+    assert [
+        row[0]
+        for row in connection.execute(
+            "SELECT version FROM schema_migrations WHERE version>=30 ORDER BY version"
+        )
+    ] == [version for version, _ in MIGRATIONS if version >= 30]
+    assert apply_migrations(connection) == 0
+    assert {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(final_assembly_items)")
+    } == columns
 
 
 def test_upgrade_from_023_adds_append_only_vision_provenance_and_is_idempotent() -> None:

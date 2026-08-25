@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import re
 import subprocess
-import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -76,6 +77,10 @@ class MPTFinalAssemblyAdapter(FinalAssemblyRuntimeAdapter):
     _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
     _VIDEO_RE = re.compile(r"Stream #\S+.*?Video:\s*([^,\s]+).*?(\d{2,5})x(\d{2,5})")
     _AUDIO_RE = re.compile(r"Stream #\S+.*?Audio:", re.IGNORECASE)
+    _FPS_RE = re.compile(
+        r"(?:,|\s)(\d+(?:\.\d+)?)\s+(?:fps|tbr)(?:,|\s)",
+        re.IGNORECASE,
+    )
 
     def __init__(self, *, project_root: Path | None = None, ffmpeg_binary: str | None = None, threads: int = 2):
         self.project_root = Path(project_root).resolve() if project_root is not None else None
@@ -123,10 +128,22 @@ class MPTFinalAssemblyAdapter(FinalAssemblyRuntimeAdapter):
         if not profile:
             concat_video_clips_with_ffmpeg([str(path) for path in request.source_paths], str(output_path), self.threads, str(output_path.parent))
             return
-        temporary = output_path.with_name(f".{output_path.stem}.concat.mp4")
-        temporary.unlink(missing_ok=True)
+        self._render_profile_timeline(request, output_path, profile)
+
+    def _render_profile_timeline(
+        self,
+        request: FinalAssemblyRenderRequest,
+        output_path: Path,
+        profile: Mapping[str, object],
+    ) -> None:
+        """Normalize every frozen Shot to its exact deterministic timeline slot."""
+        temporary_root = Path(
+            tempfile.mkdtemp(
+                prefix=f".timeline-{output_path.stem}-",
+                dir=output_path.parent,
+            )
+        )
         try:
-            concat_video_clips_with_ffmpeg([str(path) for path in request.source_paths], str(temporary), self.threads, str(output_path.parent))
             binary = self.ffmpeg_binary or self._resolve_ffmpeg()
             if profile.get("delivery_width") and profile.get("delivery_height"):
                 resolution = (
@@ -147,14 +164,212 @@ class MPTFinalAssemblyAdapter(FinalAssemblyRuntimeAdapter):
                 or "h264"
             ).lower()
             video_codec = "libx265" if "265" in codec or "hevc" in codec else "libx264"
-            command = [binary, "-hide_banner", "-loglevel", "error", "-y", "-i", str(temporary), "-map", "0:v:0", "-map", "0:a?", "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps:g}", "-c:v", video_codec, "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", str(int(profile.get("target_audio_sample_rate") or profile.get("audio_sample_rate") or 48000)), "-ac", str(int(profile.get("target_audio_channels") or profile.get("audio_channels") or 2)), str(output_path)]
-            result = subprocess.run(command, capture_output=True, text=True, timeout=900, check=False)
-            if result.returncode != 0 or not output_path.is_file() or output_path.stat().st_size <= 0:
+            sample_rate = int(
+                profile.get("target_audio_sample_rate")
+                or profile.get("audio_sample_rate")
+                or 48000
+            )
+            channels = int(
+                profile.get("target_audio_channels")
+                or profile.get("audio_channels")
+                or 2
+            )
+            normalized: list[Path] = []
+            for index, (item, source) in enumerate(
+                zip(request.items, request.source_paths), start=1
+            ):
+                metadata = self.probe_output(source)
+                source_duration = float(metadata.get("duration_seconds") or 0)
+                target_duration = float(
+                    item.timeline_duration_seconds
+                    if item.timeline_duration_seconds is not None
+                    else source_duration
+                )
+                if source_duration <= 0 or target_duration <= 0:
+                    raise FinalAssemblyRuntimeError(
+                        "Final Assembly source/timeline duration 无效"
+                    )
+                visible_duration = min(source_duration, target_duration)
+                hold_duration = max(0.0, target_duration - visible_duration)
+                video_filter = (
+                    f"trim=duration={visible_duration:.6f},setpts=PTS-STARTPTS"
+                )
+                if hold_duration > 0.001:
+                    video_filter += (
+                        f",tpad=stop_mode=clone:stop_duration={hold_duration:.6f}"
+                    )
+                video_filter += (
+                    f",trim=duration={target_duration:.6f},"
+                    f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps:g}"
+                )
+                target = temporary_root / f"shot-{index:05d}.mp4"
+                command = [
+                    binary,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(source),
+                ]
+                if metadata.get("audio_stream"):
+                    command += ["-map", "0:v:0", "-map", "0:a:0"]
+                    audio_filter = (
+                        f"apad,atrim=duration={target_duration:.6f},"
+                        "asetpts=PTS-STARTPTS"
+                    )
+                else:
+                    layout = "mono" if channels == 1 else "stereo"
+                    command += [
+                        "-f",
+                        "lavfi",
+                        "-t",
+                        f"{target_duration:.6f}",
+                        "-i",
+                        f"anullsrc=channel_layout={layout}:sample_rate={sample_rate}",
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "1:a:0",
+                    ]
+                    audio_filter = f"atrim=duration={target_duration:.6f},asetpts=PTS-STARTPTS"
+                command += [
+                    "-vf",
+                    video_filter,
+                    "-af",
+                    audio_filter,
+                    "-t",
+                    f"{target_duration:.6f}",
+                    "-c:v",
+                    video_codec,
+                    "-preset",
+                    "veryfast",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-ar",
+                    str(sample_rate),
+                    "-ac",
+                    str(channels),
+                    "-movflags",
+                    "+faststart",
+                    str(target),
+                ]
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=900,
+                    check=False,
+                )
+                if (
+                    completed.returncode != 0
+                    or not target.is_file()
+                    or target.stat().st_size <= 0
+                ):
+                    raise FinalAssemblyRuntimeError(
+                        "Final Assembly per-shot duration normalization failed"
+                    )
+                normalized.append(target)
+            concat_list = temporary_root / "concat.txt"
+            concat_list.write_text(
+                "\n".join(
+                    f"file '{path.name}'"
+                    for path in normalized
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            joined = temporary_root / "joined.mp4"
+            command = [
+                binary,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "1",
+                "-i",
+                str(concat_list),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(joined),
+            ]
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=900, check=False
+            )
+            if result.returncode != 0 or not joined.is_file() or joined.stat().st_size <= 0:
                 raise FinalAssemblyRuntimeError("Final Assembly OutputProfile normalization failed")
+            # Concat stream-copy can retain segment boundary time bases that
+            # make the container's average FPS differ from the frozen delivery
+            # FPS.  One deterministic final encode normalizes the actual
+            # delivered clock; it never changes playback speed.
+            timeline_duration = float(
+                request.expected_duration
+                or sum(
+                    float(item.timeline_duration_seconds or 0)
+                    for item in request.items
+                )
+            )
+            final_command = [
+                binary,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(joined),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0",
+                "-vf",
+                f"fps={fps:g}",
+                "-af",
+                f"apad,atrim=duration={timeline_duration:.6f},asetpts=PTS-STARTPTS",
+                "-t",
+                f"{timeline_duration:.6f}",
+                "-c:v",
+                video_codec,
+                "-preset",
+                "veryfast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-ar",
+                str(sample_rate),
+                "-ac",
+                str(channels),
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+            final_result = subprocess.run(
+                final_command,
+                capture_output=True,
+                text=True,
+                timeout=900,
+                check=False,
+            )
+            if (
+                final_result.returncode != 0
+                or not output_path.is_file()
+                or output_path.stat().st_size <= 0
+            ):
+                raise FinalAssemblyRuntimeError(
+                    "Final Assembly delivery clock normalization failed"
+                )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise FinalAssemblyRuntimeError("Final Assembly media normalization unavailable") from exc
         finally:
-            temporary.unlink(missing_ok=True)
+            shutil.rmtree(temporary_root, ignore_errors=True)
 
     def probe_output(self, output_path: Path) -> dict[str, object]:
         path = Path(output_path)
@@ -180,12 +395,14 @@ class MPTFinalAssemblyAdapter(FinalAssemblyRuntimeAdapter):
         hours, minutes, seconds = duration_match.groups()
         duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
         codec, width, height = video_match.groups()
+        fps_match = self._FPS_RE.search(text)
         return {
             "duration_seconds": duration,
             "width": int(width),
             "height": int(height),
             "resolution": f"{width}x{height}",
             "codec": codec,
+            "fps": float(fps_match.group(1)) if fps_match is not None else None,
             "video_stream": True,
             "audio_stream": bool(self._AUDIO_RE.search(text)),
             "size_bytes": path.stat().st_size,

@@ -9,7 +9,7 @@ assembly run.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -66,6 +66,15 @@ class FinalAssemblyItem(BaseModel):
     timeline_start_seconds: float | None = Field(default=None, ge=0)
     timeline_end_seconds: float | None = Field(default=None, ge=0)
     trimmed_duration_seconds: float | None = Field(default=None, ge=0)
+    timeline_duration_seconds: float | None = Field(default=None, ge=0)
+    duration_strategy: Literal[
+        "NONE",
+        "SOURCE_SHORTFALL",
+        "TRIM_TO_CREATIVE",
+        "HOLD_TO_CREATIVE",
+        "TRIM_TO_TARGET",
+        "HOLD_TO_TARGET",
+    ] | None = None
     created_at: str = Field(min_length=1, max_length=80)
 
 

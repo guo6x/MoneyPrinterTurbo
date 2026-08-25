@@ -481,7 +481,14 @@ def test_real_post_subtitle_and_bgm_smoke_is_pinned_and_probe_valid(context):
         import imageio_ffmpeg
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     job, shots = _shots(repository, project, 1)
-    _execution, artifact, _qc, _review = _source(repository, project, job, shots[0], suffix="post-smoke")
+    _execution, artifact, _qc, _review = _source(
+        repository,
+        project,
+        job,
+        shots[0],
+        suffix="post-smoke",
+        duration_seconds=1.2,
+    )
     source = repository.paths.projects / project.id / artifact.path
     source.parent.mkdir(parents=True, exist_ok=True)
     generated = subprocess.run(

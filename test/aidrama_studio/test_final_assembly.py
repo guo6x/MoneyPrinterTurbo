@@ -20,7 +20,11 @@ from aidrama_studio.domain import (
     ProductionShot,
     ProductionShotStatus,
 )
-from aidrama_studio.services import FinalAssemblyService, FinalAssemblyServiceError
+from aidrama_studio.services import (
+    FinalAssemblyService,
+    FinalAssemblyServiceError,
+    OutputProfileService,
+)
 from aidrama_studio.storage.repositories import ProjectRepository
 from test.aidrama_studio.test_production_execution import _ready_job, context as _execution_context
 
@@ -49,7 +53,8 @@ def _shots(repository: ProjectRepository, project, count: int = 3):
 
 def _source(repository, project, job, shot, *, suffix: str, execution_status=ProductionExecutionStatus.SUCCEEDED,
             qc_status=ProductionQCStatus.QC_PASS, create_file: bool = True, review: str | None = None,
-            created_at: str | None = None, artifact_type: str = "video", path: str | None = None):
+            created_at: str | None = None, artifact_type: str = "video", path: str | None = None,
+            duration_seconds: float = 2.0):
     execution_id = uuid4().hex
     execution = ProductionExecution(
         id=execution_id,
@@ -80,7 +85,7 @@ def _source(repository, project, job, shot, *, suffix: str, execution_status=Pro
             path=relative_path,
             metadata_json={
                 "mime_type": "video/mp4",
-                "duration_seconds": 2,
+                "duration_seconds": duration_seconds,
                 "resolution": "1280x720",
                 "codec": "h264",
                 "audio_stream": True,
@@ -135,6 +140,58 @@ def test_freezes_ordered_three_shot_manifest_with_exact_provenance(context):
     assert [item.timeline_start_seconds for item in manifest.items] == [0, 2, 4]
     assert [item.timeline_end_seconds for item in manifest.items] == [2, 4, 6]
     assert all(item.source_sha256 == hashlib.sha256(b"video-bytes").hexdigest() for item in manifest.items)
+
+
+def test_final_duration_planner_only_applies_bounded_distributed_adjustments():
+    durations, strategies = FinalAssemblyService._plan_final_durations(
+        [5.5] * 20, 120.0
+    )
+    assert sum(durations) == pytest.approx(120.0)
+    assert max(duration - 5.5 for duration in durations) <= 0.5
+    assert set(strategies) == {"HOLD_TO_TARGET"}
+
+    original, no_adjustment = FinalAssemblyService._plan_final_durations(
+        [2.0, 2.0], 5.0
+    )
+    assert original == [2.0, 2.0]
+    assert no_adjustment == ["NONE", "NONE"]
+
+    material_mismatch, no_fabrication = FinalAssemblyService._plan_final_durations(
+        [2.0, 2.0], 120.0
+    )
+    assert material_mismatch == [2.0, 2.0]
+    assert no_fabrication == ["NONE", "NONE"]
+
+
+def test_draft_assembly_freeze_uses_its_pinned_output_profile(context):
+    repository, project = context
+    pinned = OutputProfileService(repository).create(
+        project.id,
+        aspect_ratio=project.aspect_ratio.value,
+        target_episode_duration_seconds=2.2,
+        delivery_resolution_label="1080p",
+        target_fps=30,
+    )
+    job, shots = _shots(repository, project, 1)
+    _source(repository, project, job, shots[0], suffix="pinned")
+    service = FinalAssemblyService(repository)
+    assembly = service.create_assembly(project.id, job.id)
+    assert assembly.output_profile_id == pinned.id
+
+    replacement = OutputProfileService(repository).create(
+        project.id,
+        aspect_ratio=project.aspect_ratio.value,
+        target_episode_duration_seconds=2.0,
+        delivery_resolution_label="720p",
+        target_fps=24,
+    )
+    assert replacement.id != pinned.id
+
+    service.freeze_manifest(project.id, assembly.id)
+    manifest = service.get_manifest(project.id, assembly.id)
+    assert manifest.items[0].timeline_duration_seconds == 2.2
+    assert manifest.items[0].duration_strategy == "HOLD_TO_TARGET"
+    assert repository.get_final_assembly(assembly.id).output_profile_id == pinned.id
 
 
 def test_tampered_source_hash_blocks_new_manifest(context):

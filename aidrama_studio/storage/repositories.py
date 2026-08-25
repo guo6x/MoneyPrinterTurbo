@@ -2037,6 +2037,12 @@ class ProjectRepository:
             timeline_start_seconds=row["timeline_start_seconds"] if "timeline_start_seconds" in row.keys() else None,
             timeline_end_seconds=row["timeline_end_seconds"] if "timeline_end_seconds" in row.keys() else None,
             trimmed_duration_seconds=row["trimmed_duration_seconds"] if "trimmed_duration_seconds" in row.keys() else None,
+            timeline_duration_seconds=row["timeline_duration_seconds"]
+            if "timeline_duration_seconds" in row.keys()
+            else None,
+            duration_strategy=row["duration_strategy"]
+            if "duration_strategy" in row.keys()
+            else None,
             created_at=row["created_at"],
         )
 
@@ -2114,8 +2120,9 @@ class ProjectRepository:
                     "INSERT INTO final_assembly_items("
                     "id,final_assembly_id,order_index,production_shot_id,production_execution_id,"
                     "production_artifact_id,qc_result_id,review_id,source_decision_id,source_path,source_sha256,source_duration_seconds,"
-                    "timeline_start_seconds,timeline_end_seconds,trimmed_duration_seconds,created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "timeline_start_seconds,timeline_end_seconds,trimmed_duration_seconds,"
+                    "timeline_duration_seconds,duration_strategy,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         item.id,
                         item.final_assembly_id,
@@ -2132,6 +2139,8 @@ class ProjectRepository:
                         item.timeline_start_seconds,
                         item.timeline_end_seconds,
                         item.trimmed_duration_seconds,
+                        item.timeline_duration_seconds,
+                        item.duration_strategy,
                         item.created_at,
                     ),
                 )
@@ -2442,8 +2451,9 @@ class ProjectRepository:
                     id,final_assembly_id,order_index,production_shot_id,
                     production_execution_id,production_artifact_id,qc_result_id,
                     review_id,source_decision_id,source_path,source_sha256,source_duration_seconds,
-                    timeline_start_seconds,timeline_end_seconds,trimmed_duration_seconds,created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    timeline_start_seconds,timeline_end_seconds,trimmed_duration_seconds,
+                    timeline_duration_seconds,duration_strategy,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     item.id,
@@ -2461,6 +2471,8 @@ class ProjectRepository:
                     item.timeline_start_seconds,
                     item.timeline_end_seconds,
                     item.trimmed_duration_seconds,
+                    item.timeline_duration_seconds,
+                    item.duration_strategy,
                     item.created_at,
                 ),
             )

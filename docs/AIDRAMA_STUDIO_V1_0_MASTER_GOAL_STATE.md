@@ -408,3 +408,64 @@ The remaining UI/provider work is explicit: the real IMAGE generation request
 still needs the canonical ProviderProfile/disclosure/background gateway, and
 the Production page still needs to expose the new targeted creative-regenerate
 and source-selection actions. No live request is claimed by this checkpoint.
+
+## Duration/editability addendum — final duration and delivery checkpoint
+
+Migration 030 extends the existing immutable FinalAssembly item rather than
+creating another timeline system. It stores physical source duration,
+trimmed/visible duration, final timeline duration and a constrained duration
+strategy separately. Upgrade from migration 029 preserves existing rows with
+nullable new fields; exact migration ordering, CHECK constraints and repeated
+initialization are covered.
+
+- FinalAssembly reads only the OutputProfile identity/hash pinned on the
+  assembly. Changing the project default after a DRAFT assembly is created
+  cannot change that assembly's target duration, resolution or FPS.
+- Physical duration prefers the real passing QC probe. Render independently
+  re-probes the frozen bytes and fails closed if duration metadata is stale.
+- Creative duration remains independent from provider/physical duration.
+  Deterministic trim/hold produces a distinct final timeline duration without
+  playback-speed changes. Small target corrections are capacity-bounded and
+  distributed across Shots; a material gap records truthful actual-vs-target
+  instead of manufacturing one long held frame.
+- Render metadata preserves both planned and actual timeline coordinates and
+  durations. The delivered file must probe within frame-scale duration
+  tolerance and must exactly match the frozen delivery width/height and FPS;
+  requested values are never copied into actual-output fields without probe
+  validation.
+- Every source records native resolution/FPS plus its delivery transform.
+  Mixed-resolution input reports an upscale if any source requires one.
+- FFmpeg uses argument arrays, a unique controlled temporary directory and a
+  safe relative concat manifest. Per-Shot normalization is followed by one
+  deterministic delivery-clock encode so segment time bases cannot silently
+  change final FPS.
+- A real local acceptance renders a 121-second physical source against an
+  approved 120-second creative plan and frozen 120-second/1080p/30fps
+  OutputProfile. The final file probes at approximately 120 seconds,
+  1920x1080 and 30fps.
+- A separate real HeavyJob acceptance starts from physical 1920x1080 media,
+  requests 3840x2160 delivery, returns immediately as QUEUED, is executed by
+  the durable runner, and probes a real 3840x2160/30fps result whose provenance
+  is `DETERMINISTIC_UPSCALE`, never native 4K or AI super-resolution.
+- Focused migration/manifest/runtime/Post/non-live acceptance collects `41`
+  tests; the complete AIDrama suite passes with `374 passed, 11 warnings`.
+  Python compile and `git diff --check` pass. No dependency and no live/paid
+  Provider request is used.
+
+Checkpoint acceptance:
+
+- `FINAL_DURATION_CONTROL=PASS`
+- `CREATIVE_PROVIDER_DURATION_SEPARATION=PASS`
+- `NATIVE_DELIVERY_RESOLUTION_TRUTH=PASS`
+- `DELIVERY_UPSCALE=PASS`
+- `NATIVE_DELIVERY_FPS_TRUTH=PASS`
+- `DURATION_OUTPUT_E2E=PASS`
+- `FOUR_K_DELIVERY_E2E=PASS`
+- `FOUR_K_RENDER_NONBLOCKING=PASS`
+
+Remaining addendum engineering work includes Provider `CONTENT_REJECTED`
+classification, canonical IMAGE/VISION/TTS provider-profile enforcement,
+first-transmission LLM/image disclosure, Production UI source/regeneration
+controls, dependency-aware outdated propagation, and human-editability E2E.
+Browser, full-repository, live, desktop and installer release gates remain
+pending or externally blocked as recorded above.
