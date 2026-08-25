@@ -24,6 +24,16 @@ class ProductionReviewDecision(str, Enum):
     REJECTED = "REJECTED"
 
 
+class ProductionShotSourceDecisionType(str, Enum):
+    SELECTED = "SELECTED"
+    RELEASED = "RELEASED"
+
+
+class ProductionShotSourceSelectionKind(str, Enum):
+    FINAL_ACCEPTED = "FINAL_ACCEPTED"
+    PREVIEW_PROMOTED = "PREVIEW_PROMOTED"
+
+
 class ProductionQCResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -64,5 +74,32 @@ class ProductionReview(BaseModel):
     qc_result_id: str = Field(min_length=1, max_length=64)
     decision: ProductionReviewDecision = ProductionReviewDecision.PENDING
     reviewer: str = Field(default="system", max_length=160)
+    notes: str = Field(default="", max_length=4000)
+    created_at: str = Field(min_length=1, max_length=80)
+
+
+class ProductionShotSourceDecision(BaseModel):
+    """Append-only human decision over one technically qualified shot source."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=64)
+    project_id: str = Field(min_length=1, max_length=64)
+    production_job_id: str = Field(min_length=1, max_length=64)
+    production_shot_id: str = Field(min_length=1, max_length=64)
+    sequence_number: int = Field(ge=1)
+    decision_type: ProductionShotSourceDecisionType
+    selection_kind: ProductionShotSourceSelectionKind = (
+        ProductionShotSourceSelectionKind.FINAL_ACCEPTED
+    )
+    production_execution_id: str = Field(min_length=1, max_length=64)
+    production_artifact_id: str = Field(min_length=1, max_length=64)
+    qc_result_id: str = Field(min_length=1, max_length=64)
+    review_id: str | None = Field(default=None, max_length=64)
+    generation_brief_id: str | None = Field(default=None, max_length=80)
+    generation_brief_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    selected_by: str = Field(default="user", min_length=1, max_length=160)
     notes: str = Field(default="", max_length=4000)
     created_at: str = Field(min_length=1, max_length=80)

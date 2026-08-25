@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 from uuid import uuid4
 
 from aidrama_studio.domain import (
     ReferenceAsset, ReferenceAssetBinding, ReferenceAssetType, ReferenceAssetVersion,
-    ReferenceBindingType, ShotRevisionStatus, StoryRevisionStatus,
+    ReferenceBindingType, ReferenceImageCandidate, ReferenceImageCandidateEvent,
+    ReferenceImageCandidateEventType, ReferenceImageCandidateStatus,
+    ShotRevisionStatus, StoryRevisionStatus,
 )
 from aidrama_studio.storage.repositories import ProjectRepository
+from aidrama_studio.storage.reference_assets import (
+    image_sha256,
+    reference_candidate_blob_path,
+    store_immutable_blob,
+    validate_image_input,
+)
 
 
 def _now() -> str:
@@ -92,6 +102,226 @@ class ReferenceAssetService:
         if asset is None or asset.project_id != project_id: raise ReferenceAssetServiceError("asset 不属于该项目")
         if version is None or version.asset_id != asset_id or version.project_id != project_id: raise ReferenceAssetServiceError("version 不属于该 asset")
         return self.repository.set_current_reference_version(asset_id, version_id, updated_at=_now())
+
+    def record_image_candidate(
+        self,
+        project_id: str,
+        asset_id: str,
+        *,
+        source_story_revision_id: str,
+        provider_id: str,
+        model_id: str,
+        endpoint_profile_id: str,
+        deployment_region: str,
+        prompt: str,
+        content: bytes,
+        filename: str,
+        mime_type: str,
+        request_parameters: dict[str, object] | None = None,
+        parent_candidate_id: str | None = None,
+        actor: str = "system",
+    ) -> ReferenceImageCandidate:
+        """Persist a generated image as a non-canonical DRAFT candidate.
+
+        Recording never creates or locks a ``ReferenceAssetVersion``.  The
+        provider request is represented by a stable, credential-free hash;
+        only an explicit later promotion enters the version lifecycle.
+        """
+        self._require_project(project_id)
+        asset = self.repository.get_reference_asset(asset_id)
+        if asset is None or asset.project_id != project_id:
+            raise ReferenceAssetServiceError("asset 不属于该项目")
+        self._story_revision(project_id, source_story_revision_id)
+        for label, value in (
+            ("provider_id", provider_id),
+            ("model_id", model_id),
+            ("endpoint_profile_id", endpoint_profile_id),
+            ("deployment_region", deployment_region),
+            ("prompt", prompt),
+            ("actor", actor),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ReferenceAssetServiceError(f"{label} 不能为空")
+        safe_name, normalized_mime, suffix = validate_image_input(
+            content, filename, mime_type
+        )
+        candidate_id = uuid4().hex
+        digest = image_sha256(content)
+        target, relative_path = reference_candidate_blob_path(
+            self.repository.paths.projects,
+            project_id,
+            candidate_id,
+            digest,
+            suffix,
+        )
+        request_truth = {
+            "project_id": project_id,
+            "asset_id": asset_id,
+            "source_story_revision_id": source_story_revision_id,
+            "provider_id": provider_id.strip(),
+            "model_id": model_id.strip(),
+            "endpoint_profile_id": endpoint_profile_id.strip(),
+            "deployment_region": deployment_region.strip(),
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "parameters": request_parameters or {},
+        }
+        try:
+            request_json = json.dumps(
+                request_truth, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReferenceAssetServiceError("image request parameters 必须可持久化") from exc
+        now = _now()
+        candidate = ReferenceImageCandidate(
+            id=candidate_id,
+            project_id=project_id,
+            asset_id=asset_id,
+            source_story_revision_id=source_story_revision_id,
+            provider_id=provider_id.strip(),
+            model_id=model_id.strip(),
+            endpoint_profile_id=endpoint_profile_id.strip(),
+            deployment_region=deployment_region.strip(),
+            prompt_text=prompt,
+            prompt_sha256=request_truth["prompt_sha256"],
+            request_sha256=hashlib.sha256(request_json.encode("utf-8")).hexdigest(),
+            filename=safe_name,
+            mime_type=normalized_mime,
+            size_bytes=len(bytes(content)),
+            sha256=digest,
+            storage_path=relative_path,
+            status=ReferenceImageCandidateStatus.DRAFT,
+            parent_candidate_id=parent_candidate_id,
+            created_at=now,
+        )
+        event = ReferenceImageCandidateEvent(
+            id=uuid4().hex,
+            candidate_id=candidate.id,
+            sequence_number=1,
+            event_type=ReferenceImageCandidateEventType.CREATED,
+            actor=actor.strip(),
+            created_at=now,
+        )
+        store_immutable_blob(target, content)
+        return self.repository.create_reference_image_candidate(candidate, event)
+
+    def list_image_candidates(
+        self, project_id: str, asset_id: str
+    ) -> list[ReferenceImageCandidate]:
+        self._require_project(project_id)
+        asset = self.repository.get_reference_asset(asset_id)
+        if asset is None or asset.project_id != project_id:
+            raise ReferenceAssetServiceError("asset 不属于该项目")
+        return self.repository.list_reference_image_candidates(
+            project_id, asset_id=asset_id
+        )
+
+    def get_image_candidate(
+        self, project_id: str, candidate_id: str
+    ) -> ReferenceImageCandidate:
+        self._require_project(project_id)
+        candidate = self.repository.get_reference_image_candidate(candidate_id)
+        if candidate is None or candidate.project_id != project_id:
+            raise ReferenceAssetServiceError("image candidate 不属于该项目")
+        return candidate
+
+    def reject_image_candidate(
+        self,
+        project_id: str,
+        candidate_id: str,
+        *,
+        actor: str = "user",
+        notes: str = "",
+    ) -> ReferenceImageCandidate:
+        candidate = self.get_image_candidate(project_id, candidate_id)
+        events = self.repository.list_reference_image_candidate_events(candidate.id)
+        event = ReferenceImageCandidateEvent(
+            id=uuid4().hex,
+            candidate_id=candidate.id,
+            sequence_number=len(events) + 1,
+            event_type=ReferenceImageCandidateEventType.REJECTED,
+            actor=actor,
+            notes=notes,
+            created_at=_now(),
+        )
+        try:
+            return self.repository.reject_reference_image_candidate(
+                candidate.id, event
+            )
+        except (KeyError, ValueError) as exc:
+            raise ReferenceAssetServiceError(str(exc)) from exc
+
+    def promote_image_candidate(
+        self,
+        project_id: str,
+        candidate_id: str,
+        *,
+        actor: str = "user",
+        notes: str = "",
+    ) -> ReferenceAssetVersion:
+        """Promote a Draft candidate without locking it for production."""
+        candidate = self.get_image_candidate(project_id, candidate_id)
+        if candidate.status is not ReferenceImageCandidateStatus.DRAFT:
+            raise ReferenceAssetServiceError("只有 DRAFT candidate 可以提升")
+        path = self.resolve_image_candidate_path(project_id, candidate.id)
+        if not path.is_file() or path.stat().st_size != candidate.size_bytes:
+            raise ReferenceAssetServiceError("image candidate 文件不存在或大小不匹配")
+        if image_sha256(path.read_bytes()) != candidate.sha256:
+            raise ReferenceAssetServiceError("image candidate SHA-256 不匹配")
+        if self.repository.find_reference_version_by_hash(project_id, candidate.sha256):
+            raise ReferenceAssetServiceError("该项目已存在相同 SHA-256 的资产版本")
+        versions = self.repository.list_reference_asset_versions(candidate.asset_id)
+        now = _now()
+        version = ReferenceAssetVersion(
+            id=uuid4().hex,
+            asset_id=candidate.asset_id,
+            project_id=project_id,
+            version_number=(versions[-1].version_number + 1 if versions else 1),
+            filename=candidate.filename,
+            mime_type=candidate.mime_type,
+            size_bytes=candidate.size_bytes,
+            sha256=candidate.sha256,
+            storage_path=candidate.storage_path,
+            metadata={
+                "source_story_revision_id": candidate.source_story_revision_id,
+                "source_image_candidate_id": candidate.id,
+                "origin": "AI_GENERATED_CANDIDATE",
+                "provider_id": candidate.provider_id,
+                "model_id": candidate.model_id,
+                "endpoint_profile_id": candidate.endpoint_profile_id,
+                "deployment_region": candidate.deployment_region,
+                "prompt_sha256": candidate.prompt_sha256,
+                "request_sha256": candidate.request_sha256,
+            },
+            created_at=now,
+        )
+        events = self.repository.list_reference_image_candidate_events(candidate.id)
+        event = ReferenceImageCandidateEvent(
+            id=uuid4().hex,
+            candidate_id=candidate.id,
+            sequence_number=len(events) + 1,
+            event_type=ReferenceImageCandidateEventType.PROMOTED,
+            actor=actor,
+            notes=notes,
+            promoted_version_id=version.id,
+            created_at=now,
+        )
+        try:
+            _, stored_version = self.repository.promote_reference_image_candidate(
+                candidate.id, version, event
+            )
+        except (KeyError, ValueError) as exc:
+            raise ReferenceAssetServiceError(str(exc)) from exc
+        return stored_version
+
+    def resolve_image_candidate_path(
+        self, project_id: str, candidate_id: str
+    ) -> Path:
+        candidate = self.get_image_candidate(project_id, candidate_id)
+        project_root = (self.repository.paths.projects / project_id).resolve()
+        image_path = (project_root / candidate.storage_path).resolve()
+        if project_root not in image_path.parents:
+            raise ReferenceAssetServiceError("image candidate 路径不属于该项目")
+        return image_path
 
     def _binding_target_exists(self, project_id: str, binding_type: ReferenceBindingType, binding_id: str) -> bool:
         if binding_type in (ReferenceBindingType.CHARACTER, ReferenceBindingType.LOCATION):

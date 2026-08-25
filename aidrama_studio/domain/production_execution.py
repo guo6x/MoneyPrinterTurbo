@@ -38,6 +38,8 @@ class ProductionExecution(BaseModel):
     input_snapshot: ProductionInputSnapshot | None = None
     runtime_plan_id: str | None = Field(default=None, max_length=80)
     generation_brief_id: str | None = Field(default=None, max_length=80)
+    creative_retry_of_execution_id: str | None = Field(default=None, max_length=64)
+    creative_rejection_review_id: str | None = Field(default=None, max_length=64)
 
 
 class ProductionEvent(BaseModel):

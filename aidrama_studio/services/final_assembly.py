@@ -25,6 +25,9 @@ from aidrama_studio.domain import (
     FinalAssemblyStatus,
     ProductionQCStatus,
     ProductionReviewDecision,
+    ProductionShotSourceDecision,
+    ProductionShotSourceDecisionType,
+    ProductionShotSourceSelectionKind,
     ProductionExecutionStatus,
 )
 from aidrama_studio.storage.repositories import ProjectRepository
@@ -106,6 +109,110 @@ class FinalAssemblyService:
             raise FinalAssemblyServiceError(reason)
         return source
 
+    def select_shot_source(
+        self,
+        project_id: str,
+        production_job_id: str,
+        production_shot_id: str,
+        *,
+        production_execution_id: str,
+        production_artifact_id: str,
+        selected_by: str = "user",
+        notes: str = "",
+        promote_preview: bool = False,
+    ) -> ProductionShotSourceDecision:
+        """Append an explicit human choice over one currently qualified source."""
+        if not isinstance(selected_by, str) or not selected_by.strip():
+            raise FinalAssemblyServiceError("selected_by 不能为空")
+        job = self._get_job(project_id, production_job_id)
+        shot = self._resolve_shot(job.id, production_shot_id)
+        source, reason = self._select_source_for_shot(
+            project_id,
+            job.id,
+            shot,
+            strict=True,
+            ignore_explicit=True,
+            required_source=(production_execution_id, production_artifact_id),
+            allow_preview=promote_preview,
+        )
+        if source is None:
+            raise FinalAssemblyServiceError(reason)
+        execution = self.repository.get_production_execution(
+            source.production_execution_id
+        )
+        if execution is None:
+            raise FinalAssemblyServiceError("selected execution 不存在")
+        brief = (
+            self.repository.get_generation_brief(execution.generation_brief_id)
+            if execution.generation_brief_id
+            else None
+        )
+        history = self.repository.list_production_shot_source_decisions(
+            project_id, shot.id
+        )
+        decision = ProductionShotSourceDecision(
+            id=uuid4().hex,
+            project_id=project_id,
+            production_job_id=job.id,
+            production_shot_id=shot.id,
+            sequence_number=len(history) + 1,
+            decision_type=ProductionShotSourceDecisionType.SELECTED,
+            selection_kind=(
+                ProductionShotSourceSelectionKind.PREVIEW_PROMOTED
+                if promote_preview
+                else ProductionShotSourceSelectionKind.FINAL_ACCEPTED
+            ),
+            production_execution_id=source.production_execution_id,
+            production_artifact_id=source.production_artifact_id,
+            qc_result_id=source.qc_result_id,
+            review_id=source.review_id,
+            generation_brief_id=execution.generation_brief_id,
+            generation_brief_sha256=brief.sha256 if brief is not None else None,
+            selected_by=selected_by.strip(),
+            notes=notes,
+            created_at=_now(),
+        )
+        try:
+            return self.repository.create_production_shot_source_decision(decision)
+        except (KeyError, ValueError) as exc:
+            raise FinalAssemblyServiceError(str(exc)) from exc
+
+    def release_shot_source(
+        self,
+        project_id: str,
+        production_job_id: str,
+        production_shot_id: str,
+        *,
+        selected_by: str = "user",
+        notes: str = "",
+    ) -> ProductionShotSourceDecision:
+        job = self._get_job(project_id, production_job_id)
+        shot = self._resolve_shot(job.id, production_shot_id)
+        history = self.repository.list_production_shot_source_decisions(
+            project_id, shot.id
+        )
+        if (
+            not history
+            or history[-1].decision_type
+            is not ProductionShotSourceDecisionType.SELECTED
+        ):
+            raise FinalAssemblyServiceError("该 Shot 当前没有显式 source selection")
+        selected = history[-1]
+        released = selected.model_copy(
+            update={
+                "id": uuid4().hex,
+                "sequence_number": selected.sequence_number + 1,
+                "decision_type": ProductionShotSourceDecisionType.RELEASED,
+                "selected_by": selected_by,
+                "notes": notes,
+                "created_at": _now(),
+            }
+        )
+        try:
+            return self.repository.create_production_shot_source_decision(released)
+        except (KeyError, ValueError) as exc:
+            raise FinalAssemblyServiceError(str(exc)) from exc
+
     def create_assembly(
         self,
         project_id: str,
@@ -180,6 +287,7 @@ class FinalAssemblyService:
                 production_artifact_id=source.production_artifact_id,
                 qc_result_id=source.qc_result_id,
                 review_id=source.review_id,
+                source_decision_id=source.source_decision_id,
                 source_path=source.source_path,
                 created_at=_now(),
                 source_sha256=source.source_sha256,
@@ -220,13 +328,36 @@ class FinalAssemblyService:
 
     get = get_manifest
 
-    def _select_source_for_shot(self, project_id: str, job_id: str, shot, *, strict: bool):
+    def _select_source_for_shot(
+        self,
+        project_id: str,
+        job_id: str,
+        shot,
+        *,
+        strict: bool,
+        ignore_explicit: bool = False,
+        required_source: tuple[str, str] | None = None,
+        allow_preview: bool = False,
+    ):
         executions = self.repository.list_production_executions(job_id)
         candidates: list[tuple[tuple[int, int, int], bool, FinalAssemblySource]] = []
         last_reason = "没有找到 qualified source"
+        decisions = self.repository.list_production_shot_source_decisions(
+            project_id, shot.id
+        )
+        current_decision = decisions[-1] if decisions else None
+        current_brief = self.repository.get_selected_generation_brief(
+            project_id, job_id, shot.shot_id
+        )
         for execution_index, execution in enumerate(executions):
             if execution.status is not ProductionExecutionStatus.SUCCEEDED:
                 last_reason = f"没有 SUCCEEDED execution（当前 {execution.status.value}）"
+                continue
+            if (
+                current_brief is not None
+                and execution.generation_brief_id != current_brief.id
+            ):
+                last_reason = "execution 使用的 GenerationBrief 已不是当前显式版本"
                 continue
             artifacts = self.repository.list_production_artifacts(execution.id)
             if not self._execution_contains_shot(execution, shot.shot_id, shot.id, artifacts):
@@ -240,8 +371,22 @@ class FinalAssemblyService:
                     last_reason = "artifact 不是受支持的视频 artifact"
                     continue
                 if artifact.metadata_json.get("artifact_role") == "PREVIEW":
-                    last_reason = "Preview artifact 未经显式提升，不能作为最终成片来源"
-                    continue
+                    explicitly_promoted = bool(
+                        current_decision is not None
+                        and current_decision.decision_type
+                        is ProductionShotSourceDecisionType.SELECTED
+                        and current_decision.selection_kind
+                        is ProductionShotSourceSelectionKind.PREVIEW_PROMOTED
+                        and current_decision.production_execution_id == execution.id
+                        and current_decision.production_artifact_id == artifact.id
+                    )
+                    requested_promotion = bool(
+                        allow_preview
+                        and required_source == (execution.id, artifact.id)
+                    )
+                    if not explicitly_promoted and not requested_promotion:
+                        last_reason = "Preview artifact 未经显式提升，不能作为最终成片来源"
+                        continue
                 try:
                     source_path = self._validate_source_path(project_id, artifact.path)
                 except FinalAssemblyServiceError as exc:
@@ -265,9 +410,8 @@ class FinalAssemblyService:
                 if qc_result.status is not ProductionQCStatus.QC_PASS:
                     last_reason = f"QC result 不是 QC_PASS（当前 {qc_result.status.value}）"
                     continue
-                reviews = sorted(
-                    self.repository.list_production_reviews(project_id, qc_result.id),
-                    key=lambda review: (review.created_at, review.id),
+                reviews = self.repository.list_production_reviews(
+                    project_id, qc_result.id
                 )
                 # Reviews are append-only.  The latest decision for this QC
                 # result is authoritative; an old rejection remains readable
@@ -295,6 +439,50 @@ class FinalAssemblyService:
                 )
         if not candidates:
             return (None, last_reason)
+        if required_source is not None:
+            exact = [
+                candidate
+                for candidate in candidates
+                if (
+                    candidate[2].production_execution_id,
+                    candidate[2].production_artifact_id,
+                )
+                == required_source
+            ]
+            if not exact:
+                return (None, "指定的 shot source 当前不满足 qualification")
+            return max(exact, key=lambda candidate: candidate[0])[2], ""
+        if not ignore_explicit:
+            if (
+                decisions
+                and decisions[-1].decision_type
+                is ProductionShotSourceDecisionType.SELECTED
+            ):
+                selected_decision = decisions[-1]
+                explicit = [
+                    candidate
+                    for candidate in candidates
+                    if candidate[2].production_execution_id
+                    == selected_decision.production_execution_id
+                    and candidate[2].production_artifact_id
+                    == selected_decision.production_artifact_id
+                    and candidate[2].qc_result_id == selected_decision.qc_result_id
+                ]
+                if not explicit:
+                    return (
+                        None,
+                        "显式选择的 shot source 已不满足当前 qualification；请重新选择",
+                    )
+                if current_brief is not None and (
+                    selected_decision.generation_brief_id != current_brief.id
+                    or selected_decision.generation_brief_sha256
+                    != current_brief.sha256
+                ):
+                    return (None, "显式选择的 shot source creative provenance 已过期")
+                source = max(explicit, key=lambda candidate: candidate[0])[2]
+                return source.model_copy(
+                    update={"source_decision_id": selected_decision.id}
+                ), ""
         accepted_candidates = [candidate for candidate in candidates if candidate[1]]
         selected = max(accepted_candidates or candidates, key=lambda candidate: candidate[0])
         return selected[2], ""

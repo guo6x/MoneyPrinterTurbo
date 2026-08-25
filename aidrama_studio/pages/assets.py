@@ -3,7 +3,11 @@ from __future__ import annotations
 import streamlit as st
 
 from aidrama_studio.components.page_header import page_header
-from aidrama_studio.domain import ReferenceAssetType, ReferenceBindingType
+from aidrama_studio.domain import (
+    ReferenceAssetType,
+    ReferenceBindingType,
+    ReferenceImageCandidateStatus,
+)
 from aidrama_studio.pages._shared import current_project_or_stop
 from aidrama_studio.services import (
     ReferenceAssetService,
@@ -98,6 +102,99 @@ def _import_uploads(service, storage, project, subject, binding_type, story_revi
     return imported
 
 
+def _render_generated_candidates(
+    service,
+    project,
+    asset,
+    subject,
+    binding_type,
+) -> None:
+    list_method = getattr(service, "list_image_candidates", None)
+    if not callable(list_method):
+        return
+    try:
+        candidates = list(list_method(project.id, asset.id))
+    except ReferenceAssetServiceError as exc:
+        st.warning(str(exc))
+        return
+    st.markdown("### AI Generated Candidates")
+    st.caption(
+        "生成结果先保存为 DRAFT candidate；只有明确 Promote 才进入 Version history，"
+        "Promote 后仍需单独 Lock 才可用于生产。"
+    )
+    if not candidates:
+        st.info("暂无持久化 AI image candidate。")
+        return
+    for start in range(0, len(candidates), 2):
+        row = st.columns(2)
+        for column, candidate in zip(row, candidates[start : start + 2]):
+            with column:
+                with st.container(border=True):
+                    st.markdown(
+                        f"**{candidate.status.value}** · {candidate.provider_id} / {candidate.model_id}"
+                    )
+                    st.caption(
+                        f"Region {candidate.deployment_region} · SHA256 {candidate.sha256[:12]}…"
+                    )
+                    try:
+                        candidate_path = service.resolve_image_candidate_path(
+                            project.id, candidate.id
+                        )
+                    except ReferenceAssetServiceError:
+                        candidate_path = None
+                    if candidate_path is not None and candidate_path.is_file():
+                        st.image(str(candidate_path), width=260)
+                    else:
+                        st.error("Candidate image 文件不可用。")
+                    with st.expander("Prompt provenance"):
+                        st.write(candidate.prompt_text)
+                        st.caption(
+                            f"Prompt {candidate.prompt_sha256[:12]}… · Request {candidate.request_sha256[:12]}…"
+                        )
+                    if candidate.parent_candidate_id:
+                        st.caption(
+                            f"Regenerated from · {candidate.parent_candidate_id[:12]}…"
+                        )
+                    if candidate.status is ReferenceImageCandidateStatus.DRAFT:
+                        actions = st.columns(2)
+                        if actions[0].button(
+                            "Promote to Draft",
+                            type="primary",
+                            key=f"promote-image-candidate-{candidate.id}",
+                        ):
+                            try:
+                                version = service.promote_image_candidate(
+                                    project.id, candidate.id
+                                )
+                                service.bind_version(
+                                    project.id,
+                                    version.id,
+                                    binding_type,
+                                    subject.id,
+                                )
+                                st.success(
+                                    "已提升为 Draft version；尚未 Lock，不会自动进入生产。"
+                                )
+                                st.rerun()
+                            except ReferenceAssetServiceError as exc:
+                                st.warning(str(exc))
+                        if actions[1].button(
+                            "Reject",
+                            key=f"reject-image-candidate-{candidate.id}",
+                        ):
+                            try:
+                                service.reject_image_candidate(
+                                    project.id, candidate.id
+                                )
+                                st.rerun()
+                            except ReferenceAssetServiceError as exc:
+                                st.warning(str(exc))
+                    elif candidate.status is ReferenceImageCandidateStatus.PROMOTED:
+                        st.success("PROMOTED · 已进入 Draft Version，尚需显式 Lock。")
+                    else:
+                        st.warning("REJECTED · 历史候选保留且不可提升。")
+
+
 def _render_workspace(service, storage, project, subject, binding_type, story_revision_id):
     asset, current, status = _asset_status(service, project, binding_type, subject.id, story_revision_id)
     st.markdown(f"## {subject.name} · Reference Workspace")
@@ -124,6 +221,9 @@ def _render_workspace(service, storage, project, subject, binding_type, story_re
     if not asset:
         st.info("暂无 Reference Asset。上传图片后会自动创建。")
         return
+    _render_generated_candidates(
+        service, project, asset, subject, binding_type
+    )
     versions = service.list_versions(project.id, asset.id)
     st.markdown("### Version history")
     for version in reversed(versions):

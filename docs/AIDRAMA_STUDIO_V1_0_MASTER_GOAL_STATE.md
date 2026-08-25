@@ -283,7 +283,8 @@ regression/startup evidence and write the final closure report.
 - `REGIONAL_PROVIDER_ENDPOINTS=PASS`
 - `PROVIDER_PRESET_RESOLUTION=PASS`
 - `NO_SILENT_CROSS_REGION_FALLBACK=PASS`
-- `REGION_AWARE_PRIVACY_DISCLOSURE=PASS`
+- `REGION_AWARE_PRIVACY_DISCLOSURE=PARTIAL` (VIDEO is enforced; Story/Script
+  remote LLM and IMAGE/VISION/TTS still need the same first-transmission gate)
 - `PROVIDER_SWITCH_NEW_TASKS_ONLY=PASS`
 - `PROVIDER_SELECTION_PRECEDENCE=PASS`
 - `REGIONAL_PROVIDER_SETTINGS_UI=PASS`
@@ -291,7 +292,8 @@ regression/startup evidence and write the final closure report.
 - `MAINLAND_PROVIDER_PRESET=PASS`
 - `INTERNATIONAL_PROVIDER_PRESET=PASS`
 - `CUSTOM_PROVIDER_MIX=PASS`
-- `PROVIDER_SWITCHING=PASS`
+- `PROVIDER_SWITCHING=PARTIAL` (configuration is complete; IMAGE/VISION/TTS
+  runtime enforcement and no-fallback evidence remain open)
 
 ## Duration/editability addendum — durable heavy-work checkpoint
 
@@ -361,3 +363,48 @@ promotion, provider `CONTENT_REJECTED`, exact final target-duration control,
 and the four required addendum E2E acceptances. Browser, full-repository and
 release/installer gates remain pending or externally blocked as recorded
 above.
+
+## Duration/editability addendum — candidate and shot-source checkpoint
+
+Migration 029 extends the existing ReferenceAsset and Production truth rather
+than introducing parallel candidate or retry systems.
+
+- Generated reference images now persist as project-isolated immutable DRAFT
+  candidates with exact Provider/model/endpoint/region, prompt/request hashes,
+  source Story revision, SHA/size/MIME/path, regeneration parent and append-only
+  decision events. A candidate does not create a `ReferenceAssetVersion` and
+  never changes `current_version_id` merely because generation succeeded.
+- The Reference Asset Center can cold-reload, compare/preview, reject and
+  explicitly promote persisted candidates. Promotion atomically creates one
+  Draft `ReferenceAssetVersion`; the existing separate Lock action remains the
+  only operation that makes it production-qualified. Rejected candidates and
+  historical blobs remain immutable.
+- Each Shot now has append-only explicit source decisions over the existing
+  Execution → physical Artifact → real QC → latest Review chain. Decisions
+  freeze current GenerationBrief ID/hash when present. FinalAssembly respects
+  that selection, rejects stale/invalid selected provenance instead of silently
+  falling back, and freezes the exact decision ID in its immutable manifest.
+- Preview video remains ineligible by default. A distinct explicit
+  `PREVIEW_PROMOTED` source decision is required before the same physically
+  valid, QC-passed artifact can enter FinalAssembly.
+- A human `REJECTED` review never auto-submits. The explicit creative
+  regeneration service validates the latest rejection and its exact successful
+  Execution/Artifact/QC/Shot chain, then appends Attempt/Execution 2 with
+  immutable retry/review ancestry. Attempt 1 remains unchanged.
+- Project archive allowlists include candidate/event and shot-source decision
+  history, and FinalAssembly freeze now revalidates the complete durable source
+  chain inside its transaction.
+- Non-live acceptance proves candidate cold recovery/reject/regenerate/promote,
+  no auto-lock, tamper rejection without partial promotion, explicit Preview
+  promotion, append-only source replacement, and Attempt 1 success → QC PASS →
+  REJECTED → explicit Attempt 2 → QC PASS → APPROVED → current source resolves
+  Attempt 2.
+- Focused candidate/source/migration/reference/FinalAssembly/Execution/archive
+  validation passes with `73 passed, 1 warning`; the complete AIDrama suite
+  passes with `365 passed, 11 warnings`. Python compile and
+  `git diff --check` pass.
+
+The remaining UI/provider work is explicit: the real IMAGE generation request
+still needs the canonical ProviderProfile/disclosure/background gateway, and
+the Production page still needs to expose the new targeted creative-regenerate
+and source-selection actions. No live request is claimed by this checkpoint.

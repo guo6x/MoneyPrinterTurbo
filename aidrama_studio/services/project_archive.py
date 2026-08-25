@@ -51,6 +51,8 @@ class ProjectArchiveService:
         "creative_locks",
         "reference_assets",
         "reference_asset_versions",
+        "reference_image_candidates",
+        "reference_image_candidate_events",
         "reference_asset_bindings",
         "output_profiles",
         "production_jobs",
@@ -66,6 +68,7 @@ class ProjectArchiveService:
         "production_qc_results",
         "production_qc_metrics",
         "production_reviews",
+        "production_shot_source_decisions",
         "final_assemblies",
         "final_assembly_items",
         "final_assembly_render_attempts",
@@ -103,6 +106,7 @@ class ProjectArchiveService:
             "creative_locks",
             "reference_assets",
             "reference_asset_versions",
+            "reference_image_candidates",
             "reference_asset_bindings",
             "output_profiles",
             "production_jobs",
@@ -112,6 +116,7 @@ class ProjectArchiveService:
             "ai_invocations",
             "production_qc_results",
             "production_reviews",
+            "production_shot_source_decisions",
             "final_assemblies",
             "post_production_plans",
             "post_subtitle_tracks",
@@ -148,6 +153,10 @@ class ProjectArchiveService:
         "final_assembly_items": ("final_assembly_id", "final_assemblies"),
         "final_assembly_render_attempts": ("final_assembly_id", "final_assemblies"),
         "reference_profile_items": ("profile_id", "reference_profiles"),
+        "reference_image_candidate_events": (
+            "candidate_id",
+            "reference_image_candidates",
+        ),
         "heavy_job_events": ("heavy_job_id", "heavy_jobs"),
     }
 

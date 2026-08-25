@@ -1553,6 +1553,194 @@ def _migration_028_durable_heavy_jobs(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migration_029_candidate_and_shot_source_truth(
+    connection: sqlite3.Connection,
+) -> None:
+    """Persist generated-image choices and append-only shot-source decisions."""
+    connection.execute(
+        """
+        CREATE TABLE reference_image_candidates (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            asset_id TEXT NOT NULL,
+            source_story_revision_id TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            endpoint_profile_id TEXT NOT NULL,
+            deployment_region TEXT NOT NULL,
+            prompt_text TEXT NOT NULL,
+            prompt_sha256 TEXT NOT NULL CHECK (
+                length(prompt_sha256)=64 AND prompt_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            request_sha256 TEXT NOT NULL CHECK (
+                length(request_sha256)=64 AND request_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            filename TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+            sha256 TEXT NOT NULL CHECK (
+                length(sha256)=64 AND sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            storage_path TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('DRAFT','REJECTED','PROMOTED')),
+            parent_candidate_id TEXT,
+            promoted_version_id TEXT,
+            created_at TEXT NOT NULL,
+            decided_at TEXT,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(asset_id) REFERENCES reference_assets(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_story_revision_id) REFERENCES story_bible_revisions(id) ON DELETE RESTRICT,
+            FOREIGN KEY(parent_candidate_id) REFERENCES reference_image_candidates(id) ON DELETE RESTRICT,
+            FOREIGN KEY(promoted_version_id) REFERENCES reference_asset_versions(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_reference_image_candidates_asset "
+        "ON reference_image_candidates(project_id,asset_id,created_at,id)"
+    )
+    connection.execute(
+        "CREATE INDEX idx_reference_image_candidates_hash "
+        "ON reference_image_candidates(project_id,sha256)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE reference_image_candidate_events (
+            id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            sequence_number INTEGER NOT NULL CHECK (sequence_number >= 1),
+            event_type TEXT NOT NULL CHECK (event_type IN ('CREATED','REJECTED','PROMOTED')),
+            actor TEXT NOT NULL,
+            notes TEXT NOT NULL DEFAULT '',
+            promoted_version_id TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(candidate_id,sequence_number),
+            FOREIGN KEY(candidate_id) REFERENCES reference_image_candidates(id) ON DELETE CASCADE,
+            FOREIGN KEY(promoted_version_id) REFERENCES reference_asset_versions(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_reference_image_candidate_events_history "
+        "ON reference_image_candidate_events(candidate_id,sequence_number)"
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER reference_image_candidate_events_immutable_update
+        BEFORE UPDATE ON reference_image_candidate_events
+        BEGIN
+            SELECT RAISE(ABORT, 'reference image candidate events are immutable');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER reference_image_candidate_payload_immutable
+        BEFORE UPDATE ON reference_image_candidates
+        WHEN NEW.project_id != OLD.project_id
+          OR NEW.asset_id != OLD.asset_id
+          OR NEW.source_story_revision_id != OLD.source_story_revision_id
+          OR NEW.provider_id != OLD.provider_id
+          OR NEW.model_id != OLD.model_id
+          OR NEW.endpoint_profile_id != OLD.endpoint_profile_id
+          OR NEW.deployment_region != OLD.deployment_region
+          OR NEW.prompt_text != OLD.prompt_text
+          OR NEW.prompt_sha256 != OLD.prompt_sha256
+          OR NEW.request_sha256 != OLD.request_sha256
+          OR NEW.filename != OLD.filename
+          OR NEW.mime_type != OLD.mime_type
+          OR NEW.size_bytes != OLD.size_bytes
+          OR NEW.sha256 != OLD.sha256
+          OR NEW.storage_path != OLD.storage_path
+          OR NEW.parent_candidate_id IS NOT OLD.parent_candidate_id
+          OR NEW.created_at != OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'reference image candidate payload is immutable');
+        END
+        """
+    )
+
+    execution_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(production_executions)")
+    }
+    if "creative_retry_of_execution_id" not in execution_columns:
+        connection.execute(
+            "ALTER TABLE production_executions ADD COLUMN "
+            "creative_retry_of_execution_id TEXT REFERENCES production_executions(id)"
+        )
+    if "creative_rejection_review_id" not in execution_columns:
+        connection.execute(
+            "ALTER TABLE production_executions ADD COLUMN "
+            "creative_rejection_review_id TEXT REFERENCES production_reviews(id)"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_production_executions_creative_retry "
+        "ON production_executions(creative_retry_of_execution_id,created_at,id)"
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE production_shot_source_decisions (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            production_job_id TEXT NOT NULL,
+            production_shot_id TEXT NOT NULL,
+            sequence_number INTEGER NOT NULL CHECK (sequence_number >= 1),
+            decision_type TEXT NOT NULL CHECK (decision_type IN ('SELECTED','RELEASED')),
+            selection_kind TEXT NOT NULL CHECK (selection_kind IN ('FINAL_ACCEPTED','PREVIEW_PROMOTED')),
+            production_execution_id TEXT NOT NULL,
+            production_artifact_id TEXT NOT NULL,
+            qc_result_id TEXT NOT NULL,
+            review_id TEXT,
+            generation_brief_id TEXT,
+            generation_brief_sha256 TEXT CHECK (
+                generation_brief_sha256 IS NULL OR (
+                    length(generation_brief_sha256)=64
+                    AND generation_brief_sha256 NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            selected_by TEXT NOT NULL,
+            notes TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            UNIQUE(production_shot_id,sequence_number),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(production_job_id) REFERENCES production_jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY(production_shot_id) REFERENCES production_shots(id) ON DELETE CASCADE,
+            FOREIGN KEY(production_execution_id) REFERENCES production_executions(id) ON DELETE RESTRICT,
+            FOREIGN KEY(production_artifact_id) REFERENCES production_artifacts(id) ON DELETE RESTRICT,
+            FOREIGN KEY(qc_result_id) REFERENCES production_qc_results(id) ON DELETE RESTRICT,
+            FOREIGN KEY(review_id) REFERENCES production_reviews(id) ON DELETE RESTRICT,
+            FOREIGN KEY(generation_brief_id) REFERENCES generation_briefs(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_production_shot_source_decisions_history "
+        "ON production_shot_source_decisions(project_id,production_job_id,production_shot_id,sequence_number)"
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER production_shot_source_decisions_immutable_update
+        BEFORE UPDATE ON production_shot_source_decisions
+        BEGIN
+            SELECT RAISE(ABORT, 'production shot source decisions are immutable');
+        END
+        """
+    )
+    final_item_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(final_assembly_items)")
+    }
+    if "source_decision_id" not in final_item_columns:
+        connection.execute(
+            "ALTER TABLE final_assembly_items ADD COLUMN "
+            "source_decision_id TEXT REFERENCES production_shot_source_decisions(id)"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_final_assembly_items_source_decision "
+        "ON final_assembly_items(source_decision_id)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1582,6 +1770,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (26, _migration_026_versioned_output_profiles),
     (27, _migration_027_human_editability_provenance),
     (28, _migration_028_durable_heavy_jobs),
+    (29, _migration_029_candidate_and_shot_source_truth),
 )
 
 

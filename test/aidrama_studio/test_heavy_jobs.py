@@ -45,7 +45,11 @@ def test_migration_028_has_ordered_tables_constraints_and_immutable_events(conte
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-    assert version == 28
+    assert version >= 28
+    with connect(repository.paths.database) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version=28"
+        ).fetchone()
     assert {"heavy_jobs", "heavy_job_events"} <= tables
 
     job = HeavyJobService(repository).enqueue(

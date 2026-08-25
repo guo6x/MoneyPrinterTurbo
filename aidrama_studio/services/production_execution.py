@@ -23,6 +23,8 @@ from aidrama_studio.domain import (
     ProductionExecution,
     ProductionExecutionStatus,
     ProductionJobStatus,
+    ProductionQCStatus,
+    ProductionReviewDecision,
     ProductionShotStatus,
     ProductionInputSnapshot,
     ProviderTask,
@@ -195,13 +197,17 @@ class ProductionExecutionService:
         worker_type: str = "mpt",
         runtime_plan_id: str | None = None,
         generation_brief_id: str | None = None,
+        _creative_retry_context: tuple[str, str] | None = None,
     ) -> tuple[ProductionExecution, object]:
         """Create the immutable execution and its first/retry attempt atomically."""
         self._require_project(project_id)
         if not isinstance(worker_type, str) or not worker_type.strip():
             raise ProductionExecutionServiceError("worker_type 不能为空")
         job = self.production_service.get_job(project_id, production_job_id)
-        if job.status in (ProductionJobStatus.SUCCEEDED, ProductionJobStatus.CANCELLED):
+        if job.status is ProductionJobStatus.CANCELLED or (
+            job.status is ProductionJobStatus.SUCCEEDED
+            and _creative_retry_context is None
+        ):
             raise ProductionExecutionServiceError("ProductionJob 已结束，不能启动新的 shot execution")
         if input_snapshot.project_id != project_id or input_snapshot.shot_plan_revision_id != job.shot_plan_revision_id:
             raise ProductionExecutionServiceError("input snapshot provenance 不匹配")
@@ -288,6 +294,12 @@ class ProductionExecutionService:
             input_snapshot=frozen_snapshot,
             runtime_plan_id=runtime_plan_id,
             generation_brief_id=generation_brief_id,
+            creative_retry_of_execution_id=(
+                _creative_retry_context[0] if _creative_retry_context else None
+            ),
+            creative_rejection_review_id=(
+                _creative_retry_context[1] if _creative_retry_context else None
+            ),
         )
         attempt = ProductionAttempt(
             id=uuid4().hex,
@@ -302,7 +314,19 @@ class ProductionExecutionService:
             id=uuid4().hex,
             execution_id=execution.id,
             event_type=ProductionEventType.QUEUED,
-            payload_json={"shot_id": shot_id, "attempt_id": attempt.id},
+            payload_json={
+                "shot_id": shot_id,
+                "attempt_id": attempt.id,
+                **(
+                    {
+                        "generation_intent": "CREATIVE_REGENERATION",
+                        "creative_retry_of_execution_id": _creative_retry_context[0],
+                        "creative_rejection_review_id": _creative_retry_context[1],
+                    }
+                    if _creative_retry_context
+                    else {"generation_intent": "INITIAL_OR_TECHNICAL_RETRY"}
+                ),
+            },
             created_at=now,
         )
         created = self.repository.enqueue_production_execution_atomic(
@@ -313,6 +337,104 @@ class ProductionExecutionService:
             shot_status=ProductionShotStatus.PENDING,
         )
         return created, attempt
+
+    def request_creative_regeneration(
+        self,
+        project_id: str,
+        production_job_id: str,
+        production_shot_id: str,
+        rejected_review_id: str,
+        input_snapshot: ProductionInputSnapshot,
+        *,
+        worker_type: str = "mpt",
+        runtime_plan_id: str | None = None,
+        generation_brief_id: str | None = None,
+    ) -> tuple[ProductionExecution, ProductionAttempt]:
+        """Explicitly create a new paid-capable attempt after creative reject.
+
+        Technical success, QC, review, artifact and Shot provenance are checked
+        before a new immutable Execution/Attempt pair is appended.  Merely
+        writing a REJECTED review never submits another provider request.
+        """
+        self._require_project(project_id)
+        job = self.production_service.get_job(project_id, production_job_id)
+        shot = next(
+            (
+                item
+                for item in self.repository.list_production_shots(job.id)
+                if item.id == production_shot_id
+                or item.shot_id == production_shot_id
+            ),
+            None,
+        )
+        if shot is None:
+            raise ProductionExecutionServiceError(
+                "ProductionShot 不属于该 ProductionJob"
+            )
+        review = self.repository.get_production_review(rejected_review_id)
+        if (
+            review is None
+            or review.project_id != project_id
+            or review.decision is not ProductionReviewDecision.REJECTED
+        ):
+            raise ProductionExecutionServiceError("必须引用该项目的 REJECTED review")
+        reviews = self.repository.list_production_reviews(
+            project_id, review.qc_result_id
+        )
+        if not reviews or reviews[-1].id != review.id:
+            raise ProductionExecutionServiceError("该 rejection 已不是最新 human review")
+        qc = self.repository.get_production_qc_result(review.qc_result_id)
+        if (
+            qc is None
+            or qc.project_id != project_id
+            or qc.status is not ProductionQCStatus.QC_PASS
+            or qc.artifact_id is None
+        ):
+            raise ProductionExecutionServiceError(
+                "creative regeneration 要求真实 QC_PASS artifact"
+            )
+        execution = self.repository.get_production_execution(qc.execution_id)
+        artifact = self.repository.get_production_artifact(qc.artifact_id)
+        if (
+            execution is None
+            or execution.production_job_id != job.id
+            or execution.status is not ProductionExecutionStatus.SUCCEEDED
+            or artifact is None
+            or artifact.execution_id != execution.id
+        ):
+            raise ProductionExecutionServiceError(
+                "rejected source 的 execution/artifact provenance 无效"
+            )
+        execution_shots = (
+            execution.input_snapshot.shot_parameters
+            if execution.input_snapshot is not None
+            else {}
+        )
+        artifact_shot = str((artifact.metadata_json or {}).get("shot_id") or "")
+        if shot.shot_id not in execution_shots and artifact_shot not in {
+            shot.id,
+            shot.shot_id,
+        }:
+            raise ProductionExecutionServiceError(
+                "rejected source 不属于指定 ProductionShot"
+            )
+        if (
+            input_snapshot.project_id != project_id
+            or input_snapshot.shot_plan_revision_id != job.shot_plan_revision_id
+            or tuple(input_snapshot.shot_parameters) != (shot.shot_id,)
+        ):
+            raise ProductionExecutionServiceError(
+                "creative regeneration snapshot 不属于指定 Shot"
+            )
+        return self.enqueue_shot_execution_with_attempt(
+            project_id,
+            job.id,
+            input_snapshot,
+            worker_type=worker_type,
+            runtime_plan_id=runtime_plan_id,
+            generation_brief_id=generation_brief_id,
+            _creative_retry_context=(execution.id, review.id),
+        )
 
     create_shot_execution = enqueue_shot_execution
 

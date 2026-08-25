@@ -15,11 +15,25 @@ from aidrama_studio.domain import (
 )
 from aidrama_studio.domain.script import ScriptRevisionStatus
 from aidrama_studio.domain.shot import ShotPlan, ShotRevisionStatus
-from aidrama_studio.domain.reference_asset import ReferenceAsset, ReferenceAssetBinding, ReferenceAssetType, ReferenceAssetVersion, ReferenceBindingType
+from aidrama_studio.domain.reference_asset import (
+    ReferenceAsset,
+    ReferenceAssetBinding,
+    ReferenceAssetType,
+    ReferenceAssetVersion,
+    ReferenceBindingType,
+    ReferenceImageCandidate,
+    ReferenceImageCandidateEvent,
+    ReferenceImageCandidateStatus,
+)
 from aidrama_studio.domain.production import ProductionAttempt, ProductionAttemptStatus, ProductionJob, ProductionJobStatus, ProductionShot, ProductionShotStatus
 from aidrama_studio.domain.production_execution import ProductionArtifact, ProductionEvent, ProductionEventType, ProductionExecution, ProductionExecutionStatus
 from aidrama_studio.domain.production_snapshot import ProductionInputSnapshot
-from aidrama_studio.domain.production_qc import ProductionQCMetric, ProductionQCResult, ProductionReview
+from aidrama_studio.domain.production_qc import (
+    ProductionQCMetric,
+    ProductionQCResult,
+    ProductionReview,
+    ProductionShotSourceDecision,
+)
 from aidrama_studio.domain.final_assembly import (
     FinalAssembly,
     FinalAssemblyItem,
@@ -696,6 +710,277 @@ class ProjectRepository:
         return [self._reference_binding_from_row(row) for row in rows]
 
     @staticmethod
+    def _reference_image_candidate_from_row(row) -> ReferenceImageCandidate:
+        return ReferenceImageCandidate(
+            id=row["id"],
+            project_id=row["project_id"],
+            asset_id=row["asset_id"],
+            source_story_revision_id=row["source_story_revision_id"],
+            provider_id=row["provider_id"],
+            model_id=row["model_id"],
+            endpoint_profile_id=row["endpoint_profile_id"],
+            deployment_region=row["deployment_region"],
+            prompt_text=row["prompt_text"],
+            prompt_sha256=row["prompt_sha256"],
+            request_sha256=row["request_sha256"],
+            filename=row["filename"],
+            mime_type=row["mime_type"],
+            size_bytes=row["size_bytes"],
+            sha256=row["sha256"],
+            storage_path=row["storage_path"],
+            status=row["status"],
+            parent_candidate_id=row["parent_candidate_id"],
+            promoted_version_id=row["promoted_version_id"],
+            created_at=row["created_at"],
+            decided_at=row["decided_at"],
+        )
+
+    @staticmethod
+    def _reference_image_candidate_event_from_row(
+        row,
+    ) -> ReferenceImageCandidateEvent:
+        return ReferenceImageCandidateEvent(
+            id=row["id"],
+            candidate_id=row["candidate_id"],
+            sequence_number=row["sequence_number"],
+            event_type=row["event_type"],
+            actor=row["actor"],
+            notes=row["notes"],
+            promoted_version_id=row["promoted_version_id"],
+            created_at=row["created_at"],
+        )
+
+    def create_reference_image_candidate(
+        self,
+        candidate: ReferenceImageCandidate,
+        event: ReferenceImageCandidateEvent,
+    ) -> ReferenceImageCandidate:
+        if (
+            candidate.status is not ReferenceImageCandidateStatus.DRAFT
+            or event.candidate_id != candidate.id
+            or event.sequence_number != 1
+            or event.event_type.value != "CREATED"
+            or event.promoted_version_id is not None
+        ):
+            raise ValueError("Reference image candidate 初始状态无效")
+        with self.transaction() as connection:
+            asset = connection.execute(
+                "SELECT project_id FROM reference_assets WHERE id=?",
+                (candidate.asset_id,),
+            ).fetchone()
+            story = connection.execute(
+                "SELECT project_id,status FROM story_bible_revisions WHERE id=?",
+                (candidate.source_story_revision_id,),
+            ).fetchone()
+            if asset is None or asset["project_id"] != candidate.project_id:
+                raise KeyError("Reference image candidate asset 不属于该项目")
+            if (
+                story is None
+                or story["project_id"] != candidate.project_id
+                or story["status"] == "DRAFT"
+            ):
+                raise KeyError("Reference image candidate Story revision 无效")
+            if candidate.parent_candidate_id is not None:
+                parent = connection.execute(
+                    "SELECT project_id,asset_id FROM reference_image_candidates WHERE id=?",
+                    (candidate.parent_candidate_id,),
+                ).fetchone()
+                if (
+                    parent is None
+                    or parent["project_id"] != candidate.project_id
+                    or parent["asset_id"] != candidate.asset_id
+                ):
+                    raise KeyError("parent candidate 不属于同一项目与 asset")
+            connection.execute(
+                "INSERT INTO reference_image_candidates("
+                "id,project_id,asset_id,source_story_revision_id,provider_id,model_id,"
+                "endpoint_profile_id,deployment_region,prompt_text,prompt_sha256,request_sha256,"
+                "filename,mime_type,size_bytes,sha256,storage_path,status,parent_candidate_id,"
+                "promoted_version_id,created_at,decided_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    candidate.id,
+                    candidate.project_id,
+                    candidate.asset_id,
+                    candidate.source_story_revision_id,
+                    candidate.provider_id,
+                    candidate.model_id,
+                    candidate.endpoint_profile_id,
+                    candidate.deployment_region,
+                    candidate.prompt_text,
+                    candidate.prompt_sha256,
+                    candidate.request_sha256,
+                    candidate.filename,
+                    candidate.mime_type,
+                    candidate.size_bytes,
+                    candidate.sha256,
+                    candidate.storage_path,
+                    candidate.status.value,
+                    candidate.parent_candidate_id,
+                    None,
+                    candidate.created_at,
+                    None,
+                ),
+            )
+            self._insert_reference_image_candidate_event(connection, event)
+        stored = self.get_reference_image_candidate(candidate.id)
+        if stored is None:
+            raise RuntimeError("Reference image candidate 未持久化")
+        return stored
+
+    @staticmethod
+    def _insert_reference_image_candidate_event(
+        connection: sqlite3.Connection,
+        event: ReferenceImageCandidateEvent,
+    ) -> None:
+        connection.execute(
+            "INSERT INTO reference_image_candidate_events("
+            "id,candidate_id,sequence_number,event_type,actor,notes,promoted_version_id,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                event.id,
+                event.candidate_id,
+                event.sequence_number,
+                event.event_type.value,
+                event.actor,
+                event.notes,
+                event.promoted_version_id,
+                event.created_at,
+            ),
+        )
+
+    def get_reference_image_candidate(
+        self, candidate_id: str
+    ) -> ReferenceImageCandidate | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM reference_image_candidates WHERE id=?", (candidate_id,)
+            ).fetchone()
+        return self._reference_image_candidate_from_row(row) if row else None
+
+    def list_reference_image_candidates(
+        self, project_id: str, *, asset_id: str | None = None
+    ) -> list[ReferenceImageCandidate]:
+        query = "SELECT * FROM reference_image_candidates WHERE project_id=?"
+        params: list[object] = [project_id]
+        if asset_id is not None:
+            query += " AND asset_id=?"
+            params.append(asset_id)
+        query += " ORDER BY created_at,rowid"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [self._reference_image_candidate_from_row(row) for row in rows]
+
+    def list_reference_image_candidate_events(
+        self, candidate_id: str
+    ) -> list[ReferenceImageCandidateEvent]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(
+                "SELECT * FROM reference_image_candidate_events WHERE candidate_id=? "
+                "ORDER BY sequence_number",
+                (candidate_id,),
+            ).fetchall()
+        return [self._reference_image_candidate_event_from_row(row) for row in rows]
+
+    def reject_reference_image_candidate(
+        self, candidate_id: str, event: ReferenceImageCandidateEvent
+    ) -> ReferenceImageCandidate:
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT status FROM reference_image_candidates WHERE id=?",
+                (candidate_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("Reference image candidate 不存在")
+            if row["status"] != ReferenceImageCandidateStatus.DRAFT.value:
+                raise ValueError("只有 DRAFT candidate 可以拒绝")
+            expected = connection.execute(
+                "SELECT COALESCE(MAX(sequence_number),0)+1 AS value "
+                "FROM reference_image_candidate_events WHERE candidate_id=?",
+                (candidate_id,),
+            ).fetchone()["value"]
+            if (
+                event.candidate_id != candidate_id
+                or event.sequence_number != expected
+                or event.event_type.value != "REJECTED"
+                or event.promoted_version_id is not None
+            ):
+                raise ValueError("candidate rejection event 无效")
+            connection.execute(
+                "UPDATE reference_image_candidates SET status='REJECTED',decided_at=? WHERE id=?",
+                (event.created_at, candidate_id),
+            )
+            self._insert_reference_image_candidate_event(connection, event)
+        stored = self.get_reference_image_candidate(candidate_id)
+        if stored is None:
+            raise RuntimeError("Reference image candidate rejection 未持久化")
+        return stored
+
+    def promote_reference_image_candidate(
+        self,
+        candidate_id: str,
+        version: ReferenceAssetVersion,
+        event: ReferenceImageCandidateEvent,
+    ) -> tuple[ReferenceImageCandidate, ReferenceAssetVersion]:
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM reference_image_candidates WHERE id=?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError("Reference image candidate 不存在")
+            if row["status"] != ReferenceImageCandidateStatus.DRAFT.value:
+                raise ValueError("只有 DRAFT candidate 可以提升")
+            if not (
+                version.asset_id == row["asset_id"]
+                and version.project_id == row["project_id"]
+                and version.storage_path == row["storage_path"]
+                and version.sha256 == row["sha256"]
+                and version.size_bytes == row["size_bytes"]
+                and version.mime_type == row["mime_type"]
+            ):
+                raise ValueError("candidate 与 promoted version provenance 不一致")
+            expected = connection.execute(
+                "SELECT COALESCE(MAX(sequence_number),0)+1 AS value "
+                "FROM reference_image_candidate_events WHERE candidate_id=?",
+                (candidate_id,),
+            ).fetchone()["value"]
+            if (
+                event.candidate_id != candidate_id
+                or event.sequence_number != expected
+                or event.event_type.value != "PROMOTED"
+                or event.promoted_version_id != version.id
+            ):
+                raise ValueError("candidate promotion event 无效")
+            connection.execute(
+                "INSERT INTO reference_asset_versions("
+                "id,asset_id,project_id,version_number,filename,mime_type,size_bytes,sha256,"
+                "storage_path,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    version.id,
+                    version.asset_id,
+                    version.project_id,
+                    version.version_number,
+                    version.filename,
+                    version.mime_type,
+                    version.size_bytes,
+                    version.sha256,
+                    version.storage_path,
+                    json.dumps(version.metadata, ensure_ascii=False, sort_keys=True),
+                    version.created_at,
+                ),
+            )
+            connection.execute(
+                "UPDATE reference_image_candidates SET status='PROMOTED',promoted_version_id=?,"
+                "decided_at=? WHERE id=?",
+                (version.id, event.created_at, candidate_id),
+            )
+            self._insert_reference_image_candidate_event(connection, event)
+        candidate = self.get_reference_image_candidate(candidate_id)
+        stored_version = self.get_reference_asset_version(version.id)
+        if candidate is None or stored_version is None:
+            raise RuntimeError("Reference image candidate promotion 未完整持久化")
+        return candidate, stored_version
+
+    @staticmethod
     def _production_job_from_row(row) -> ProductionJob:
         return ProductionJob(
             id=row["id"], project_id=row["project_id"], shot_plan_revision_id=row["shot_plan_revision_id"],
@@ -856,6 +1141,12 @@ class ProjectRepository:
             if row["input_snapshot_json"] else None,
             runtime_plan_id=row["runtime_plan_id"] if "runtime_plan_id" in row.keys() else None,
             generation_brief_id=row["generation_brief_id"] if "generation_brief_id" in row.keys() else None,
+            creative_retry_of_execution_id=row["creative_retry_of_execution_id"]
+            if "creative_retry_of_execution_id" in row.keys()
+            else None,
+            creative_rejection_review_id=row["creative_rejection_review_id"]
+            if "creative_rejection_review_id" in row.keys()
+            else None,
         )
 
     @staticmethod
@@ -877,10 +1168,12 @@ class ProjectRepository:
             if connection.execute("SELECT 1 FROM production_jobs WHERE id=?", (execution.production_job_id,)).fetchone() is None:
                 raise KeyError(f"ProductionJob 不存在: {execution.production_job_id}")
             connection.execute(
-                "INSERT INTO production_executions(id,production_job_id,status,worker_type,started_at,finished_at,created_at,input_snapshot_json,runtime_plan_id,generation_brief_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO production_executions(id,production_job_id,status,worker_type,started_at,finished_at,created_at,input_snapshot_json,runtime_plan_id,generation_brief_id,creative_retry_of_execution_id,creative_rejection_review_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (execution.id, execution.production_job_id, execution.status.value, execution.worker_type, execution.started_at, execution.finished_at, execution.created_at,
                   json.dumps(execution.input_snapshot.to_json_dict(), ensure_ascii=False, sort_keys=True) if execution.input_snapshot else None,
-                  execution.runtime_plan_id, execution.generation_brief_id),
+                  execution.runtime_plan_id, execution.generation_brief_id,
+                  execution.creative_retry_of_execution_id,
+                  execution.creative_rejection_review_id),
             )
         return self.get_production_execution(execution.id)
 
@@ -910,7 +1203,8 @@ class ProjectRepository:
             connection.execute(
                 "INSERT INTO production_executions("
                 "id,production_job_id,status,worker_type,started_at,finished_at,created_at,input_snapshot_json,"
-                "runtime_plan_id,generation_brief_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "runtime_plan_id,generation_brief_id,creative_retry_of_execution_id,creative_rejection_review_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     execution.id,
                     execution.production_job_id,
@@ -928,6 +1222,8 @@ class ProjectRepository:
                     else None,
                     execution.runtime_plan_id,
                     execution.generation_brief_id,
+                    execution.creative_retry_of_execution_id,
+                    execution.creative_rejection_review_id,
                 ),
             )
             if attempt is not None:
@@ -1234,6 +1530,141 @@ class ProjectRepository:
         with connect(self.paths.database) as connection:
             rows = connection.execute(query, tuple(params)).fetchall()
         return [self._production_review_from_row(row) for row in rows]
+
+    @staticmethod
+    def _production_shot_source_decision_from_row(
+        row,
+    ) -> ProductionShotSourceDecision:
+        return ProductionShotSourceDecision(
+            id=row["id"],
+            project_id=row["project_id"],
+            production_job_id=row["production_job_id"],
+            production_shot_id=row["production_shot_id"],
+            sequence_number=row["sequence_number"],
+            decision_type=row["decision_type"],
+            selection_kind=row["selection_kind"],
+            production_execution_id=row["production_execution_id"],
+            production_artifact_id=row["production_artifact_id"],
+            qc_result_id=row["qc_result_id"],
+            review_id=row["review_id"],
+            generation_brief_id=row["generation_brief_id"],
+            generation_brief_sha256=row["generation_brief_sha256"],
+            selected_by=row["selected_by"],
+            notes=row["notes"],
+            created_at=row["created_at"],
+        )
+
+    def create_production_shot_source_decision(
+        self, decision: ProductionShotSourceDecision
+    ) -> ProductionShotSourceDecision:
+        """Append one validated source choice without rewriting prior choices."""
+        with self.transaction() as connection:
+            shot = connection.execute(
+                "SELECT production_job_id FROM production_shots WHERE id=?",
+                (decision.production_shot_id,),
+            ).fetchone()
+            job = connection.execute(
+                "SELECT project_id FROM production_jobs WHERE id=?",
+                (decision.production_job_id,),
+            ).fetchone()
+            execution = connection.execute(
+                "SELECT production_job_id,generation_brief_id FROM production_executions WHERE id=?",
+                (decision.production_execution_id,),
+            ).fetchone()
+            artifact = connection.execute(
+                "SELECT execution_id FROM production_artifacts WHERE id=?",
+                (decision.production_artifact_id,),
+            ).fetchone()
+            qc = connection.execute(
+                "SELECT project_id,execution_id,artifact_id FROM production_qc_results WHERE id=?",
+                (decision.qc_result_id,),
+            ).fetchone()
+            if (
+                shot is None
+                or job is None
+                or execution is None
+                or artifact is None
+                or qc is None
+                or shot["production_job_id"] != decision.production_job_id
+                or job["project_id"] != decision.project_id
+                or execution["production_job_id"] != decision.production_job_id
+                or artifact["execution_id"] != decision.production_execution_id
+                or qc["project_id"] != decision.project_id
+                or qc["execution_id"] != decision.production_execution_id
+                or qc["artifact_id"] != decision.production_artifact_id
+                or execution["generation_brief_id"] != decision.generation_brief_id
+            ):
+                raise ValueError("shot source decision provenance 不匹配")
+            if decision.review_id is not None:
+                review = connection.execute(
+                    "SELECT project_id,qc_result_id FROM production_reviews WHERE id=?",
+                    (decision.review_id,),
+                ).fetchone()
+                if (
+                    review is None
+                    or review["project_id"] != decision.project_id
+                    or review["qc_result_id"] != decision.qc_result_id
+                ):
+                    raise ValueError("shot source decision review provenance 不匹配")
+            expected = connection.execute(
+                "SELECT COALESCE(MAX(sequence_number),0)+1 AS value "
+                "FROM production_shot_source_decisions WHERE production_shot_id=?",
+                (decision.production_shot_id,),
+            ).fetchone()["value"]
+            if decision.sequence_number != expected:
+                raise ValueError("shot source decision sequence 必须连续")
+            connection.execute(
+                "INSERT INTO production_shot_source_decisions("
+                "id,project_id,production_job_id,production_shot_id,sequence_number,decision_type,selection_kind,"
+                "production_execution_id,production_artifact_id,qc_result_id,review_id,"
+                "generation_brief_id,generation_brief_sha256,selected_by,notes,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    decision.id,
+                    decision.project_id,
+                    decision.production_job_id,
+                    decision.production_shot_id,
+                    decision.sequence_number,
+                    decision.decision_type.value,
+                    decision.selection_kind.value,
+                    decision.production_execution_id,
+                    decision.production_artifact_id,
+                    decision.qc_result_id,
+                    decision.review_id,
+                    decision.generation_brief_id,
+                    decision.generation_brief_sha256,
+                    decision.selected_by,
+                    decision.notes,
+                    decision.created_at,
+                ),
+            )
+        stored = self.get_production_shot_source_decision(decision.id)
+        if stored is None:
+            raise RuntimeError("shot source decision 未持久化")
+        return stored
+
+    def get_production_shot_source_decision(
+        self, decision_id: str
+    ) -> ProductionShotSourceDecision | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM production_shot_source_decisions WHERE id=?",
+                (decision_id,),
+            ).fetchone()
+        return self._production_shot_source_decision_from_row(row) if row else None
+
+    def list_production_shot_source_decisions(
+        self,
+        project_id: str,
+        production_shot_id: str,
+    ) -> list[ProductionShotSourceDecision]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(
+                "SELECT * FROM production_shot_source_decisions "
+                "WHERE project_id=? AND production_shot_id=? ORDER BY sequence_number",
+                (project_id, production_shot_id),
+            ).fetchall()
+        return [self._production_shot_source_decision_from_row(row) for row in rows]
 
     @staticmethod
     def _director_recommendation(value: dict[str, object] | None) -> DirectorRecommendation | None:
@@ -1597,6 +2028,9 @@ class ProjectRepository:
             production_artifact_id=row["production_artifact_id"],
             qc_result_id=row["qc_result_id"],
             review_id=row["review_id"],
+            source_decision_id=row["source_decision_id"]
+            if "source_decision_id" in row.keys()
+            else None,
             source_path=row["source_path"],
             source_sha256=row["source_sha256"] if "source_sha256" in row.keys() else None,
             source_duration_seconds=row["source_duration_seconds"] if "source_duration_seconds" in row.keys() else None,
@@ -1658,7 +2092,7 @@ class ProjectRepository:
         """Insert a complete immutable manifest and mark it READY atomically."""
         with self.transaction() as connection:
             assembly = connection.execute(
-                "SELECT project_id,status FROM final_assemblies WHERE id=?", (assembly_id,)
+                "SELECT project_id,production_job_id,status FROM final_assemblies WHERE id=?", (assembly_id,)
             ).fetchone()
             if assembly is None:
                 raise KeyError(f"FinalAssembly 不存在: {assembly_id}")
@@ -1673,12 +2107,15 @@ class ProjectRepository:
             for item in items:
                 if item.final_assembly_id != assembly_id:
                     raise ValueError("FinalAssemblyItem provenance 无效")
+                normalized = self._validate_final_assembly_item_provenance(
+                    connection, assembly, item
+                )
                 connection.execute(
                     "INSERT INTO final_assembly_items("
                     "id,final_assembly_id,order_index,production_shot_id,production_execution_id,"
-                    "production_artifact_id,qc_result_id,review_id,source_path,source_sha256,source_duration_seconds,"
+                    "production_artifact_id,qc_result_id,review_id,source_decision_id,source_path,source_sha256,source_duration_seconds,"
                     "timeline_start_seconds,timeline_end_seconds,trimmed_duration_seconds,created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         item.id,
                         item.final_assembly_id,
@@ -1688,7 +2125,8 @@ class ProjectRepository:
                         item.production_artifact_id,
                         item.qc_result_id,
                         item.review_id,
-                        item.source_path,
+                        item.source_decision_id,
+                        normalized,
                         item.source_sha256,
                         item.source_duration_seconds,
                         item.timeline_start_seconds,
@@ -1702,6 +2140,89 @@ class ProjectRepository:
                 (FinalAssemblyStatus.READY.value, updated_at, assembly_id, FinalAssemblyStatus.DRAFT.value),
             )
         return self.get_final_assembly(assembly_id)
+
+    @staticmethod
+    def _validate_final_assembly_item_provenance(
+        connection: sqlite3.Connection,
+        assembly,
+        item: FinalAssemblyItem,
+    ) -> str:
+        shot = connection.execute(
+            "SELECT production_job_id FROM production_shots WHERE id=?",
+            (item.production_shot_id,),
+        ).fetchone()
+        execution = connection.execute(
+            "SELECT production_job_id FROM production_executions WHERE id=?",
+            (item.production_execution_id,),
+        ).fetchone()
+        artifact = connection.execute(
+            "SELECT execution_id,path FROM production_artifacts WHERE id=?",
+            (item.production_artifact_id,),
+        ).fetchone()
+        qc = connection.execute(
+            "SELECT project_id,execution_id,artifact_id FROM production_qc_results WHERE id=?",
+            (item.qc_result_id,),
+        ).fetchone()
+        if shot is None or shot["production_job_id"] != assembly["production_job_id"]:
+            raise ValueError("ProductionShot 不属于该 FinalAssembly ProductionJob")
+        if (
+            execution is None
+            or execution["production_job_id"] != assembly["production_job_id"]
+        ):
+            raise ValueError("ProductionExecution 不属于该 FinalAssembly ProductionJob")
+        if (
+            artifact is None
+            or artifact["execution_id"] != item.production_execution_id
+            or artifact["path"] != item.source_path
+        ):
+            raise ValueError("ProductionArtifact provenance 不匹配")
+        if (
+            qc is None
+            or qc["project_id"] != assembly["project_id"]
+            or qc["execution_id"] != item.production_execution_id
+            or qc["artifact_id"] != item.production_artifact_id
+        ):
+            raise ValueError("ProductionQCResult provenance 不匹配")
+        if item.review_id is not None:
+            review = connection.execute(
+                "SELECT project_id,qc_result_id FROM production_reviews WHERE id=?",
+                (item.review_id,),
+            ).fetchone()
+            if (
+                review is None
+                or review["project_id"] != assembly["project_id"]
+                or review["qc_result_id"] != item.qc_result_id
+            ):
+                raise ValueError("ProductionReview provenance 不匹配")
+        if item.source_decision_id is not None:
+            decision = connection.execute(
+                "SELECT * FROM production_shot_source_decisions WHERE id=?",
+                (item.source_decision_id,),
+            ).fetchone()
+            if (
+                decision is None
+                or decision["decision_type"] != "SELECTED"
+                or decision["project_id"] != assembly["project_id"]
+                or decision["production_job_id"] != assembly["production_job_id"]
+                or decision["production_shot_id"] != item.production_shot_id
+                or decision["production_execution_id"] != item.production_execution_id
+                or decision["production_artifact_id"] != item.production_artifact_id
+                or decision["qc_result_id"] != item.qc_result_id
+                or decision["review_id"] != item.review_id
+            ):
+                raise ValueError("shot source decision provenance 不匹配")
+        normalized = item.source_path.replace("\\", "/")
+        if (
+            not normalized
+            or normalized.startswith("/")
+            or PureWindowsPath(item.source_path).drive
+            or any(
+                part in {"", ".", ".."}
+                for part in PurePosixPath(normalized).parts
+            )
+        ):
+            raise ValueError("FinalAssembly source_path 必须是项目相对路径")
+        return normalized
 
     def update_final_assembly_status(
         self,
@@ -1848,6 +2369,10 @@ class ProjectRepository:
             if assembly["status"] != FinalAssemblyStatus.DRAFT.value:
                 raise ValueError("READY 或非 DRAFT FinalAssembly 不可添加 item")
 
+            normalized = self._validate_final_assembly_item_provenance(
+                connection, assembly, item
+            )
+
             shot = connection.execute(
                 """
                 SELECT ps.id
@@ -1916,9 +2441,9 @@ class ProjectRepository:
                 INSERT INTO final_assembly_items(
                     id,final_assembly_id,order_index,production_shot_id,
                     production_execution_id,production_artifact_id,qc_result_id,
-                    review_id,source_path,source_sha256,source_duration_seconds,
+                    review_id,source_decision_id,source_path,source_sha256,source_duration_seconds,
                     timeline_start_seconds,timeline_end_seconds,trimmed_duration_seconds,created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     item.id,
@@ -1929,6 +2454,7 @@ class ProjectRepository:
                     item.production_artifact_id,
                     item.qc_result_id,
                     item.review_id,
+                    item.source_decision_id,
                     normalized,
                     item.source_sha256,
                     item.source_duration_seconds,

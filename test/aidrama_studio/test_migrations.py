@@ -31,12 +31,15 @@ def test_all_aidrama_migrations_apply_in_order_and_create_revision_tables() -> N
         "reference_assets",
         "reference_asset_versions",
         "reference_asset_bindings",
+        "reference_image_candidates",
+        "reference_image_candidate_events",
         "production_jobs",
         "production_shots",
         "production_attempts",
         "production_executions",
         "production_events",
         "production_artifacts",
+        "production_shot_source_decisions",
         "final_assemblies",
         "final_assembly_items",
         "final_assembly_render_attempts",
@@ -71,12 +74,15 @@ def test_migrations_are_idempotent_and_do_not_duplicate_schema_records() -> None
         "reference_assets",
         "reference_asset_versions",
         "reference_asset_bindings",
+        "reference_image_candidates",
+        "reference_image_candidate_events",
         "production_jobs",
         "production_shots",
         "production_attempts",
         "production_executions",
         "production_events",
         "production_artifacts",
+        "production_shot_source_decisions",
         "final_assemblies",
         "final_assembly_items",
         "final_assembly_render_attempts",
@@ -118,6 +124,43 @@ def test_forward_migrations_add_director_events_and_post_source_pin() -> None:
     assert "source_final_assembly_render_attempt_id" in plan_columns
     assert "source_final_assembly_render_attempt_id" in attempt_columns
     assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == len(MIGRATIONS)
+
+
+def test_migration_029_adds_candidate_and_current_shot_source_truth() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    prior = [(version, migration) for version, migration in MIGRATIONS if version < 29]
+    for _, migration in prior:
+        migration(connection)
+    connection.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    connection.executemany(
+        "INSERT INTO schema_migrations VALUES (?,?)",
+        [(version, "2026-08-25") for version, _ in prior],
+    )
+
+    assert apply_migrations(connection) == 1
+    tables = _tables(connection)
+    assert {
+        "reference_image_candidates",
+        "reference_image_candidate_events",
+        "production_shot_source_decisions",
+    } <= tables
+    execution_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(production_executions)")
+    }
+    final_item_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(final_assembly_items)")
+    }
+    assert {
+        "creative_retry_of_execution_id",
+        "creative_rejection_review_id",
+    } <= execution_columns
+    assert "source_decision_id" in final_item_columns
+    assert apply_migrations(connection) == 0
 
 
 def test_upgrade_from_023_adds_append_only_vision_provenance_and_is_idempotent() -> None:

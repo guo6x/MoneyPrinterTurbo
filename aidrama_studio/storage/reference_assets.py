@@ -82,6 +82,27 @@ def reference_blob_path(projects_root: Path, project_id: str, asset_id: str, dig
     return target, relative.as_posix()
 
 
+def reference_candidate_blob_path(
+    projects_root: Path,
+    project_id: str,
+    candidate_id: str,
+    digest: str,
+    suffix: str,
+) -> tuple[Path, str]:
+    relative = (
+        Path("assets")
+        / "references"
+        / "candidates"
+        / candidate_id
+        / f"{digest}{suffix}"
+    )
+    project_root = (projects_root / project_id).resolve()
+    target = (project_root / relative).resolve()
+    if project_root not in target.parents:
+        raise ValueError("reference candidate path escapes project root")
+    return target, relative.as_posix()
+
+
 def store_immutable_blob(target: Path, data: bytes) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}-{uuid4().hex}")
