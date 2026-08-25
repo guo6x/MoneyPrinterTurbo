@@ -82,7 +82,17 @@ class ProductionWorker:
         if execution.input_snapshot is None:
             return self._fail(project_id, execution, "execution 缺少 immutable input snapshot")
 
-        shot_snapshot = self._single_shot_snapshot(execution.input_snapshot)
+        runtime_plan = (
+            self.execution_service.repository.get_runtime_plan(execution.runtime_plan_id)
+            if execution.runtime_plan_id
+            else None
+        )
+        shot_snapshot = self._single_shot_snapshot(
+            execution.input_snapshot,
+            runtime_plan_id=execution.runtime_plan_id,
+            generation_brief_id=execution.generation_brief_id,
+            runtime_plan_hash=runtime_plan.plan_hash if runtime_plan is not None else None,
+        )
         try:
             started = self.execution_service.submit_execution(
                 project_id,
@@ -154,6 +164,15 @@ class ProductionWorker:
         adapter: ProductionRuntimeAdapter,
         runtime_reference: str,
     ) -> ProductionExecution:
+        try:
+            effective_poll_interval = max(
+                0.0,
+                float(
+                    getattr(adapter, "poll_interval_seconds", self.poll_interval)
+                ),
+            )
+        except (TypeError, ValueError):
+            effective_poll_interval = self.poll_interval
         for _ in range(self.max_polls):
             if self.should_stop():
                 # Desktop shutdown pauses local polling only. The durable
@@ -177,7 +196,21 @@ class ProductionWorker:
                         project_id, execution.id, "runtime reported CANCELLED", _notify_runtime=False
                     )
                 if status == ProductionExecutionStatus.SUCCEEDED:
-                    self._persist_result_artifacts(project_id, execution.id, adapter, runtime_reference)
+                    try:
+                        self._persist_result_artifacts(
+                            project_id, execution.id, adapter, runtime_reference
+                        )
+                    except Exception as exc:
+                        # The paid provider task already succeeded. Keep its
+                        # identity and the RUNNING execution intact so startup
+                        # reconciliation can retry the original download
+                        # without submitting another generation request.
+                        self.execution_service.mark_provider_artifact_pending(
+                            project_id, execution.id, exc
+                        )
+                        return self.execution_service.get_execution(
+                            project_id, execution.id
+                        )
                     return self.execution_service.complete_execution(
                         project_id, execution.id, {"runtime_reference": runtime_reference}
                     )
@@ -186,8 +219,8 @@ class ProductionWorker:
                 if execution.status in self._terminal_statuses():
                     return execution
                 return self._fail(project_id, execution, f"worker execution failed: {exc}")
-            if self.poll_interval:
-                deadline = time.monotonic() + self.poll_interval
+            if effective_poll_interval:
+                deadline = time.monotonic() + effective_poll_interval
                 while time.monotonic() < deadline:
                     if self.should_stop():
                         return self.execution_service.get_execution(project_id, execution.id)
@@ -284,7 +317,24 @@ class ProductionWorker:
             shot_ids = list(execution.input_snapshot.shot_parameters)
             if shot_ids:
                 metadata.setdefault("shot_id", shot_ids[0])
-            metadata.setdefault("reference_versions", dict(execution.input_snapshot.reference_asset_versions))
+            available = dict(execution.input_snapshot.reference_asset_versions)
+            metadata.setdefault("snapshot_references_available", available)
+            provider_metadata = self._provider_metadata(project_id, execution_id)
+            actual = provider_metadata.get("provider_references_actually_used")
+            if isinstance(actual, (list, tuple)):
+                metadata.setdefault("provider_references_actually_used", list(actual))
+                actual_map = {
+                    str(item.get("binding_key")): str(item.get("reference_asset_version_id"))
+                    for item in actual
+                    if isinstance(item, Mapping)
+                    and item.get("binding_key")
+                    and item.get("reference_asset_version_id")
+                }
+                metadata.setdefault("reference_versions", actual_map)
+            else:
+                metadata.setdefault("reference_versions", available)
+            if provider_metadata:
+                metadata.setdefault("provider_request", provider_metadata)
         relative_path, stored_metadata = self.artifact_storage.store(
             project_id,
             execution_id,
@@ -293,13 +343,29 @@ class ProductionWorker:
             filename=str(filename) if filename else None,
             metadata=metadata,
         )
-        self.execution_service.record_artifact(
-            project_id,
-            execution_id,
-            artifact_type,
-            relative_path,
-            stored_metadata,
-        )
+        try:
+            self.execution_service.record_artifact(
+                project_id,
+                execution_id,
+                artifact_type,
+                relative_path,
+                stored_metadata,
+            )
+        except Exception:
+            self.artifact_storage.discard_unrecorded(
+                project_id,
+                execution_id,
+                relative_path,
+                expected_sha256=str(stored_metadata.get("sha256") or "") or None,
+            )
+            raise
+
+    def _provider_metadata(self, project_id: str, execution_id: str) -> dict[str, object]:
+        for event in reversed(self.execution_service.list_events(project_id, execution_id)):
+            if event.event_type is ProductionEventType.STARTED:
+                value = event.payload_json.get("provider_metadata")
+                return dict(value) if isinstance(value, Mapping) else {}
+        return {}
 
     @staticmethod
     def _artifact_specs(value: object) -> list[Mapping[str, object] | object]:
@@ -308,7 +374,19 @@ class ProductionWorker:
         if isinstance(value, Mapping):
             if isinstance(value.get("artifacts"), (list, tuple)):
                 return list(value["artifacts"])
-            if any(key in value for key in ("path", "source_path", "content", "data", "bytes", "filename")):
+            if any(
+                key in value
+                for key in (
+                    "path",
+                    "source_path",
+                    "content",
+                    "data",
+                    "bytes",
+                    "filename",
+                    "stream_source",
+                    "stream_writer",
+                )
+            ):
                 return [value]
             return []
         if isinstance(value, (list, tuple)):
@@ -368,7 +446,13 @@ class ProductionWorker:
             raise ProductionWorkerError(str(exc)) from exc
 
     @staticmethod
-    def _single_shot_snapshot(snapshot: ProductionInputSnapshot) -> ProductionInputSnapshot:
+    def _single_shot_snapshot(
+        snapshot: ProductionInputSnapshot,
+        *,
+        runtime_plan_id: str | None = None,
+        generation_brief_id: str | None = None,
+        runtime_plan_hash: str | None = None,
+    ) -> ProductionInputSnapshot:
         if not snapshot.shot_parameters:
             raise ProductionWorkerError("production input snapshot 不包含 shot")
         candidates = list(snapshot.shot_parameters.items())
@@ -387,6 +471,9 @@ class ProductionWorker:
             story_revision_id=snapshot.story_revision_id,
             script_revision_id=snapshot.script_revision_id,
             shot_plan_revision_id=snapshot.shot_plan_revision_id,
+            runtime_plan_id=runtime_plan_id or snapshot.runtime_plan_id,
+            generation_brief_id=generation_brief_id or snapshot.generation_brief_id,
+            runtime_plan_hash=runtime_plan_hash or snapshot.runtime_plan_hash,
             reference_asset_versions=snapshot.reference_asset_versions,
             shot_parameters={shot_id: parameters},
         )

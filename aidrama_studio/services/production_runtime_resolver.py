@@ -13,6 +13,7 @@ from typing import Any
 
 from aidrama_studio.domain import ProviderTask, RuntimePlan
 from aidrama_studio.services.adapters import ProductionRuntimeAdapter
+from aidrama_studio.storage.repositories import ProjectRepository
 
 from .ai_capabilities import CapabilityKind, CapabilityRegistry, default_capability_registry
 
@@ -22,8 +23,13 @@ class ProductionRuntimeResolutionError(RuntimeError):
 
 
 class ProductionRuntimeResolver:
-    def __init__(self, registry: CapabilityRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: CapabilityRegistry | None = None,
+        repository: ProjectRepository | None = None,
+    ) -> None:
         self.registry = registry or default_capability_registry()
+        self.repository = repository or ProjectRepository()
 
     def resolve(
         self,
@@ -69,8 +75,8 @@ class ProductionRuntimeResolver:
         target = provider_id.casefold()
         return any(candidate and candidate.casefold() == target for candidate in candidates)
 
-    @staticmethod
     def _pin_adapter(
+        self,
         adapter: ProductionRuntimeAdapter,
         runtime_plan: RuntimePlan | None,
         model_id: str,
@@ -104,7 +110,32 @@ class ProductionRuntimeResolver:
         from .adapters.wan_video import WanProductionAdapter
 
         if isinstance(adapter, SeedanceProductionAdapter):
-            return SeedanceProductionAdapter(config=pinned_config)
+            brief = (
+                self.repository.get_generation_brief(runtime_plan.generation_brief_id)
+                if runtime_plan is not None and runtime_plan.generation_brief_id
+                else None
+            )
+            output_profile = (
+                self.repository.get_output_profile(runtime_plan.output_profile_id)
+                if runtime_plan is not None and runtime_plan.output_profile_id
+                else None
+            )
+            if runtime_plan is not None and brief is None:
+                raise ProductionRuntimeResolutionError(
+                    "冻结 RuntimePlan 的 GenerationBrief 不存在"
+                )
+            from .reference_assets import ReferenceAssetService
+
+            return SeedanceProductionAdapter(
+                config=pinned_config,
+                client=getattr(adapter, "_client", None),
+                runtime_plan=runtime_plan,
+                generation_brief=brief,
+                output_profile=output_profile,
+                reference_service=ReferenceAssetService(self.repository),
+                downloader=getattr(adapter, "downloader", None),
+                image_downloader=getattr(adapter, "image_downloader", None),
+            )
         if isinstance(adapter, WanProductionAdapter):
             return WanProductionAdapter(
                 config=pinned_config,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,8 @@ from aidrama_studio.services.adapters import (
     WanVideoClient,
     RuntimeSubmission,
 )
+from aidrama_studio.services.provider_result_download import validate_mp4_prefix
+from aidrama_studio.services.streaming_artifact import StreamingArtifactSource
 
 
 JPEG = b"\xff\xd8\xff\xe0" + b"fixture" * 8
@@ -78,9 +81,12 @@ class FakeWanClient:
     def get_task(self, task_id):
         return {"output": {"task_id": task_id, "task_status": self.status, "video_url": "https://files.example/video.mp4"}}
 
-    def download_result(self, url):
+    def stream_result(self, url):
         self.downloaded_url = url
-        return MP4
+        return StreamingArtifactSource(
+            lambda sink: (validate_mp4_prefix(MP4), sink.write(MP4)),
+            len(MP4) + 1,
+        )
 
 
 def test_wan_input_mapping_uses_exact_frozen_reference_and_structured_prompt(tmp_path):
@@ -120,9 +126,11 @@ def test_wan_adapter_submit_status_and_result_download(tmp_path):
     client.status = "SUCCEEDED"
     result = adapter.get_result("wan-task-1")
     assert result["artifact_type"] == "wan-video"
-    assert result["content"] == MP4
+    assert "content" not in result and "url" not in result
+    sink = io.BytesIO()
+    result["stream_source"].write_to(sink)
+    assert sink.getvalue() == MP4
     assert result["metadata"]["provider_task_id"] == "wan-task-1"
-    assert result["metadata"]["sha256"] == hashlib.sha256(MP4).hexdigest()
     assert client.downloaded_url == "https://files.example/video.mp4"
 
 
@@ -151,8 +159,12 @@ def test_wan_adapter_rejects_malformed_video_result(tmp_path):
     image.write_bytes(JPEG)
 
     class BadClient(FakeWanClient):
-        def download_result(self, url):
-            return b"x" * 32
+        def stream_result(self, url):
+            invalid = b"x" * 32
+            return StreamingArtifactSource(
+                lambda sink: (validate_mp4_prefix(invalid), sink.write(invalid)),
+                64,
+            )
 
     adapter = WanProductionAdapter(
         BadClient(),
@@ -161,8 +173,9 @@ def test_wan_adapter_rejects_malformed_video_result(tmp_path):
     )
     adapter.submit(_snapshot())
     adapter.client.status = "SUCCEEDED"
-    with pytest.raises(WanAdapterError, match="MP4"):
-        adapter.get_result("wan-task-1")
+    result = adapter.get_result("wan-task-1")
+    with pytest.raises(Exception, match="MP4"):
+        result["stream_source"].write_to(io.BytesIO())
 
 
 def test_wan_status_mapping_matches_async_provider_states():

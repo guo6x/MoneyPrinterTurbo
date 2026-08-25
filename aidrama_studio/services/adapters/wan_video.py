@@ -13,7 +13,7 @@ import hashlib
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -22,6 +22,12 @@ import requests
 
 from aidrama_studio.domain import ProductionInputSnapshot, ReferenceAssetType
 
+from ..provider_result_download import (
+    ProviderResultDownloader,
+    ProviderResultPolicy,
+    validate_mp4_prefix,
+)
+from ..streaming_artifact import StreamingArtifactSource
 from .production_adapter import ProductionRuntimeAdapter, RuntimeSubmission
 
 
@@ -37,6 +43,11 @@ WAN_TASK_PATH = "/tasks/{task_id}"
 # image solely because it is between the old 10 MB and current 20 MB limits.
 MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_VIDEO_BYTES = 512 * 1024 * 1024
+DEFAULT_WAN_RESULT_HOSTS = (
+    "dashscope-result-bj.oss-cn-beijing.aliyuncs.com",
+    "dashscope-result-hz.oss-cn-hangzhou.aliyuncs.com",
+    "dashscope-result-sg.oss-ap-southeast-1.aliyuncs.com",
+)
 
 
 class WanAdapterError(RuntimeError):
@@ -57,7 +68,7 @@ class WanProviderHTTPError(WanAdapterError):
 class WanProviderConfig:
     """Explicit, non-secret Wan provider configuration."""
 
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     base_url: str = DEFAULT_WAN_BASE_URL
     model: str = DEFAULT_WAN_MODEL
     duration_seconds: int = 5
@@ -66,6 +77,7 @@ class WanProviderConfig:
     resolution: str = "720P"
     request_timeout_seconds: float = 30.0
     max_download_bytes: int = MAX_VIDEO_BYTES
+    result_hosts: tuple[str, ...] = DEFAULT_WAN_RESULT_HOSTS
 
     @classmethod
     def from_environment(cls, **overrides: object) -> "WanProviderConfig":
@@ -79,6 +91,12 @@ class WanProviderConfig:
             "api_key": os.environ.get("DASHSCOPE_API_KEY", "").strip(),
             "base_url": os.environ.get("DASHSCOPE_BASE_URL", DEFAULT_WAN_BASE_URL).strip(),
             "model": os.environ.get("WAN_VIDEO_MODEL", DEFAULT_WAN_MODEL).strip(),
+            "result_hosts": tuple(
+                item.strip()
+                for item in os.environ.get("WAN_RESULT_HOSTS", "").split(",")
+                if item.strip()
+            )
+            or DEFAULT_WAN_RESULT_HOSTS,
         }
         values.update(overrides)
         return cls(**values)
@@ -86,9 +104,21 @@ class WanProviderConfig:
     def validate(self, *, require_api_key: bool = True) -> None:
         if require_api_key and not self.api_key.strip():
             raise WanAdapterError("DASHSCOPE_API_KEY is not configured")
-        parsed = urlsplit(self.base_url.rstrip("/"))
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise WanAdapterError("Wan base_url must be an absolute HTTP(S) URL")
+        try:
+            parsed = urlsplit(self.base_url.rstrip("/"))
+            port = parsed.port
+        except ValueError as exc:
+            raise WanAdapterError("Wan base_url is invalid") from exc
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or port is not None
+        ):
+            raise WanAdapterError("Wan base_url must be a credential-free HTTPS URL")
         if not self.model.strip():
             raise WanAdapterError("Wan model is required")
         if (
@@ -195,7 +225,11 @@ class WanReferenceResolver:
             raise WanAdapterError("reference image size is outside the supported limit")
         if file_size != version.size_bytes:
             raise WanAdapterError("reference image size does not match its immutable version metadata")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != version.sha256:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() != version.sha256:
             raise WanAdapterError("reference image SHA-256 does not match its immutable version metadata")
         mime_type = self._validate_image(path, version.mime_type)
         return WanReferenceSelection(role, binding_key, version.id, path, mime_type)
@@ -333,9 +367,25 @@ class WanInputMapper:
 class WanVideoClient:
     """Small HTTP boundary for DashScope async video synthesis."""
 
-    def __init__(self, config: WanProviderConfig, *, session: Any | None = None):
+    def __init__(
+        self,
+        config: WanProviderConfig,
+        *,
+        session: Any | None = None,
+        downloader: ProviderResultDownloader | None = None,
+    ):
         self.config = config
         self.session = session or requests.Session()
+        if session is None and hasattr(self.session, "trust_env"):
+            self.session.trust_env = False
+        self.downloader = downloader or ProviderResultDownloader(
+            ProviderResultPolicy(
+                config.result_hosts,
+                config.max_download_bytes,
+                timeout_seconds=config.request_timeout_seconds,
+            ),
+            session=self.session,
+        )
 
     def create_task(self, payload: Mapping[str, object]) -> str:
         self.config.validate(require_api_key=True)
@@ -352,39 +402,10 @@ class WanVideoClient:
             raise WanAdapterError("Wan task id is required")
         return self._request("GET", WAN_TASK_PATH.format(task_id=str(task_id).strip()))
 
-    def download_result(self, url: str) -> bytes:
-        parsed = urlsplit(str(url or "").strip())
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise WanAdapterError("Wan result URL must be HTTP(S)")
-        try:
-            response = self.session.get(url, stream=True, timeout=self.config.request_timeout_seconds)
-            if response.status_code < 200 or response.status_code >= 300:
-                raise WanProviderHTTPError(int(response.status_code))
-            content_length = int(response.headers.get("content-length", 0) or 0)
-            if content_length > self.config.max_download_bytes:
-                raise WanAdapterError("Wan result exceeds download limit")
-            chunks: list[bytes] = []
-            total = 0
-            iterator = response.iter_content(chunk_size=1024 * 1024) if hasattr(response, "iter_content") else [response.content]
-            for chunk in iterator:
-                if not chunk:
-                    continue
-                total += len(chunk)
-                if total > self.config.max_download_bytes:
-                    raise WanAdapterError("Wan result exceeds download limit")
-                chunks.append(bytes(chunk))
-            result = b"".join(chunks)
-        except WanAdapterError:
-            raise
-        except requests.RequestException as exc:
-            raise WanAdapterError(f"Wan result download failed: {type(exc).__name__}") from exc
-        finally:
-            close = locals().get("response")
-            if close is not None and hasattr(close, "close"):
-                close.close()
-        if not result:
-            raise WanAdapterError("Wan result download is empty")
-        return result
+    def stream_result(self, url: str) -> StreamingArtifactSource:
+        """Return a process-local writer; the signed URL is never metadata."""
+
+        return self.downloader.source(url, prefix_validator=validate_mp4_prefix)
 
     def _request(
         self,
@@ -430,6 +451,7 @@ class WanProductionAdapter(ProductionRuntimeAdapter):
     """ProductionRuntimeAdapter for one Wan image-to-video shot."""
 
     name = "wan_video"
+    poll_interval_seconds = 10.0
     submission_uncertain_on_error = True
     STATUS_MAP = {
         "PENDING": "QUEUED",
@@ -503,19 +525,16 @@ class WanProductionAdapter(ProductionRuntimeAdapter):
         if self.map_status(response) != "SUCCEEDED":
             raise WanAdapterError("Wan result requested before task succeeded")
         video_url = self._video_url(response)
-        content = self.client.download_result(video_url)
-        self._validate_video_bytes(content)
+        stream_source = self.client.stream_result(video_url)
         trace = dict(self._trace.get(runtime_reference, {}))
         trace.update(
             {
                 "provider_task_id": runtime_reference,
                 "mime_type": "video/mp4",
-                "size_bytes": len(content),
-                "sha256": hashlib.sha256(content).hexdigest(),
             }
         )
         return {
-            "content": content,
+            "stream_source": stream_source,
             "filename": f"wan-{_safe_task_name(runtime_reference)}.mp4",
             "artifact_type": "wan-video",
             "metadata": trace,
@@ -555,17 +574,6 @@ class WanProductionAdapter(ProductionRuntimeAdapter):
                     return value.strip()
         raise WanAdapterError("Wan success response has no video URL")
 
-    @staticmethod
-    def _validate_video_bytes(content: bytes) -> None:
-        if not content or len(content) < 16:
-            raise WanAdapterError("Wan video artifact is empty")
-        # MP4/MOV files carry an ftyp box near the beginning.  This rejects
-        # HTML/JSON error pages before the worker records a successful artifact;
-        # deterministic duration/codec QC remains the existing QC service's job.
-        if b"ftyp" not in content[:128]:
-            raise WanAdapterError("Wan result is not a supported MP4 container")
-
-
 def _safe_task_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "-", str(value or "").strip())[:80] or "task"
 
@@ -574,6 +582,7 @@ __all__ = [
     "DEFAULT_WAN_BASE_URL",
     "DEFAULT_WAN_MODEL",
     "MAX_REFERENCE_IMAGE_BYTES",
+    "DEFAULT_WAN_RESULT_HOSTS",
     "WanAdapterError",
     "WanProviderHTTPError",
     "WanProviderConfig",

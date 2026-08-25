@@ -108,7 +108,9 @@ class BackgroundProductionRunner:
             )
         )
         self.adapter_factory = adapter_factory
-        self.runtime_resolver = runtime_resolver or ProductionRuntimeResolver()
+        self.runtime_resolver = runtime_resolver or ProductionRuntimeResolver(
+            repository=self.repository
+        )
         self.guard = SingleInstanceGuard(self.repository.paths.root)
 
     def enqueue(self, project_id: str, execution_id: str) -> ProviderTask:
@@ -140,6 +142,8 @@ class BackgroundProductionRunner:
         completed: list[ProviderTask] = []
         with self.guard:
             for task in tasks:
+                if not self._retry_due(task):
+                    continue
                 if task.state in {"SUBMISSION_UNCERTAIN", "RECONCILIATION_REQUIRED"}:
                     # Never automatically retry an uncertain paid side effect.
                     completed.append(task)
@@ -176,6 +180,44 @@ class BackgroundProductionRunner:
                             runtime_plan_ids_by_shot=plan_ids,
                         )
                         state = {"SUCCEEDED": "SUCCEEDED", "FAILED": "FAILED", "CANCELLED": "CANCELLED"}.get(result.status.value, "RUNNING")
+                        metadata = dict(running.metadata)
+                        if state == "RUNNING":
+                            execution_ids = {
+                                item.id
+                                for item in self.repository.list_production_executions(
+                                    job_id
+                                )
+                            }
+                            child_tasks = [
+                                child
+                                for child in self.repository.list_provider_tasks(
+                                    task.project_id
+                                )
+                                if child.execution_id in execution_ids
+                            ]
+                            pending = next(
+                                (
+                                    child
+                                    for child in reversed(child_tasks)
+                                    if child.state
+                                    in {
+                                        "PROVIDER_SUCCEEDED_ARTIFACT_PENDING",
+                                        "RECONCILIATION_REQUIRED",
+                                    }
+                                ),
+                                None,
+                            )
+                            if pending is not None:
+                                state = (
+                                    "RECONCILIATION_REQUIRED"
+                                    if pending.state == "RECONCILIATION_REQUIRED"
+                                    else "QUEUED"
+                                )
+                                metadata["not_before"] = pending.metadata.get(
+                                    "artifact_next_retry_at"
+                                )
+                        else:
+                            metadata.pop("not_before", None)
                     else:
                         execution = self.repository.get_production_execution(task.execution_id)
                         if execution is None:
@@ -188,11 +230,48 @@ class BackgroundProductionRunner:
                             ProductionExecutionStatus.FAILED: "FAILED",
                             ProductionExecutionStatus.CANCELLED: "CANCELLED",
                         }.get(result.status, "RUNNING")
-                    updated = running.model_copy(update={"state": state, "updated_at": _now()})
+                        current_task = self.repository.get_provider_task(task.id)
+                        metadata = dict(
+                            current_task.metadata
+                            if current_task is not None
+                            else running.metadata
+                        )
+                        if (
+                            state == "RUNNING"
+                            and current_task is not None
+                            and current_task.state
+                            == "PROVIDER_SUCCEEDED_ARTIFACT_PENDING"
+                        ):
+                            state = "QUEUED"
+                            metadata["not_before"] = current_task.metadata.get(
+                                "artifact_next_retry_at"
+                            )
+                        elif state != "RUNNING":
+                            metadata.pop("not_before", None)
+                    updated = running.model_copy(
+                        update={
+                            "state": state,
+                            "metadata": metadata,
+                            "updated_at": _now(),
+                        }
+                    )
                 except Exception as exc:
                     updated = running.model_copy(update={"state": "FAILED", "error_message": self._safe_error(exc), "updated_at": _now()})
                 completed.append(self.repository.update_provider_task(updated))
         return completed
+
+    @staticmethod
+    def _retry_due(task: ProviderTask) -> bool:
+        value = task.metadata.get("not_before")
+        if not isinstance(value, str) or not value.strip():
+            return True
+        try:
+            deadline = datetime.fromisoformat(value)
+        except ValueError:
+            return True
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        return deadline <= datetime.now(timezone.utc)
 
     def reconcile(self, project_id: str) -> list[ProviderTask]:
         """Mark durable tasks from already-terminal executions without rerun."""

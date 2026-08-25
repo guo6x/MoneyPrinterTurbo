@@ -9,6 +9,7 @@ from aidrama_studio.services import (
     ProductionWorker,
 )
 from aidrama_studio.services.adapters import MPTProductionAdapter, MockProductionAdapter, RuntimeSubmission
+from aidrama_studio.services.streaming_artifact import StreamingArtifactSource
 from test.aidrama_studio.test_production_execution import _ready_job, context as _execution_context
 
 
@@ -86,6 +87,42 @@ class MPTResultRuntime:
     def cancel(self, reference):
         self.status = "cancelled"
         return True
+
+
+class ResumableStreamingAdapter(ProductionRuntimeAdapter):
+    name = "streaming-provider"
+
+    def __init__(self):
+        self.submit_count = 0
+        self.download_count = 0
+
+    def validate(self, snapshot):
+        return True
+
+    def submit(self, snapshot):
+        self.submit_count += 1
+        return RuntimeSubmission("paid-task-1")
+
+    def get_status(self, runtime_reference):
+        return "SUCCEEDED"
+
+    def get_result(self, runtime_reference):
+        self.download_count += 1
+
+        def writer(sink):
+            if self.download_count == 1:
+                sink.write(b"partial")
+                raise OSError("download interrupted")
+            sink.write(b"streamed-final-output")
+
+        return {
+            "artifact_type": "video",
+            "filename": "shot.mp4",
+            "stream_source": StreamingArtifactSource(writer, 1024),
+        }
+
+    def cancel(self, runtime_reference):
+        return False
 
 
 def test_desktop_shutdown_pauses_polling_and_cold_resume_does_not_resubmit(context):
@@ -230,3 +267,55 @@ def test_worker_cancel_notifies_adapter_and_persists_cancelled_event(context):
 def test_worker_requires_explicit_project_scoped_identity():
     with pytest.raises(NotImplementedError):
         ProductionWorker().run(object())
+
+
+def test_provider_success_download_can_resume_without_paid_resubmission(context):
+    repository, project = context
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    execution = service.enqueue_job(project.id, job.id)
+    adapter = ResumableStreamingAdapter()
+    worker = ProductionWorker(service, adapter)
+
+    interrupted = worker.run(project.id, execution.id)
+
+    assert interrupted.status is ProductionExecutionStatus.RUNNING
+    assert adapter.submit_count == 1
+    assert adapter.download_count == 1
+    task = next(
+        item
+        for item in repository.list_provider_tasks(project.id)
+        if item.execution_id == execution.id
+    )
+    assert task.state == "PROVIDER_SUCCEEDED_ARTIFACT_PENDING"
+    assert service.list_artifacts(project.id, execution.id) == []
+    execution_root = repository.paths.projects / project.id / "production" / execution.id
+    assert list(execution_root.iterdir()) == []
+
+    completed = worker.resume(project.id, execution.id)
+
+    assert completed.status is ProductionExecutionStatus.SUCCEEDED
+    assert adapter.submit_count == 1
+    assert adapter.download_count == 2
+    artifact = service.list_artifacts(project.id, execution.id)[0]
+    assert (repository.paths.projects / project.id / artifact.path).read_bytes() == b"streamed-final-output"
+
+
+def test_artifact_db_failure_compensates_finalized_file(context, monkeypatch):
+    repository, project = context
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    execution = service.enqueue_job(project.id, job.id)
+    adapter = ResumableStreamingAdapter()
+    adapter.download_count = 1  # make the first attempted download succeed
+
+    def fail_record(*_args, **_kwargs):
+        raise RuntimeError("injected DB failure")
+
+    monkeypatch.setattr(service, "record_artifact", fail_record)
+    result = ProductionWorker(service, adapter).run(project.id, execution.id)
+
+    assert result.status is ProductionExecutionStatus.RUNNING
+    assert service.list_artifacts(project.id, execution.id) == []
+    execution_root = repository.paths.projects / project.id / "production" / execution.id
+    assert list(execution_root.iterdir()) == []

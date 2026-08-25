@@ -1,43 +1,73 @@
 # AIDrama Studio V1.0 Master Goal State
 
-This document is a durable, non-secret project-management checkpoint for the
-V1.0 release-closure goal.
+This is the durable, non-secret resume state for the V1.0 release-closure
+goal. `HEAD` means the commit containing this document; obtain the exact SHA
+with `git rev-parse HEAD` after checkout.
 
 ## Current state
 
 - Target branch: `goal/aidrama-studio-v1-0-final-product-release`
-- Base head: `3ce90aad6a70e6173a3826bd4e8eb6c039e0221b`
-- Current head: `3ce90aad6a70e6173a3826bd4e8eb6c039e0221b`
-- Active checkpoint: A — existing closure correctness
-- Worktree was clean when this checkpoint was started.
+- Goal base: `3ce90aad6a70e6173a3826bd4e8eb6c039e0221b`
+- Current head: `HEAD`
+- Active checkpoint: provider polling/reconciliation and remaining release
+  engineering closure.
+- No dependency was installed and no live provider request was made.
 
-## Completed baseline gates
+## Completed checkpoints with current local evidence
 
-- V2 intelligent-director closure is present at the base head.
-- Existing AIDrama baseline validation reported 197 passing tests.
-- The known full-project Windows worker-log path-separator failure remains
-  documented; it is not being hidden as a new regression.
-- AIDrama and original MPT startup smoke checks were previously observed to
-  reach HTTP smoke level.
+- The existing correctness, intake, output-profile, RuntimePlan,
+  GenerationBrief, AppData, diagnostics, credential, final-assembly, TTS and
+  security foundations from prior release checkpoints remain present.
+- Production UI enqueues a bounded, explicitly authorized provider/model plan
+  and returns without running provider polling in the Streamlit lifecycle.
+- The desktop process owns one background runner and one writable data-root
+  lock; frozen provider tasks survive Streamlit reruns and desktop restarts.
+- The Seedance adapter now targets the officially documented
+  `doubao-seedance-2-5-260628` Ark task endpoint, emits typed text/image
+  content from an immutable RuntimePlan and GenerationBrief, preserves exact
+  ordered reference trace, and implements result retrieval.
+- Seedance and Wan provider results use one HTTPS-only, exact-host,
+  public-DNS, redirect-revalidated, size-bounded streaming download boundary.
+- Large provider video results flow directly into project-local temporary
+  files, then flush/fsync, hash, atomic-finalize and DB persistence. Interrupted
+  writes remove temporary files; a DB insert failure compensates the finalized
+  file.
+- Provider success plus artifact-download failure remains a recoverable
+  artifact-pending state tied to the original provider task; it does not
+  submit another paid generation.
+- Nested provider metadata and operator errors drop credentials and result
+  URLs before persistence.
+- Current validation: Python compile PASS, `git diff --check` PASS, focused
+  provider/runtime/security tests PASS, complete AIDrama suite
+  `235 passed, 10 warnings`.
 
 ## Externally blocked gates
 
-- Live paid provider gates require explicit credentials and authorization.
-- Packaged desktop/installer builds require tools that are not installed in
-  the current environment.
+- Live LLM, image, video, Vision and TTS gates require credentials plus
+  explicit paid/live authorization.
+- Real multi-shot paid E2E is not authorized.
+- PyInstaller desktop build and Windows installer execution require missing
+  build tools; none may be installed silently.
+- Code signing requires an external signing certificate.
 
-## Remaining work
+## Known remaining work
 
-- Close Checkpoint A read purity, transactional consistency, current-chain
-  readiness, and reference binding invariants.
-- Implement and validate the safe non-live portions of Checkpoints B through
-  X, including durable intake, runtime plans, physical artifacts, QC,
-  export/restore, diagnostics, security, and release provenance.
-- Run the complete focused/AIDrama/project validation matrix and perform a
-  fresh self-audit before the final report.
+- Complete transient provider polling policy, Retry-After/backoff and orphan
+  reconciliation evidence across cold restart.
+- Finish the real Gemini Vision provider/document audit and canonical LLM
+  invocation-ledger integration.
+- Close final subtitle timing, cloud disclosure/input provenance, remote file
+  lifecycle, portable project restore/delete recovery and diagnostics repair
+  actions.
+- Complete upstream MPT security delta review, distribution license/SBOM and
+  build/installer definitions without installing tools.
+- Run full non-live E2E, portable restore E2E, browser acceptance at both
+  required resolutions, full project regression, startup/desktop smokes,
+  security matrix and final self-audit.
+- Update the final closure report with evidence and truthful external blockers.
 
 ## Next safe implementation step
 
-Audit and correct Producer read projections and Director canonical completion
-semantics, then add fault-injection coverage before moving to the remaining
-Checkpoint A transaction boundaries.
+Implement bounded transient polling/backoff and provider-task reconciliation,
+including restart tests that prove a transient status or result-download
+failure never creates a duplicate paid submission.

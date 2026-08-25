@@ -7,7 +7,7 @@ renderer, FFmpeg, an AI provider, or the MoneyPrinterTurbo runtime.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
@@ -33,7 +33,7 @@ from aidrama_studio.storage.repositories import ProjectRepository
 
 from .production import ProductionService, ProductionServiceError
 from .provider_profiles import ProviderProfileService
-from .security import sanitize_error
+from .security import sanitize_error, sanitize_persistent_metadata
 
 
 def _now() -> str:
@@ -250,6 +250,25 @@ class ProductionExecutionService:
                 missing = set(runtime_plan.reference_version_ids) - set(input_snapshot.reference_asset_versions.values())
                 if missing:
                     raise ProductionExecutionServiceError("RuntimePlan 引用了 snapshot 之外的 reference version")
+        expected_plan_hash = runtime_plan.plan_hash if runtime_plan is not None else None
+        for supplied, expected, label in (
+            (input_snapshot.runtime_plan_id, runtime_plan_id, "RuntimePlan id"),
+            (
+                input_snapshot.generation_brief_id,
+                generation_brief_id,
+                "GenerationBrief id",
+            ),
+            (input_snapshot.runtime_plan_hash, expected_plan_hash, "RuntimePlan hash"),
+        ):
+            if supplied is not None and supplied != expected:
+                raise ProductionExecutionServiceError(f"input snapshot 的 {label} 不匹配")
+        frozen_snapshot = input_snapshot.model_copy(
+            update={
+                "runtime_plan_id": runtime_plan_id,
+                "generation_brief_id": generation_brief_id,
+                "runtime_plan_hash": expected_plan_hash,
+            }
+        )
         for existing in self.repository.list_production_executions(job.id):
             existing_shots = existing.input_snapshot.shot_parameters if existing.input_snapshot else {}
             if shot_id in existing_shots and existing.status in (
@@ -266,7 +285,7 @@ class ProductionExecutionService:
             status=ProductionExecutionStatus.QUEUED,
             worker_type=worker_type.strip(),
             created_at=now,
-            input_snapshot=input_snapshot,
+            input_snapshot=frozen_snapshot,
             runtime_plan_id=runtime_plan_id,
             generation_brief_id=generation_brief_id,
         )
@@ -276,7 +295,7 @@ class ProductionExecutionService:
             attempt_number=(attempts[-1].attempt_number + 1 if attempts else 1),
             status=ProductionAttemptStatus.STARTED,
             runtime_adapter=worker_type.strip(),
-            input_snapshot_json=input_snapshot.to_json_dict(),
+            input_snapshot_json=frozen_snapshot.to_json_dict(),
             created_at=now,
         )
         event = ProductionEvent(
@@ -494,7 +513,9 @@ class ProductionExecutionService:
         updated = task.model_copy(update={
             "state": state or task.state,
             "provider_task_id": provider_task_id if provider_task_id is not None else task.provider_task_id,
-            "metadata": dict(task.metadata) | dict(metadata or {}),
+            "metadata": sanitize_persistent_metadata(
+                dict(task.metadata) | dict(metadata or {})
+            ),
             "submitted_at": submitted_at if submitted_at is not None else task.submitted_at,
             "error_message": error_message,
             "updated_at": _now(),
@@ -536,7 +557,8 @@ class ProductionExecutionService:
             raw = getattr(submission, "metadata", {})
         if not isinstance(raw, Mapping):
             return {}
-        return {str(key): value for key, value in raw.items() if str(key).lower() not in {"api_key", "apikey", "authorization", "token", "secret"}}
+        safe = sanitize_persistent_metadata(raw)
+        return dict(safe) if isinstance(safe, Mapping) else {}
 
     def handle_runtime_event(
         self,
@@ -736,6 +758,53 @@ class ProductionExecutionService:
         for task in self.repository.list_provider_tasks(project_id):
             if task.execution_id == execution_id and task.state not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                 self._update_provider_task(task, state=state)
+
+    def mark_provider_artifact_pending(
+        self,
+        project_id: str,
+        execution_id: str,
+        error: object,
+    ) -> ProviderTask:
+        """Keep a paid provider success resumable when only download failed."""
+
+        execution, _ = self._get_execution(project_id, execution_id)
+        self._require_status(
+            execution,
+            ProductionExecutionStatus.RUNNING,
+            "只有 RUNNING execution 可以等待 artifact 下载",
+        )
+        task = next(
+            (
+                item
+                for item in self.repository.list_provider_tasks(project_id)
+                if item.execution_id == execution_id
+            ),
+            None,
+        )
+        if task is None or not task.provider_task_id:
+            raise ProductionExecutionServiceError("execution 缺少可恢复的 provider task")
+        try:
+            attempt_count = int(task.metadata.get("artifact_download_attempts", 0)) + 1
+        except (TypeError, ValueError):
+            attempt_count = 1
+        delay_seconds = min(300, 10 * (2 ** min(attempt_count - 1, 5)))
+        next_retry_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+        ).isoformat(timespec="microseconds")
+        state = (
+            "PROVIDER_SUCCEEDED_ARTIFACT_PENDING"
+            if attempt_count <= 5
+            else "RECONCILIATION_REQUIRED"
+        )
+        return self._update_provider_task(
+            task,
+            state=state,
+            metadata={
+                "artifact_download_attempts": attempt_count,
+                "artifact_next_retry_at": next_retry_at,
+            },
+            error_message=self._safe_error(error),
+        )
 
     def fail_execution(
         self,
