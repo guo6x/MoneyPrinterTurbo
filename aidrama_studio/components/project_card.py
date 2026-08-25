@@ -27,7 +27,10 @@ def _display_time(value: str) -> str:
         return value
 
 
-def project_card(project: Project) -> str | None:
+def project_card(
+    project: Project, *, workflow_stage: ProjectStatus | None = None
+) -> str | None:
+    display_status = workflow_stage or project.status
     with st.container(border=True):
         st.markdown(
             '<div class="aidrama-cover">PROJECT FRAME</div>', unsafe_allow_html=True
@@ -36,14 +39,14 @@ def project_card(project: Project) -> str | None:
         with left:
             st.markdown(f"### {project.title}")
         with right:
-            status_badge(project.status)
+            status_badge(display_status)
         description = project.description or "尚未添加项目描述。"
         st.caption(description)
         st.markdown(
             f"**{project.aspect_ratio.value}** · {project.target_duration_seconds} 秒  "
             f"\n更新于 {_display_time(project.updated_at)}"
         )
-        st.progress(PROGRESS[project.status])
+        st.progress(PROGRESS[display_status])
         open_col, edit_col, delete_col = st.columns(3)
         if open_col.button("打开", key=f"open-{project.id}", use_container_width=True):
             return "open"

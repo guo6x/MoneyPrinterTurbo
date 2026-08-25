@@ -77,15 +77,16 @@ the repository does not grant rights to bundle the proprietary files.
 
 `installer/AIDramaStudio.iss` is an Inno Setup definition with a stable AppId,
 per-user installation, upgrade-in-place semantics and no deletion rule for the
-separate `%LOCALAPPDATA%\AIDrama Studio` project directory. It cannot be built
+separate `%LOCALAPPDATA%\AIDramaStudio` project directory (the spaced
+`AIDrama Studio` name is reserved for the installer/program-group display). It cannot be built
 on the current machine because Inno Setup is absent; no tool was installed.
 
 ## Current gate status
 
 - `LICENSE_NOTICE=PASS`
 - `THIRD_PARTY_NOTICES=PASS` (source/build definition)
-- `RELEASE_SBOM=PASS` (generator and tests; final built SBOM pending build)
-- `BUILD_PROVENANCE=PASS` (generator and tests; final artifact pending build)
+- `RELEASE_SBOM=GENERATOR_TEST_PASS_FINAL_PACKAGE_PENDING` (generator and tests; final built SBOM pending build)
+- `BUILD_PROVENANCE=GENERATOR_TEST_PASS_FINAL_ARTIFACT_PENDING` (generator and tests; final artifact pending build)
 - `THIRD_PARTY_LICENSE_AUDIT=BLOCKED_FINAL_PACKAGE_AND_PROPRIETARY_SDK_REVIEW`
 - `INSTALLER_CHECKSUM=BLOCKED_INSTALLER_BUILD`
 - `CODE_SIGNING_STATUS=BLOCKED_NO_CERTIFICATE`

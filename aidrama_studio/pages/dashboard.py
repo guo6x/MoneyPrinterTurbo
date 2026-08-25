@@ -15,6 +15,7 @@ from aidrama_studio.components.page_header import page_header
 from aidrama_studio.components.project_card import project_card
 from aidrama_studio.domain import AspectRatio, Project, ProjectStatus
 from aidrama_studio.services import (
+    CurrentProductionStateService,
     HeavyJobService,
     ProjectArchiveError,
     ProjectArchiveService,
@@ -315,7 +316,11 @@ def _create_project_form(service: ProjectService) -> None:
                 _navigate("story")
 
 
-def _edit_project(service: ProjectService, project: Project) -> None:
+def _edit_project(
+    service: ProjectService,
+    project: Project,
+    canonical_status: ProjectStatus | None = None,
+) -> None:
     from aidrama_studio.services.runtime_foundation import OutputProfileService
 
     output_profile = OutputProfileService(service.repository).ensure_for_project(project.id)
@@ -326,14 +331,11 @@ def _edit_project(service: ProjectService, project: Project) -> None:
             description = st.text_area(
                 "一句话描述", value=project.description, max_chars=1000
             )
-            statuses = list(ProjectStatus)
             aspects = list(AspectRatio)
-            status = st.selectbox(
-                "项目状态",
-                statuses,
-                index=statuses.index(project.status),
-                format_func=lambda item: item.value,
-            )
+            stage = canonical_status or CurrentProductionStateService(
+                service.repository
+            ).workflow_stage(project.id)
+            st.info(f"当前制作阶段（系统派生） · {stage.value}")
             aspect = st.selectbox(
                 "画幅",
                 aspects,
@@ -392,7 +394,6 @@ def _edit_project(service: ProjectService, project: Project) -> None:
                     project.id,
                     title=title,
                     description=description,
-                    status=status,
                     aspect_ratio=aspect,
                     target_duration_seconds=int(duration),
                     delivery_resolution_label=delivery_resolution,
@@ -462,12 +463,28 @@ def render() -> None:
         st.error("工作台初始化失败，请检查数据库目录权限。")
         return
 
+    current_state_service = CurrentProductionStateService(service.repository)
+    canonical_statuses: dict[str, ProjectStatus] = {}
+    for project in projects:
+        try:
+            canonical_statuses[project.id] = current_state_service.workflow_stage(
+                project.id
+            )
+        except Exception:
+            # Keep the dashboard readable if a legacy record is malformed, but
+            # make the fallback explicit rather than treating the DB column as
+            # a second workflow authority.
+            logger.exception("failed to derive canonical workflow stage")
+            canonical_statuses[project.id] = project.status
+
     active_count = sum(
-        project.status not in {ProjectStatus.DRAFT, ProjectStatus.COMPLETED}
+        canonical_statuses[project.id]
+        not in {ProjectStatus.DRAFT, ProjectStatus.COMPLETED}
         for project in projects
     )
     completed_count = sum(
-        project.status is ProjectStatus.COMPLETED for project in projects
+        canonical_statuses[project.id] is ProjectStatus.COMPLETED
+        for project in projects
     )
     metric_cols = st.columns(3)
     metric_cols[0].metric("项目总数", len(projects))
@@ -510,7 +527,7 @@ def render() -> None:
     if editing_id:
         editing = next((item for item in projects if item.id == editing_id), None)
         if editing:
-            _edit_project(service, editing)
+            _edit_project(service, editing, canonical_statuses[editing.id])
     if deleting_id:
         deleting = next((item for item in projects if item.id == deleting_id), None)
         if deleting:
@@ -520,7 +537,9 @@ def render() -> None:
     columns = st.columns(3)
     for index, project in enumerate(projects):
         with columns[index % 3]:
-            action = project_card(project)
+            action = project_card(
+                project, workflow_stage=canonical_statuses[project.id]
+            )
             if action == "open":
                 st.session_state.current_project_id = project.id
                 st.query_params["project"] = project.id

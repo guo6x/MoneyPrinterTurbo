@@ -192,12 +192,12 @@ RUNTIME_SECRET_REDACTION=PASS
 NO_ABSOLUTE_PATH_IN_PERSISTED_ERRORS=PASS
 LOG_ROTATION=PASS
 LICENSE_NOTICE=PASS
-THIRD_PARTY_LICENSE_AUDIT=PASS
+THIRD_PARTY_LICENSE_AUDIT=BLOCKED_FINAL_PACKAGE_AND_PROPRIETARY_SDK_REVIEW
 FFMPEG_DISTRIBUTION_LICENSE_AUDIT=BLOCKED_EXTERNAL_LEGAL_APPROVAL_GPL_BINARY
 THIRD_PARTY_NOTICES=PASS
-RELEASE_SBOM=PASS
-BUILD_PROVENANCE=PASS
-INSTALLER_CHECKSUM=PASS
+RELEASE_SBOM=GENERATOR_TEST_PASS_FINAL_PACKAGE_PENDING
+BUILD_PROVENANCE=GENERATOR_TEST_PASS_FINAL_ARTIFACT_PENDING
+INSTALLER_CHECKSUM=BLOCKED_INSTALLER_BUILD
 CODE_SIGNING_STATUS=BLOCKED_EXTERNAL_CERTIFICATE
 
 FIRST_RUN_ONBOARDING=PASS
@@ -232,7 +232,7 @@ REAL_MULTI_SHOT_GENERATION=BLOCKED_EXTERNAL_CREDENTIALS_AUTHORIZATION
 REAL_USER_JOURNEY_E2E=BLOCKED_EXTERNAL_CREDENTIALS_AUTHORIZATION
 
 MIGRATION_COUNT_TOTAL=30
-NEW_MIGRATIONS=024-030
+NEW_MIGRATIONS=019-030
 MIGRATION_FRESH_INSTALL=PASS
 MIGRATION_UPGRADE_FROM_018=PASS
 MIGRATION_IDEMPOTENCY=PASS
@@ -318,3 +318,26 @@ HARDWARE_CAPABILITY_TRUTH=PASS
 CONSISTENT_PROJECT_EXPORT_SNAPSHOT=PASS
 PROVIDER_CONTENT_REJECTION_HANDLING=PASS
 V1_SCOPE_FREEZE=PASS
+
+## Internal blocker verification addendum
+
+The final internal review independently reproduced and closed the two code
+findings below, and corrected one release-evidence inconsistency. No Provider, packaging tool, or dependency was
+invoked.
+
+LEGACY_MIGRATION_FINDING=CONFIRMED_AND_FIXED
+LEGACY_MIGRATION_EVIDENCE=SQLite backup now populates the actual target database; a filesystem-backed fixture preserved Project, Story Bible, Structured Script, Shot Plan, and a physical project file. Target `PRAGMA integrity_check` returned `ok`, and normal `ProjectRepository` startup recovered the records.
+LEGACY_MIGRATION_FAILURE_RECOVERY=PASS (injected project-copy failure left legacy database/files untouched; retry succeeded)
+LEGACY_TARGET_CONFLICT_GUARD=PASS (partial target quarantined for retry; populated target never overwritten; successful migration is idempotent)
+
+PROJECT_STAGE_FINDING=CONFIRMED_AND_FIXED
+PROJECT_STAGE_EVIDENCE=Before the fix, `ProjectService.update(status=PRODUCTION|REVIEW|POSTPRODUCTION)` persisted those values while `CurrentProductionStateService.workflow_stage()` remained `DRAFT`.
+PROJECT_STAGE_SINGLE_TRUTH=PASS (canonical stage is derived from production records; legacy projects.status is only a compatibility projection)
+PROJECT_STAGE_USER_EDIT_DISABLED=PASS (Dashboard shows the derived stage read-only and no longer submits a workflow-stage selector)
+
+RELEASE_EVIDENCE_FINDING=INCONSISTENCY_CORRECTED
+RELEASE_EVIDENCE_CONSISTENCY=PASS (source notices and generators are evidenced; final package, physical build provenance, installer checksum, proprietary SDK review, and GPL FFmpeg approval remain explicitly blocked until external artifacts/approvals exist)
+V1_BASE_MIGRATION_VERSION=018
+FINAL_MIGRATION_VERSION=030
+NEW_MIGRATIONS_FROM_V1_BASE=019-030
+CANONICAL_APPDATA_PATH=%LOCALAPPDATA%\\AIDramaStudio (installer/program-group display may use spaced `AIDrama Studio`)

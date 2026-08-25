@@ -39,11 +39,14 @@ class ProjectService:
         quality_mode: str = "STANDARD",
     ) -> Project:
         now = utc_now_iso()
+        requested_status = ProjectStatus(status)
+        if requested_status is not ProjectStatus.DRAFT:
+            raise ValueError("项目制作阶段由 canonical production state 派生，不能手工指定")
         project = Project(
             id=uuid4().hex,
             title=title.strip(),
             description=description.strip(),
-            status=ProjectStatus(status),
+            status=ProjectStatus.DRAFT,
             aspect_ratio=AspectRatio(aspect_ratio),
             target_duration_seconds=int(target_duration_seconds),
             created_at=now,
@@ -94,9 +97,9 @@ class ProjectService:
         *,
         title: str,
         description: str,
-        status: ProjectStatus | str,
         aspect_ratio: AspectRatio | str,
         target_duration_seconds: int,
+        status: ProjectStatus | str | None = None,
         delivery_resolution_label: str | None = None,
         target_fps: float | None = None,
         quality_mode: str | None = None,
@@ -104,18 +107,24 @@ class ProjectService:
         existing = self.get(project_id)
         if existing is None:
             raise KeyError("要更新的项目不存在")
-        requested_status = ProjectStatus(status)
-        if requested_status is ProjectStatus.COMPLETED:
-            from .current_state import CurrentProductionStateService
+        from .current_state import CurrentProductionStateService
 
-            if CurrentProductionStateService(self.repository).workflow_stage(project_id) is not ProjectStatus.COMPLETED:
-                raise ValueError("项目尚未完成当前 canonical production/post chain")
+        canonical_status = CurrentProductionStateService(self.repository).workflow_stage(project_id)
+        if (
+            status is not None
+            and ProjectStatus(status) not in {existing.status, canonical_status}
+        ):
+            raise ValueError(
+                "项目制作阶段由 canonical production state 派生，不能手工修改"
+            )
         requested_aspect = AspectRatio(aspect_ratio)
         requested_duration = int(target_duration_seconds)
         updated = existing.with_updates(
             title=title.strip(),
             description=description.strip(),
-            status=requested_status,
+            # Keep the legacy projects.status column as a compatibility
+            # projection, while the canonical stage remains derived above.
+            status=canonical_status,
             aspect_ratio=requested_aspect,
             target_duration_seconds=requested_duration,
         )

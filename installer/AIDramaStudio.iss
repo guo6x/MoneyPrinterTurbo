@@ -32,6 +32,6 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "启动 AIDrama Studio"; Flags: nowait postinstall skipifsilent
 
-; User projects, credentials and logs live under %LOCALAPPDATA%\AIDrama Studio.
+; User projects, credentials and logs live under %LOCALAPPDATA%\AIDramaStudio.
 ; Deliberately define no user-data deletion section, so uninstall and upgrade
 ; preserve that directory by default.

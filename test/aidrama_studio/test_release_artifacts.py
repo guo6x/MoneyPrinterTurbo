@@ -124,4 +124,4 @@ def test_installer_definition_preserves_separate_user_data_directory():
     assert "DefaultDirName={localappdata}\\Programs\\AIDrama Studio" in source
     assert "Source: \"..\\dist\\AIDramaStudio\\*\"" in source
     assert "[UninstallDelete]" not in source
-    assert "%LOCALAPPDATA%\\AIDrama Studio" in source
+    assert "%LOCALAPPDATA%\\AIDramaStudio" in source

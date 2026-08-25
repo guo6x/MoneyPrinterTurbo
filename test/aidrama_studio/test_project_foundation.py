@@ -7,7 +7,14 @@ import pytest
 
 from aidrama_studio.domain import AspectRatio, ProjectStatus
 from aidrama_studio.services import ProjectService
-from aidrama_studio.storage.database import DatabasePaths, initialize_database
+from aidrama_studio.services.script import ScriptService
+from aidrama_studio.services.shot import ShotService
+from aidrama_studio.services.story import StoryService
+from aidrama_studio.storage.database import (
+    DatabasePaths,
+    initialize_database,
+    migrate_legacy_data,
+)
 from aidrama_studio.storage.migrations import MIGRATIONS
 from aidrama_studio.storage.repositories import ProjectRepository
 
@@ -105,7 +112,6 @@ def test_list_projects_is_most_recent_first(service: ProjectService):
         first.id,
         title=first.title,
         description=first.description,
-        status=ProjectStatus.STORY,
         aspect_ratio=first.aspect_ratio,
         target_duration_seconds=first.target_duration_seconds,
     )
@@ -123,15 +129,143 @@ def test_update_project_persists_fields(service: ProjectService):
         project.id,
         title="After",
         description="Updated description",
-        status=ProjectStatus.PRODUCTION,
         aspect_ratio=AspectRatio.LANDSCAPE,
         target_duration_seconds=120,
     )
 
     assert service.get(project.id) == updated
     assert updated.title == "After"
-    assert updated.status is ProjectStatus.PRODUCTION
+    assert updated.status is ProjectStatus.DRAFT
     assert updated.aspect_ratio is AspectRatio.LANDSCAPE
+
+
+@pytest.mark.parametrize(
+    "requested_status",
+    [ProjectStatus.STORY, ProjectStatus.PREPRODUCTION, ProjectStatus.PRODUCTION,
+     ProjectStatus.REVIEW, ProjectStatus.POSTPRODUCTION, ProjectStatus.COMPLETED],
+)
+def test_workflow_stage_cannot_be_manually_mutated(
+    service: ProjectService, requested_status: ProjectStatus
+):
+    project = service.create(title="Canonical stage")
+
+    with pytest.raises(ValueError, match="canonical production state"):
+        service.update(
+            project.id,
+            title=project.title,
+            description=project.description,
+            status=requested_status,
+            aspect_ratio=project.aspect_ratio,
+            target_duration_seconds=project.target_duration_seconds,
+        )
+
+    assert service.get(project.id).status is ProjectStatus.DRAFT
+
+
+def test_legacy_migration_copies_real_database_revisions_and_files(tmp_path: Path):
+    legacy_root = tmp_path / "legacy"
+    target_root = tmp_path / "target"
+    legacy = DatabasePaths(
+        legacy_root / "aidrama.db",
+        legacy_root / "projects",
+        legacy_root / "archived_projects",
+    )
+    target = DatabasePaths(
+        target_root / "aidrama.db",
+        target_root / "projects",
+        target_root / "archived_projects",
+    )
+
+    legacy_repository = ProjectRepository(legacy)
+    project = ProjectService(legacy_repository).create(
+        title="Filesystem legacy", description="preserve me"
+    )
+    story = StoryService(legacy_repository)
+    story_revision = story.approve_revision(story.create_blank_draft(project)["id"])
+    script = ScriptService(legacy_repository)
+    script_revision = script.approve_revision(
+        script.create_manual_script(project, story_revision)["id"]
+    )
+    shot = ShotService(legacy_repository)
+    shot_revision = shot.approve_revision(
+        shot.create_manual_shot_plan(project, script_revision)["id"]
+    )
+    physical_file = legacy_repository.project_directory(project.id) / "evidence.txt"
+    physical_file.write_text("legacy bytes", encoding="utf-8")
+
+    assert migrate_legacy_data(target, legacy=legacy) is True
+    with sqlite3.connect(target.database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    migrated_repository = ProjectRepository(target)
+    assert migrated_repository.get_project(project.id).description == "preserve me"
+    assert migrated_repository.get_story_revision(story_revision["id"])["content"].title
+    assert migrated_repository.get_script_revision(script_revision["id"])["id"] == script_revision["id"]
+    assert migrated_repository.get_shot_revision(shot_revision["id"])["id"] == shot_revision["id"]
+    assert (target.projects / project.id / "evidence.txt").read_text(encoding="utf-8") == "legacy bytes"
+    assert physical_file.read_text(encoding="utf-8") == "legacy bytes"
+    assert migrate_legacy_data(target, legacy=legacy) is False
+
+
+def test_legacy_migration_quarantines_partial_target_and_retries(
+    tmp_path: Path,
+):
+    legacy_root = tmp_path / "legacy"
+    target_root = tmp_path / "target"
+    legacy = DatabasePaths(legacy_root / "aidrama.db", legacy_root / "projects", legacy_root / "archived_projects")
+    target = DatabasePaths(target_root / "aidrama.db", target_root / "projects", target_root / "archived_projects")
+    legacy_repository = ProjectRepository(legacy)
+    project = ProjectService(legacy_repository).create(title="Retry legacy")
+    (legacy_repository.project_directory(project.id) / "asset.txt").write_text("asset", encoding="utf-8")
+    target_root.mkdir(parents=True)
+    sqlite3.connect(target.database).close()
+    target.projects.mkdir(parents=True)
+    (target.projects / "partial.txt").write_text("partial", encoding="utf-8")
+
+    assert migrate_legacy_data(target, legacy=legacy) is True
+    assert ProjectRepository(target).get_project(project.id) is not None
+    assert any((target_root / "backups").glob("legacy-*/partial-aidrama.db"))
+    assert any((target_root / "backups").glob("legacy-*/partial-projects"))
+
+
+def test_legacy_migration_failure_leaves_legacy_untouched_and_retry_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import aidrama_studio.storage.database as database_module
+
+    legacy_root = tmp_path / "legacy"
+    target_root = tmp_path / "target"
+    legacy = DatabasePaths(legacy_root / "aidrama.db", legacy_root / "projects", legacy_root / "archived_projects")
+    target = DatabasePaths(target_root / "aidrama.db", target_root / "projects", target_root / "archived_projects")
+    legacy_repository = ProjectRepository(legacy)
+    project = ProjectService(legacy_repository).create(title="Failure recovery")
+    source_file = legacy_repository.project_directory(project.id) / "asset.txt"
+    source_file.write_text("must survive", encoding="utf-8")
+    original_copytree = database_module.shutil.copytree
+
+    def fail_copytree(*args, **kwargs):
+        raise OSError("simulated project copy failure")
+
+    monkeypatch.setattr(database_module.shutil, "copytree", fail_copytree)
+    with pytest.raises(OSError, match="simulated project copy failure"):
+        migrate_legacy_data(target, legacy=legacy)
+    assert source_file.read_text(encoding="utf-8") == "must survive"
+    assert not target.database.exists()
+    monkeypatch.setattr(database_module.shutil, "copytree", original_copytree)
+    assert migrate_legacy_data(target, legacy=legacy) is True
+    assert ProjectRepository(target).get_project(project.id) is not None
+
+
+def test_legacy_migration_does_not_overwrite_populated_target(tmp_path: Path):
+    legacy_root = tmp_path / "legacy"
+    target_root = tmp_path / "target"
+    legacy = DatabasePaths(legacy_root / "aidrama.db", legacy_root / "projects", legacy_root / "archived_projects")
+    target = DatabasePaths(target_root / "aidrama.db", target_root / "projects", target_root / "archived_projects")
+    ProjectService(ProjectRepository(legacy)).create(title="Legacy")
+    target_project = ProjectService(ProjectRepository(target)).create(title="Keep target")
+
+    assert migrate_legacy_data(target, legacy=legacy) is False
+    assert ProjectRepository(target).get_project(target_project.id).title == "Keep target"
 
 
 def test_delete_requires_explicit_confirmation(service: ProjectService):

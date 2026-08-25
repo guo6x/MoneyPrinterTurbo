@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from .migrations import apply_migrations
 
@@ -84,25 +85,136 @@ def migrate_legacy_data(
     """
     target = target or get_default_paths()
     legacy = legacy or get_legacy_paths()
-    if target.root == legacy.root or target.database.exists() or not legacy.database.exists():
+    if target.root == legacy.root or not legacy.database.exists():
         return False
     target.root.mkdir(parents=True, exist_ok=True)
+
+    def _has_schema_data(database: Path) -> bool:
+        """Return whether an existing target looks like a real installation."""
+        if not database.is_file() or database.stat().st_size == 0:
+            return False
+        connection = None
+        try:
+            connection = sqlite3.connect(database)
+            schema = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+            ).fetchone()
+            if schema is None:
+                return False
+            applied = connection.execute(
+                "SELECT COUNT(*) FROM schema_migrations"
+            ).fetchone()[0]
+            projects = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='projects'"
+            ).fetchone()
+            project_count = (
+                connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+                if projects is not None
+                else 0
+            )
+            # A fully initialized database, or one containing user data,
+            # is a legitimate target and must never be overwritten.  A
+            # fully initialized empty database accompanied by project
+            # files is instead the characteristic partial-migration state
+            # and is quarantined so retry remains possible.
+            from .migrations import MIGRATIONS
+
+            has_project_files = target.projects.exists() and any(target.projects.iterdir())
+            return project_count > 0 or (
+                applied >= len(MIGRATIONS) and not has_project_files
+            )
+        except (OSError, sqlite3.DatabaseError):
+            # A corrupt/partial destination is quarantined below so a retry
+            # can recover from the untouched legacy installation.
+            return False
+        finally:
+            if connection is not None:
+                connection.close()
+
+    # Never silently adopt a destination left by an interrupted migration.
+    # Preserve it under the backup namespace, while refusing to overwrite a
+    # populated/fully initialized target installation.
+    if target.database.exists() and _has_schema_data(target.database):
+        return False
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_root = target.root / "backups" / f"legacy-{stamp}"
+    backup_root = target.root / "backups" / f"legacy-{stamp}-{uuid4().hex[:8]}"
     backup_root.mkdir(parents=True, exist_ok=True)
-    backup_database(legacy.database, backup_root / "aidrama.db")
-    projects_target = target.projects
-    if legacy.projects.exists():
-        shutil.copytree(legacy.projects, projects_target, dirs_exist_ok=True)
-    if legacy.archived_projects.exists():
-        shutil.copytree(legacy.archived_projects, target.archived_projects, dirs_exist_ok=True)
-    # A quick integrity check catches an interrupted/corrupt copy before it is
-    # adopted as the active database.
-    with sqlite3.connect(target.database) as check:
-        integrity = check.execute("PRAGMA integrity_check").fetchone()[0]
-        if integrity != "ok":
-            raise RuntimeError(f"legacy database verification failed: {integrity}")
-    return True
+    quarantine = (
+        (target.database, backup_root / "partial-aidrama.db"),
+        (
+            target.database.with_name(f"{target.database.name}-wal"),
+            backup_root / "partial-aidrama.db-wal",
+        ),
+        (
+            target.database.with_name(f"{target.database.name}-shm"),
+            backup_root / "partial-aidrama.db-shm",
+        ),
+        (target.projects, backup_root / "partial-projects"),
+        (target.archived_projects, backup_root / "partial-archived-projects"),
+    )
+    for source, destination in quarantine:
+        if not source.exists():
+            continue
+        if source.is_dir() and not any(source.iterdir()):
+            source.rmdir()
+            continue
+        shutil.move(str(source), str(destination))
+
+    staging_root = target.root / f".legacy-migration-{uuid4().hex}"
+    staging_root.mkdir(parents=True, exist_ok=False)
+    staged_database = staging_root / "aidrama.db"
+    staged_projects = staging_root / "projects"
+    staged_archived_projects = staging_root / "archived_projects"
+    installed: list[tuple[Path, Path]] = []
+    try:
+        # Keep an auditable backup and build the actual target database via
+        # SQLite backup semantics.  The old implementation only populated
+        # the audit copy, then integrity-checked a newly-created empty target.
+        backup_database(legacy.database, backup_root / "aidrama.db")
+        backup_database(legacy.database, staged_database)
+        check = sqlite3.connect(staged_database)
+        try:
+            integrity = check.execute("PRAGMA integrity_check").fetchone()[0]
+            if integrity != "ok":
+                raise RuntimeError(f"legacy database verification failed: {integrity}")
+        finally:
+            check.close()
+
+        if legacy.projects.exists():
+            shutil.copytree(legacy.projects, staged_projects)
+        if legacy.archived_projects.exists():
+            shutil.copytree(legacy.archived_projects, staged_archived_projects)
+
+        # Install the verified files only after every source has been copied.
+        # Database is installed last, so a failed file copy cannot expose a
+        # partially migrated installation as active.
+        for staged, destination in (
+            (staged_projects, target.projects),
+            (staged_archived_projects, target.archived_projects),
+            (staged_database, target.database),
+        ):
+            if not staged.exists():
+                continue
+            os.replace(staged, destination)
+            installed.append((destination, staged))
+
+        check = sqlite3.connect(target.database)
+        try:
+            integrity = check.execute("PRAGMA integrity_check").fetchone()[0]
+            if integrity != "ok":
+                raise RuntimeError(f"legacy database verification failed: {integrity}")
+        finally:
+            check.close()
+        return True
+    except Exception:
+        # Roll back any installed destination paths. The untouched legacy
+        # installation remains the source of truth and can be retried.
+        for destination, staged in reversed(installed):
+            if destination.exists() and not staged.exists():
+                os.replace(destination, staged)
+        raise
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
 
 
 class UnsupportedDatabaseSchemaError(RuntimeError):
