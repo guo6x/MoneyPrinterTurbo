@@ -250,6 +250,11 @@ def render() -> None:
                     st.success("SQLite integrity: OK")
                 else:
                     st.error("SQLite integrity check failed")
+                if report["sqlite_foreign_key_violations"]:
+                    st.error(f"SQLite foreign-key violations: {len(report['sqlite_foreign_key_violations'])}")
+                else:
+                    st.success("SQLite foreign keys: OK")
+                st.caption("FFmpeg: " + ("READY" if report["ffmpeg_readiness"]["ready"] else "UNAVAILABLE"))
                 st.json({"schema_version": report["schema_version"], "disk": report["disk"], "projects": report["projects"]})
             if st.button("清理安全临时文件", key="diagnostics-clean-temp"):
                 removed = DiagnosticsService().cleanup_safe_temporary_files()

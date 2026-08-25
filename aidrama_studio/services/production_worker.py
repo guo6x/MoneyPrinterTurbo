@@ -112,8 +112,12 @@ class ProductionWorker:
             # recoverable and let startup reconciliation inspect the original
             # provider task rather than issuing a duplicate paid request.
             current = self.execution_service.get_execution(project_id, execution.id)
-            task = next((item for item in self.execution_service.repository.list_provider_tasks(project_id) if item.execution_id == execution.id), None)
-            if task is not None and task.state in {"SUBMISSION_UNCERTAIN", "RECONCILIATION_REQUIRED"}:
+            task = self._provider_task(project_id, execution.id)
+            if task is not None and task.state in {
+                "SUBMITTING",
+                "SUBMISSION_UNCERTAIN",
+                "RECONCILIATION_REQUIRED",
+            }:
                 return current
             if current.status is ProductionExecutionStatus.FAILED:
                 return current
@@ -146,14 +150,57 @@ class ProductionWorker:
             raise ProductionWorkerError(str(exc)) from exc
         if execution.status is not ProductionExecutionStatus.RUNNING:
             raise ProductionWorkerError("只有 RUNNING execution 可以恢复")
+        task = self._provider_task(project_id, execution.id)
+        if task is not None and task.state in {
+            "SUBMITTING",
+            "SUBMISSION_UNCERTAIN",
+            "RECONCILIATION_REQUIRED",
+        }:
+            # Without a trustworthy provider identity there is no safe
+            # automatic action.  In particular, do not call the adapter: a
+            # status lookup cannot be scoped and a submit could duplicate a
+            # paid side effect.
+            return execution
         try:
             runtime_reference = self._runtime_reference(project_id, execution.id)
+            if (
+                task is not None
+                and task.state == "PROVIDER_SUCCEEDED_ARTIFACT_PENDING"
+            ):
+                return self._resume_artifact_download(
+                    project_id,
+                    execution,
+                    runtime_adapter,
+                    runtime_reference,
+                )
             return self._poll(project_id, execution, runtime_adapter, runtime_reference)
         except Exception as exc:
             current = self.execution_service.get_execution(project_id, execution.id)
             if current.status in self._terminal_statuses():
                 return current
             return self._fail(project_id, current, f"worker resume failed: {exc}")
+
+    def _resume_artifact_download(
+        self,
+        project_id: str,
+        execution: ProductionExecution,
+        adapter: ProductionRuntimeAdapter,
+        runtime_reference: str,
+    ) -> ProductionExecution:
+        """Retry only result retrieval after durable provider success."""
+
+        try:
+            self._persist_result_artifacts(
+                project_id, execution.id, adapter, runtime_reference
+            )
+        except Exception as exc:
+            self.execution_service.mark_provider_artifact_pending(
+                project_id, execution.id, exc
+            )
+            return self.execution_service.get_execution(project_id, execution.id)
+        return self.execution_service.complete_execution(
+            project_id, execution.id, {"runtime_reference": runtime_reference}
+        )
 
     def cancel(self, project_id: str, execution_id: str, reason: str | None = None) -> ProductionExecution:
         """Cancel a queued/running execution through the durable service."""
@@ -502,6 +549,18 @@ class ProductionWorker:
             if isinstance(reference, str) and reference.strip():
                 return reference.strip()
         raise ProductionWorkerError("execution 缺少 runtime reference")
+
+    def _provider_task(self, project_id: str, execution_id: str):
+        tasks = [
+            item
+            for item in self.execution_service.repository.list_provider_tasks(project_id)
+            if item.execution_id == execution_id
+            and not (
+                item.provider_id == "RUNTIME_BOUNDARY"
+                and item.idempotency_key == f"production:{execution_id}"
+            )
+        ]
+        return tasks[-1] if tasks else None
 
     def _fail(self, project_id: str, execution: ProductionExecution, message: str) -> ProductionExecution:
         try:

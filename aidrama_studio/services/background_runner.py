@@ -144,13 +144,26 @@ class BackgroundProductionRunner:
             for task in tasks:
                 if not self._retry_due(task):
                     continue
-                if task.state in {"SUBMISSION_UNCERTAIN", "RECONCILIATION_REQUIRED"}:
+                if task.state in {
+                    "SUBMITTING",
+                    "SUBMISSION_UNCERTAIN",
+                    "RECONCILIATION_REQUIRED",
+                }:
                     # Never automatically retry an uncertain paid side effect.
                     completed.append(task)
                     continue
                 running = task.model_copy(update={"state": "RUNNING", "updated_at": _now()})
                 self.repository.update_provider_task(running)
                 try:
+                    if self._has_uncertain_child(task):
+                        updated = running.model_copy(
+                            update={
+                                "state": "RECONCILIATION_REQUIRED",
+                                "updated_at": _now(),
+                            }
+                        )
+                        completed.append(self.repository.update_provider_task(updated))
+                        continue
                     worker = self.worker_factory()
                     if task.execution_id is None:
                         job_id = str(task.request_summary.get("production_job_id") or "")
@@ -227,7 +240,14 @@ class BackgroundProductionRunner:
                             raise BackgroundRunnerError("后台 execution task 不存在")
                         plan = self.repository.get_runtime_plan(execution.runtime_plan_id) if execution.runtime_plan_id else None
                         adapter = self._resolve_adapter(task, plan)
-                        result = worker.run(task.project_id, task.execution_id, adapter=adapter)
+                        if execution.status is ProductionExecutionStatus.RUNNING:
+                            result = worker.resume(
+                                task.project_id, task.execution_id, adapter=adapter
+                            )
+                        else:
+                            result = worker.run(
+                                task.project_id, task.execution_id, adapter=adapter
+                            )
                         state = {
                             ProductionExecutionStatus.SUCCEEDED: "SUCCEEDED",
                             ProductionExecutionStatus.FAILED: "FAILED",
@@ -311,7 +331,11 @@ class BackgroundProductionRunner:
                     if child.execution_id in {item.id for item in executions}
                 ]
                 if any(
-                    child.state in {"SUBMISSION_UNCERTAIN", "RECONCILIATION_REQUIRED"}
+                    child.state in {
+                        "SUBMITTING",
+                        "SUBMISSION_UNCERTAIN",
+                        "RECONCILIATION_REQUIRED",
+                    }
                     for child in child_tasks
                 ):
                     state = "RECONCILIATION_REQUIRED"
@@ -332,10 +356,63 @@ class BackgroundProductionRunner:
             execution = self.repository.get_production_execution(task.execution_id)
             if execution is None:
                 continue
+            related = [
+                item
+                for item in self.repository.list_provider_tasks(project_id)
+                if item.execution_id == execution.id and item.id != task.id
+            ]
+            if any(
+                item.state in {
+                    "SUBMITTING",
+                    "SUBMISSION_UNCERTAIN",
+                    "RECONCILIATION_REQUIRED",
+                }
+                for item in related
+            ):
+                if task.state != "RECONCILIATION_REQUIRED":
+                    changed.append(
+                        self.repository.update_provider_task(
+                            task.model_copy(
+                                update={
+                                    "state": "RECONCILIATION_REQUIRED",
+                                    "updated_at": _now(),
+                                }
+                            )
+                        )
+                    )
+                continue
             state = {ProductionExecutionStatus.SUCCEEDED: "SUCCEEDED", ProductionExecutionStatus.FAILED: "FAILED", ProductionExecutionStatus.CANCELLED: "CANCELLED"}.get(execution.status)
             if state:
                 changed.append(self.repository.update_provider_task(task.model_copy(update={"state": state, "updated_at": _now()})))
+                continue
+            if execution.status is ProductionExecutionStatus.RUNNING and task.state == "RUNNING":
+                state = "QUEUED"
+                changed.append(
+                    self.repository.update_provider_task(
+                        task.model_copy(update={"state": state, "updated_at": _now()})
+                    )
+                )
         return changed
+
+    def _has_uncertain_child(self, task: ProviderTask) -> bool:
+        if task.execution_id is not None:
+            execution_ids = {task.execution_id}
+        else:
+            job_id = str(task.request_summary.get("production_job_id") or "")
+            execution_ids = {
+                execution.id
+                for execution in self.repository.list_production_executions(job_id)
+            } if job_id else set()
+        return any(
+            item.id != task.id
+            and item.execution_id in execution_ids
+            and item.state in {
+                "SUBMITTING",
+                "SUBMISSION_UNCERTAIN",
+                "RECONCILIATION_REQUIRED",
+            }
+            for item in self.repository.list_provider_tasks(task.project_id)
+        )
 
     def cancel(self, project_id: str, execution_id: str, *, reason: str = "user") -> ProviderTask:
         task = next((item for item in self.repository.list_provider_tasks(project_id) if item.execution_id == execution_id), None)

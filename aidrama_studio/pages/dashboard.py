@@ -1,12 +1,131 @@
 from __future__ import annotations
 
+import io
+import os
+import tempfile
+from pathlib import Path
+from typing import BinaryIO
+from uuid import uuid4
+
 import streamlit as st
 from loguru import logger
 
 from aidrama_studio.components.page_header import page_header
 from aidrama_studio.components.project_card import project_card
 from aidrama_studio.domain import AspectRatio, Project, ProjectStatus
-from aidrama_studio.services import ProjectService
+from aidrama_studio.services import ProjectArchiveError, ProjectArchiveService, ProjectService
+
+
+def _export_archive_path(
+    archive_service: ProjectArchiveService, project: Project
+) -> Path:
+    archive_root = archive_service.repository.paths.archived_projects
+    archive_root.mkdir(parents=True, exist_ok=True)
+    target = archive_root / f"{project.id}-{uuid4().hex[:8]}.aidrama"
+    archive_service.export_project(project.id, target)
+    return target
+
+
+def _import_archive_stream(
+    archive_service: ProjectArchiveService, upload: BinaryIO | bytes | bytearray
+) -> str:
+    stream: BinaryIO
+    if isinstance(upload, (bytes, bytearray)):
+        stream = io.BytesIO(bytes(upload))
+    elif hasattr(upload, "read"):
+        stream = upload
+    else:
+        raise ProjectArchiveError("项目归档无效")
+    if hasattr(stream, "seek"):
+        stream.seek(0)
+    archive_root = archive_service.repository.paths.archived_projects
+    archive_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".dashboard-import-", dir=archive_root) as directory:
+        source = Path(directory) / "uploaded.aidrama"
+        total = 0
+        with source.open("xb") as destination:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > archive_service.MAX_ARCHIVE_BYTES:
+                    raise ProjectArchiveError("项目归档超过大小限制")
+                destination.write(chunk)
+            destination.flush()
+            os.fsync(destination.fileno())
+        if total == 0:
+            raise ProjectArchiveError("项目归档为空")
+        archive_service.verify_importable(source)
+        # Restore the archive's canonical project identity. Copying a live
+        # project under a random ID would require a complete PK/FK/provenance
+        # remap and must not be approximated by rewriting project_id columns.
+        return archive_service.import_project(source)
+
+
+def _archive_download_name(title: str) -> str:
+    safe = "".join(character if character.isalnum() or character in "._-" else "_" for character in str(title).strip()).strip("._-")
+    return f"{(safe[:60] or 'project')}.aidrama"
+
+
+def _render_recovery_notice() -> None:
+    notice = st.session_state.get("project_recovery_archive")
+    if not isinstance(notice, dict):
+        return
+    archive = Path(str(notice.get("path") or ""))
+    with st.container(border=True):
+        st.success("项目已删除；已创建并验证可恢复的 Recovery Archive。")
+        st.caption(f"Verified Recovery Archive · {archive.name}")
+        if archive.is_file():
+            with archive.open("rb") as handle:
+                st.download_button(
+                    "下载 Recovery Archive (.aidrama)", data=handle,
+                    file_name=archive.name, mime="application/zip", key="download-delete-recovery",
+                )
+        if st.button("关闭提示", key="dismiss-delete-recovery"):
+            st.session_state.pop("project_recovery_archive", None)
+            st.rerun()
+
+
+def _render_archive_workspace(service: ProjectService, projects: list[Project]) -> None:
+    archive_service = ProjectArchiveService(service.repository)
+    with st.expander("导出 / 导入 / 恢复项目 (.aidrama)", expanded=not projects):
+        st.caption(".aidrama 包会在导出和导入前完成结构、文件哈希与恢复验证；不包含 API 凭据。")
+        if projects:
+            selected = st.selectbox(
+                "导出项目", projects, format_func=lambda item: item.title,
+                key="dashboard-export-project",
+            )
+            if st.button("生成已验证的 .aidrama", key="dashboard-export-archive"):
+                try:
+                    archive = _export_archive_path(archive_service, selected)
+                except Exception:
+                    logger.exception("failed to export project archive")
+                    st.error("项目导出失败；未生成未经验证的归档。")
+                else:
+                    with archive.open("rb") as handle:
+                        st.download_button(
+                            "下载项目归档", data=handle,
+                            file_name=_archive_download_name(selected.title),
+                            mime="application/zip", key=f"download-project-archive-{selected.id}",
+                        )
+        uploaded = st.file_uploader(
+            "导入或恢复 .aidrama", type=["aidrama"], key="dashboard-import-archive",
+            help="恢复保留原项目 ID；如果该项目仍存在，会安全拒绝且绝不覆盖。",
+        )
+        if uploaded is not None and st.button("验证并恢复为新项目", type="primary", key="dashboard-import-project"):
+            try:
+                imported_id = _import_archive_stream(archive_service, uploaded)
+                imported = service.get(imported_id)
+            except Exception:
+                logger.exception("failed to import project archive")
+                st.error("项目归档验证或恢复失败；现有项目未被覆盖。")
+            else:
+                st.session_state.current_project_id = imported_id
+                st.query_params["project"] = imported_id
+                st.session_state["archive_import_result"] = imported.title if imported else imported_id
+                st.success(f"已验证并恢复项目：{imported.title if imported else imported_id}")
+                st.rerun()
 
 
 def _navigate(page: str) -> None:
@@ -125,7 +244,7 @@ def _edit_project(service: ProjectService, project: Project) -> None:
 def _delete_project(service: ProjectService, project: Project) -> None:
     with st.container(border=True):
         st.warning(
-            f"确认删除项目“{project.title}”？数据库记录会删除；非空素材目录会安全归档，不会静默清除。"
+            f"确认删除项目“{project.title}”？删除前会先创建并验证可恢复的 .aidrama Recovery Archive；非空素材目录也会安全归档。"
         )
         confirmed = st.checkbox("我确认删除这个项目", key=f"confirm-{project.id}")
         delete_col, cancel_col = st.columns(2)
@@ -145,8 +264,12 @@ def _delete_project(service: ProjectService, project: Project) -> None:
                 if st.session_state.get("current_project_id") == project.id:
                     st.session_state.current_project_id = None
                 st.session_state.pop("deleting_project_id", None)
+                if result.recovery_archive_to:
+                    st.session_state["project_recovery_archive"] = {
+                        "path": str(result.recovery_archive_to), "project_title": project.title,
+                    }
                 if result.archived_artifacts_to:
-                    st.info(f"非空素材已归档到：{result.archived_artifacts_to}")
+                    st.info(f"非空素材目录已归档：{result.archived_artifacts_to.name}")
                 st.toast("项目已删除")
                 st.rerun()
         if cancel_col.button(
@@ -182,7 +305,13 @@ def render() -> None:
     metric_cols[1].metric("进行中", active_count)
     metric_cols[2].metric("已完成", completed_count)
 
+    _render_recovery_notice()
+    imported_title = st.session_state.pop("archive_import_result", None)
+    if imported_title:
+        st.success(f"项目恢复完成：{imported_title}")
+
     _create_project_form(service)
+    _render_archive_workspace(service, projects)
 
     if not projects:
         st.markdown(

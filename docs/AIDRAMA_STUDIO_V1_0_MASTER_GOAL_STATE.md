@@ -9,8 +9,8 @@ with `git rev-parse HEAD` after checkout.
 - Target branch: `goal/aidrama-studio-v1-0-final-product-release`
 - Goal base: `3ce90aad6a70e6173a3826bd4e8eb6c039e0221b`
 - Current head: `HEAD`
-- Active checkpoint: portable project recovery, active-task deletion safety,
-  provenance-aware diagnostics cleanup and startup reconciliation.
+- Active checkpoint: reconcile the narrowly audited upstream MPT security
+  commits after portable recovery/startup-reconciliation closure.
 - No dependency was installed and no live provider request was made.
 
 ## Completed checkpoints with current local evidence
@@ -109,10 +109,34 @@ with `git rev-parse HEAD` after checkout.
   final video. A real local media test covers this path.
 - The Post UI only selects a plan belonging to its visible immutable
   FinalAssembly, preventing an older production chain from being reused.
+- Portable `.aidrama` export now uses a schema-complete project-owned table
+  allowlist, closed FK/soft-FK graph, exact content and file hashes, Windows
+  path-alias/ZIP-member defenses and a bounded manifest. Export publishes only
+  after an isolated safe-import verification; import restores into same-volume
+  staging and atomically finalizes beside the SQLite row transaction.
+- Project archives preserve canonical immutable rows exactly. If legacy
+  operational metadata would require secret/path redaction, export fails
+  closed instead of silently changing frozen RuntimePlan, snapshot or hash
+  provenance. Authored creative text is never keyword-redacted.
+- Dashboard now gives normal users verified `.aidrama` export and canonical-ID
+  restore. Restore never approximates a project clone by rewriting only
+  project_id columns; an existing canonical ID is rejected without overwrite.
+- Project deletion creates and validates a restorable Recovery Archive first.
+  One shared fail-closed active-work predicate protects provider tasks,
+  Production jobs/executions/shots/attempts, QC, FinalAssembly and Post work,
+  and is rechecked inside the deletion transaction.
+- Diagnostics covers FK integrity, FFmpeg/provider readiness and canonical
+  Source Pack/reference/production/final/post/voice/music media. Cleanup only
+  considers stale application-shaped hidden temporary names, then rechecks
+  active work and canonical references under `BEGIN IMMEDIATE` before unlink.
+- Startup reconciliation resumes RUNNING executions through the original
+  provider identity, retries artifact download without another provider POST,
+  and treats persisted `SUBMITTING`/submission-uncertain work as manual
+  reconciliation. A crash-window test proves no second paid submit occurs.
 - Current validation: Python compile PASS, `git diff --check` PASS, focused
-  FinalAssembly/Post/TTS tests `30 passed, 10 warnings`, complete AIDrama suite
-  `285 passed, 10 warnings`, and AIDrama/original-MPT HTTP startup smokes PASS.
-  No live request was made.
+  recovery/diagnostics/worker tests `55 passed, 1 expected duplicate-ZIP
+  warning`, complete AIDrama suite `313 passed, 11 warnings`, and
+  AIDrama/original-MPT HTTP startup smokes PASS. No live request was made.
 
 ## Externally blocked gates
 
@@ -125,8 +149,8 @@ with `git rev-parse HEAD` after checkout.
 
 ## Known remaining work
 
-- Close cloud disclosure/input provenance, remote file lifecycle, portable
-  project restore/delete recovery and diagnostics repair actions.
+- Close provider-specific cloud disclosure/input provenance and remote-file
+  lifecycle evidence that remain incomplete for Wan/Gemini paths.
 - Complete upstream MPT security delta review, distribution license/SBOM and
   build/installer definitions without installing tools.
 - Run full non-live E2E, portable restore E2E, browser acceptance at both
@@ -136,9 +160,21 @@ with `git rev-parse HEAD` after checkout.
 
 ## Next safe implementation step
 
-Harden project archive/import isolation, complete recoverable deletion and
-active-task guards, then make diagnostics cleanup provenance-aware and startup
-reconciliation resubmit-safe.
+Reconcile the six already-audited upstream MPT security commits as narrow,
+reviewable patches (no wholesale upstream merge), run their focused regressions
+and the full project suite, then continue release/legal/build definitions.
+
+## Project recovery and startup acceptance
+
+- `PROJECT_EXPORT=PASS`
+- `PROJECT_IMPORT=PASS`
+- `PROJECT_BACKUP_RESTORE=PASS`
+- `PROJECT_ACTIVE_TASK_DELETE_GUARD=PASS`
+- `PROJECT_DELETE_RECOVERY=PASS`
+- `PROVENANCE_AWARE_CLEANUP=PASS`
+- `DIAGNOSTICS_CENTER=PASS`
+- `STARTUP_RECONCILIATION=PASS`
+- Paid `SUBMITTING` crash window: FAIL-CLOSED / no automatic resubmit
 
 ## Final media and post-production acceptance
 

@@ -428,7 +428,17 @@ class ProductionExecutionService:
         # A durable provider identity is the recovery boundary.  If the
         # process was restarted after a successful provider POST, never issue
         # another paid POST; resume polling the original task instead.
-        if task.state in {"SUBMISSION_UNCERTAIN", "RECONCILIATION_REQUIRED"} and not task.provider_task_id:
+        if task.state in {
+            "SUBMITTING",
+            "SUBMISSION_UNCERTAIN",
+            "RECONCILIATION_REQUIRED",
+        } and not task.provider_task_id:
+            if task.state == "SUBMITTING":
+                self._update_provider_task(
+                    task,
+                    state="RECONCILIATION_REQUIRED",
+                    error_message="provider submit interrupted before identity persistence",
+                )
             raise ProductionExecutionServiceError("provider submission 状态不确定，必须先 reconciliation")
         self._adapters[execution.id] = adapter
         if task.provider_task_id:
@@ -773,16 +783,7 @@ class ProductionExecutionService:
             ProductionExecutionStatus.RUNNING,
             "只有 RUNNING execution 可以等待 artifact 下载",
         )
-        task = next(
-            (
-                item
-                for item in self.repository.list_provider_tasks(project_id)
-                if item.execution_id == execution_id
-            ),
-            None,
-        )
-        if task is None or not task.provider_task_id:
-            raise ProductionExecutionServiceError("execution 缺少可恢复的 provider task")
+        task = self._execution_provider_task(project_id, execution_id)
         try:
             attempt_count = int(task.metadata.get("artifact_download_attempts", 0)) + 1
         except (TypeError, ValueError):
@@ -902,8 +903,15 @@ class ProductionExecutionService:
         task = next(
             (
                 item
-                for item in self.repository.list_provider_tasks(project_id)
+                for item in reversed(
+                    self.repository.list_provider_tasks(project_id)
+                )
                 if item.execution_id == execution_id
+                and not (
+                    item.provider_id == "RUNTIME_BOUNDARY"
+                    and item.idempotency_key == f"production:{execution_id}"
+                )
+                and item.provider_task_id
             ),
             None,
         )

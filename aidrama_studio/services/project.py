@@ -12,11 +12,14 @@ from aidrama_studio.domain import AspectRatio, Project, ProjectStatus
 from aidrama_studio.domain.project import utc_now_iso
 from aidrama_studio.storage import ProjectRepository
 
+from .active_work import project_has_active_work
+
 
 @dataclass(frozen=True, slots=True)
 class DeleteProjectResult:
     deleted: bool
     archived_artifacts_to: Path | None = None
+    recovery_archive_to: Path | None = None
 
 
 class ProjectService:
@@ -104,42 +107,78 @@ class ProjectService:
         if project is None:
             return DeleteProjectResult(deleted=False)
 
-        # Never delete a project while a durable provider/execution task could
-        # still write into its storage. Cancellation/reconciliation must happen
-        # first; deletion remains an explicit, recoverable archive operation.
+        # First check avoids doing an expensive backup for an obviously active
+        # project. The same fail-closed predicate is rechecked while holding the
+        # deletion transaction, after the backup has been proven importable.
         with self.repository.transaction() as connection:
-            active = connection.execute(
-                "SELECT 1 FROM production_jobs WHERE project_id=? AND status IN ('QUEUED','RUNNING') LIMIT 1",
-                (project_id,),
-            ).fetchone()
-            active_task = connection.execute(
-                "SELECT 1 FROM provider_tasks WHERE project_id=? AND state IN ('INTENT','QUEUED','RUNNING','PAUSED') LIMIT 1",
-                (project_id,),
-            ).fetchone()
-        if active or active_task:
-            raise ValueError("项目存在活动制作任务，取消或完成任务后才能删除")
+            self._assert_deletable(connection, project_id)
 
+        from .project_archive import ProjectArchiveService
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        archive_path = (
+            self.repository.paths.archived_projects
+            / f"{project_id}-{timestamp}-{uuid4().hex[:8]}.aidrama"
+        )
+        archive_service = ProjectArchiveService(self.repository)
+        archive_service.export_project(project_id, archive_path)
+
+        # Move the directory out of the live project namespace while the DB
+        # write lock is held. A failed transaction restores it. Preserve the
+        # established browsable artifact-directory result for non-empty projects
+        # in addition to the canonical recovery package.
         project_dir = self.repository.project_directory(project_id)
-        archived_to = None
-        if project_dir.exists():
-            if any(project_dir.iterdir()):
-                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                archived_to = (
-                    self.repository.paths.archived_projects
-                    / f"{project_id}-{timestamp}"
-                )
-                archived_to.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(project_dir), str(archived_to))
-                logger.info(
-                    f"archived non-empty project artifacts before deletion: {archived_to}"
-                )
-            else:
-                project_dir.rmdir()
-
+        staging = (
+            self.repository.paths.archived_projects
+            / f".{project_id}-{uuid4().hex}.pending-delete"
+        )
+        archived_artifacts_to = None
+        staged = False
+        keep_staging = False
         try:
-            deleted = self.repository.delete_project(project_id)
+            with self.repository.transaction() as connection:
+                exists = connection.execute(
+                    "SELECT 1 FROM projects WHERE id=?", (project_id,)
+                ).fetchone()
+                if exists is None:
+                    raise ValueError("项目在删除前已不存在")
+                self._assert_deletable(connection, project_id)
+                if project_dir.exists():
+                    if any(project_dir.iterdir()):
+                        archived_artifacts_to = (
+                            self.repository.paths.archived_projects
+                            / f"{project_id}-{timestamp}-{uuid4().hex[:8]}"
+                        )
+                        staging = archived_artifacts_to
+                        keep_staging = True
+                    staging.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(project_dir), str(staging))
+                    staged = True
+                cursor = connection.execute(
+                    "DELETE FROM projects WHERE id=?", (project_id,)
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("项目删除事务未删除精确 project row")
+                violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+                if violations:
+                    raise RuntimeError("项目删除后 foreign_key_check 失败")
         except Exception:
-            if archived_to and archived_to.exists() and not project_dir.exists():
-                shutil.move(str(archived_to), str(project_dir))
+            if staged and staging.exists() and not project_dir.exists():
+                shutil.move(str(staging), str(project_dir))
             raise
-        return DeleteProjectResult(deleted=deleted, archived_artifacts_to=archived_to)
+        if staging.exists() and not keep_staging:
+            try:
+                shutil.rmtree(staging)
+            except OSError as exc:
+                logger.warning(f"failed to remove post-delete staging directory: {exc}")
+        logger.info(f"created verified project recovery archive: {archive_path}")
+        return DeleteProjectResult(
+            deleted=True,
+            archived_artifacts_to=archived_artifacts_to,
+            recovery_archive_to=archive_path,
+        )
+
+    @staticmethod
+    def _assert_deletable(connection, project_id: str) -> None:
+        if project_has_active_work(connection, project_id):
+            raise ValueError("项目存在活动制作任务，取消或完成任务后才能删除")

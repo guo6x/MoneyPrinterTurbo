@@ -10,7 +10,9 @@ from aidrama_studio.services import (
     CapabilityRegistry,
     ProductionQueueError,
     ProductionQueueService,
+    ProductionExecutionService,
     ProductionService,
+    ProductionWorker,
     ProductionRuntimeResolutionError,
     ProductionRuntimeResolver,
     ProductionRuntimeAdapter,
@@ -341,6 +343,7 @@ def test_background_runner_defers_artifact_redownload_and_never_resubmits(tmp_pa
 
         def __init__(self):
             self.submits = 0
+            self.status_checks = 0
             self.downloads = 0
 
         def validate(self, snapshot):
@@ -351,6 +354,7 @@ def test_background_runner_defers_artifact_redownload_and_never_resubmits(tmp_pa
             return RuntimeSubmission("paid-task-1")
 
         def get_status(self, runtime_reference):
+            self.status_checks += 1
             return "SUCCEEDED"
 
         def get_result(self, runtime_reference):
@@ -400,7 +404,227 @@ def test_background_runner_defers_artifact_redownload_and_never_resubmits(tmp_pa
 
     assert second[0].state == "FAILED"  # deterministic QC rejects fake media
     assert adapter.submits == 1
+    assert adapter.status_checks == 1
     assert adapter.downloads == 2
     executions = repository.list_production_executions(job.id)
     assert len(executions) == 1
     assert executions[0].status.value == "SUCCEEDED"
+
+
+def test_startup_direct_execution_resumes_original_provider_identity(tmp_path):
+    repository, project = _execution_context.__wrapped__(tmp_path)
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    execution = service.enqueue_job(project.id, job.id)
+
+    class ColdResumeAdapter(ProductionRuntimeAdapter):
+        name = "cold-resume"
+        model_id = "runtime"
+
+        def __init__(self):
+            self.submits = 0
+            self.status_checks = 0
+
+        def validate(self, snapshot):
+            return True
+
+        def submit(self, snapshot):
+            self.submits += 1
+            return RuntimeSubmission("original-paid-task")
+
+        def get_status(self, runtime_reference):
+            self.status_checks += 1
+            assert runtime_reference == "original-paid-task"
+            return "SUCCEEDED"
+
+        def get_result(self, runtime_reference):
+            assert runtime_reference == "original-paid-task"
+            return {"content": b"resumed-output", "filename": "shot.mp4"}
+
+        def cancel(self, runtime_reference):
+            return False
+
+    adapter = ColdResumeAdapter()
+    interrupted = ProductionWorker(
+        service, adapter, should_stop=lambda: True
+    ).run(project.id, execution.id)
+    assert interrupted.status.value == "RUNNING"
+    assert adapter.submits == 1
+
+    runner = BackgroundProductionRunner(
+        repository, adapter_factory=lambda _task, _plan: adapter
+    )
+    wrapper = runner.enqueue(project.id, execution.id)
+    repository.update_provider_task(wrapper.model_copy(update={"state": "RUNNING"}))
+
+    changed = runner.reconcile(project.id)
+    assert [item.state for item in changed if item.id == wrapper.id] == ["QUEUED"]
+    completed = runner.run_once(project.id)
+
+    assert completed[0].state == "SUCCEEDED"
+    assert adapter.submits == 1
+    assert adapter.status_checks == 1
+
+
+def test_submission_uncertain_without_identity_stays_manual_and_calls_no_adapter(tmp_path):
+    repository, project = _execution_context.__wrapped__(tmp_path)
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    execution = service.enqueue_job(project.id, job.id)
+
+    class UncertainAdapter(ProductionRuntimeAdapter):
+        name = "uncertain"
+        model_id = "runtime"
+        submission_uncertain_on_error = True
+
+        def __init__(self):
+            self.submits = 0
+
+        def validate(self, snapshot):
+            return True
+
+        def submit(self, snapshot):
+            self.submits += 1
+            raise OSError("response lost after POST")
+
+        def get_status(self, runtime_reference):
+            raise AssertionError("unknown identity must not be queried")
+
+        def cancel(self, runtime_reference):
+            return False
+
+    adapter = UncertainAdapter()
+    current = ProductionWorker(service, adapter).run(project.id, execution.id)
+    assert current.status.value == "QUEUED"
+    assert adapter.submits == 1
+
+    runner = BackgroundProductionRunner(
+        repository,
+        adapter_factory=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("manual reconciliation must not resolve an adapter")
+        ),
+    )
+    wrapper = runner.enqueue(project.id, execution.id)
+    completed = runner.run_once(project.id)
+
+    assert completed[0].state == "RECONCILIATION_REQUIRED"
+    assert adapter.submits == 1
+
+
+def test_crash_after_submitting_state_never_reposts_paid_request(tmp_path):
+    repository, project = _execution_context.__wrapped__(tmp_path)
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    execution = service.enqueue_job(project.id, job.id)
+
+    class CrashWindowAdapter(ProductionRuntimeAdapter):
+        name = "crash-window"
+        model_id = "runtime"
+
+        def __init__(self):
+            self.submits = 0
+            self.crash = True
+
+        def validate(self, snapshot):
+            return True
+
+        def submit(self, snapshot):
+            self.submits += 1
+            if self.crash:
+                raise SystemExit("simulated process loss after provider POST")
+            raise AssertionError("restart must not submit again")
+
+        def get_status(self, runtime_reference):
+            raise AssertionError("provider identity is unknown")
+
+        def cancel(self, runtime_reference):
+            return False
+
+    adapter = CrashWindowAdapter()
+    with pytest.raises(SystemExit):
+        ProductionWorker(service, adapter).run(project.id, execution.id)
+    task = next(
+        item for item in repository.list_provider_tasks(project.id)
+        if item.execution_id == execution.id
+        and item.provider_id != "RUNTIME_BOUNDARY"
+    )
+    assert task.state == "SUBMITTING"
+
+    adapter.crash = False
+    current = ProductionWorker(
+        ProductionExecutionService(repository), adapter
+    ).run(project.id, execution.id)
+
+    assert current.status.value == "QUEUED"
+    assert adapter.submits == 1
+    assert repository.get_provider_task(task.id).state == "RECONCILIATION_REQUIRED"
+
+    runner = BackgroundProductionRunner(
+        repository,
+        adapter_factory=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("manual reconciliation must not resolve an adapter")
+        ),
+    )
+    wrapper = runner.enqueue(project.id, execution.id)
+    completed = runner.run_once(project.id)
+
+    assert completed[0].state == "RECONCILIATION_REQUIRED"
+    assert adapter.submits == 1
+
+
+def test_direct_execution_artifact_pending_retries_download_without_status_or_submit(tmp_path):
+    repository, project = _execution_context.__wrapped__(tmp_path)
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    execution = service.enqueue_job(project.id, job.id)
+
+    class ArtifactPendingAdapter(ProductionRuntimeAdapter):
+        name = "artifact-pending"
+        model_id = "runtime"
+
+        def __init__(self):
+            self.submits = 0
+            self.status_checks = 0
+            self.downloads = 0
+
+        def validate(self, snapshot):
+            return True
+
+        def submit(self, snapshot):
+            self.submits += 1
+            return RuntimeSubmission("original-provider-task")
+
+        def get_status(self, runtime_reference):
+            self.status_checks += 1
+            return "SUCCEEDED"
+
+        def get_result(self, runtime_reference):
+            self.downloads += 1
+            if self.downloads == 1:
+                raise OSError("temporary download failure")
+            return {"content": b"recovered-output", "filename": "shot.mp4"}
+
+        def cancel(self, runtime_reference):
+            return False
+
+    adapter = ArtifactPendingAdapter()
+    interrupted = ProductionWorker(service, adapter).run(project.id, execution.id)
+    assert interrupted.status.value == "RUNNING"
+    child = next(
+        item
+        for item in repository.list_provider_tasks(project.id)
+        if item.execution_id == execution.id and item.provider_id != "RUNTIME_BOUNDARY"
+    )
+    assert child.state == "PROVIDER_SUCCEEDED_ARTIFACT_PENDING"
+
+    runner = BackgroundProductionRunner(
+        repository, adapter_factory=lambda _task, _plan: adapter
+    )
+    wrapper = runner.enqueue(project.id, execution.id)
+    completed = runner.run_once(project.id)
+
+    assert completed[0].id == wrapper.id
+    assert completed[0].state == "SUCCEEDED"
+    assert adapter.submits == 1
+    assert adapter.status_checks == 1
+    assert adapter.downloads == 2

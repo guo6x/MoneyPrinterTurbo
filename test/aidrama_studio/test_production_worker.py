@@ -96,6 +96,7 @@ class ResumableStreamingAdapter(ProductionRuntimeAdapter):
 
     def __init__(self):
         self.submit_count = 0
+        self.status_count = 0
         self.download_count = 0
 
     def validate(self, snapshot):
@@ -106,6 +107,7 @@ class ResumableStreamingAdapter(ProductionRuntimeAdapter):
         return RuntimeSubmission("paid-task-1")
 
     def get_status(self, runtime_reference):
+        self.status_count += 1
         return "SUCCEEDED"
 
     def get_result(self, runtime_reference):
@@ -331,6 +333,7 @@ def test_provider_success_download_can_resume_without_paid_resubmission(context)
 
     assert completed.status is ProductionExecutionStatus.SUCCEEDED
     assert adapter.submit_count == 1
+    assert adapter.status_count == 1
     assert adapter.download_count == 2
     artifact = service.list_artifacts(project.id, execution.id)[0]
     assert (repository.paths.projects / project.id / artifact.path).read_bytes() == b"streamed-final-output"
