@@ -13,6 +13,7 @@ from aidrama_studio.domain import (
 from aidrama_studio.pages._shared import current_project_or_stop
 from aidrama_studio.services import (
     CreativeIntakeService,
+    DependencyStatusService,
     ScriptService,
     ScriptServiceError,
     StoryService,
@@ -481,6 +482,12 @@ def _render_bible_editor(project, service: StoryService, revision: dict) -> None
     with beats:
         _render_beats(working, revision_id)
 
+    state = service.draft_state(revision, working)
+    if state.dirty:
+        st.warning("当前 Draft 有未保存修改；请先点击‘保存修改’，离开页面前不要关闭应用。")
+    elif status is StoryRevisionStatus.DRAFT:
+        st.caption(f"Draft 已持久保存 · 最近保存 {state.updated_at.replace('T', ' ').split('.')[0]}")
+
     save_label = "保存修改" if status is StoryRevisionStatus.DRAFT else "保存为新 Draft"
     save_col, approve_col = st.columns([2, 1])
     if save_col.button(save_label, type="primary", use_container_width=True, key=f"save-story-{revision_id}"):
@@ -515,7 +522,7 @@ def _script_working_key(revision_id: str) -> str:
     return f"script_working_{revision_id}"
 
 
-def _render_script_editor(project, story_revision: dict, script_service: ScriptService) -> None:
+def _render_script_editor(project, story_revision: dict, script_service: ScriptService, dependency_service: DependencyStatusService | None = None) -> None:
     ready, detail = script_service.llm_readiness(project.id)
     if ready and st.button("AI 生成 Structured Script", key=f"generate-script-{project.id}"):
         try:
@@ -538,8 +545,12 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
                     st.error(f"创建失败：{exc}")
         return
     current_id = st.session_state.get("script_revision_id")
-    revision = script_service.get_revision(current_id) if current_id else revisions[0]
-    if revision is None:
+    revision = (
+        script_service.get_revision(current_id)
+        if current_id
+        else (script_service.get_latest_draft(project.id) or revisions[0])
+    )
+    if revision is None or revision.get("project_id") != project.id:
         revision = revisions[0]
     st.session_state.script_revision_id = revision["id"]
     history = st.selectbox("Structured Script 历史", revisions, index=next((i for i, x in enumerate(revisions) if x["id"] == revision["id"]), 0), format_func=lambda x: f"v{x['version']} · {x['status'].value}", key=f"script-history-{project.id}")
@@ -550,14 +561,24 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
             forked = script_service.create_revision_from_approved(revision["id"]); st.session_state.script_revision_id = forked["id"]; st.rerun()
         except Exception as exc: st.error(f"无法创建 Draft：{exc}")
     status = revision["status"]
-    if script_service.is_outdated(revision):
-        st.warning("当前 Structured Script 基于旧版 Story Bible（outdated），请从最新 APPROVED Story Bible 创建新 Draft 后再确认。")
+    dependency_service = dependency_service or DependencyStatusService(script_service.repository)
+    dependency = dependency_service.status_for_script(project.id, revision)
     status_text = {ScriptRevisionStatus.DRAFT: "DRAFT", ScriptRevisionStatus.APPROVED: "APPROVED · 已确认", ScriptRevisionStatus.SUPERSEDED: "SUPERSEDED"}[status]
     st.markdown(f'<div class="story-revision-bar"><strong>Structured Script v{revision["version"]}</strong><span class="story-revision-status">{status_text}</span></div>', unsafe_allow_html=True)
     working_key = _script_working_key(revision["id"])
     if working_key not in st.session_state:
         st.session_state[working_key] = revision["content"].model_dump(mode="python")
     working = st.session_state[working_key]
+    if dependency.source_revision_id:
+        st.caption(
+            f"Story Bible 依赖 · {dependency.source_to_current}"
+            + (" · OUTDATED" if dependency.outdated else " · UP TO DATE")
+        )
+    if dependency.outdated:
+        st.warning(
+            "当前 Structured Script 基于旧版 Story Bible（OUTDATED）。"
+            "下游：" + ("、".join(dependency.affected_downstream) or "无")
+        )
     working["title"] = _input("剧本标题", working["title"], f"{revision['id']}-script-title")
     working["summary"] = _input("剧本摘要", working.get("summary", ""), f"{revision['id']}-script-summary", area=True, height=80)
     character_options = [c["id"] for c in story_revision["content"].model_dump(mode="python")["characters"]]
@@ -625,6 +646,11 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
     if st.button("+ 添加 Scene", key=f"add-scene-{revision['id']}"):
         idx = len(working["scenes"]) + 1; loc = location_options[0]
         working["scenes"].append(Scene(id=f"scene_{idx:03d}", order=idx, title=f"Scene {idx}", location_id=loc, estimated_duration_seconds=1, beats=[ScriptBeat(id=f"beat_{idx:03d}_001", order=1, type=ScriptBeatType.ACTION, text="待填写")]).model_dump(mode="python")); st.rerun()
+    state = script_service.draft_state(revision, working)
+    if state.dirty:
+        st.warning("当前 Structured Script Draft 有未保存修改；保存后可在冷启动时恢复。")
+    elif status is ScriptRevisionStatus.DRAFT:
+        st.caption(f"Draft 已持久保存 · 最近保存 {state.updated_at.replace('T', ' ').split('.')[0]}")
     save, approve = st.columns(2)
     if save.button("保存剧本", type="primary", key=f"save-script-{revision['id']}"):
         try:
@@ -636,6 +662,22 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
             saved = script_service.save_draft(project.id, StructuredScript.model_validate(deepcopy(working)), revision_id=revision["id"])
             script_service.approve_revision(saved["id"]); st.session_state.script_revision_id = saved["id"]; st.success("Structured Script 已确认"); st.rerun()
         except Exception as exc: st.error(f"确认失败：{exc}")
+    if dependency.outdated and dependency.current_revision_id:
+        if st.button(
+            "修复依赖：从当前 Story Bible 创建新 Draft",
+            key=f"repair-script-dependency-{revision['id']}",
+        ):
+            try:
+                repaired = script_service.create_revision_from_story(
+                    project.id,
+                    dependency.current_revision_id,
+                    content=StructuredScript.model_validate(deepcopy(working)),
+                )
+                st.session_state.script_revision_id = repaired["id"]
+                st.success("已创建新的 Structured Script Draft；旧 revision 保持不变。")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"依赖修复失败：{exc}")
     with st.expander("阅读模式 / Script Preview"):
         st.caption("Preview 由结构化数据即时渲染，不是单独保存的 canonical 文本。")
         for scene in sorted(working["scenes"], key=lambda x: x["order"]):
@@ -656,11 +698,16 @@ def render() -> None:
         _render_creative_intake(project)
     with development_tab:
         service = StoryService()
+        dependency_service = DependencyStatusService(service.repository)
         revisions = service.list_revisions(project.id)
         current_id = st.session_state.get("story_revision_id")
         revision = service.get_revision(current_id) if current_id else None
+        if revision is not None and revision.get("project_id") != project.id:
+            revision = None
         if revision is None and revisions:
-            revision = revisions[0]
+            # Prefer the latest durable Draft so cold restart returns the
+            # human's last saved work instead of an older approved snapshot.
+            revision = service.get_latest_draft(project.id) or revisions[0]
             st.session_state.story_revision_id = revision["id"]
         left, right = st.columns([0.85, 1.65], gap="large")
         with left:
@@ -679,4 +726,4 @@ def render() -> None:
                     if approved_story is None:
                         st.warning("请先在 Story Bible 页确认一个 APPROVED 版本，才能编辑 Structured Script。")
                     else:
-                        _render_script_editor(project, approved_story, script_service)
+                        _render_script_editor(project, approved_story, script_service, dependency_service)

@@ -23,6 +23,8 @@ from aidrama_studio.services.story_prompt import (
 )
 from aidrama_studio.storage import ProjectRepository
 
+from .drafts import draft_state
+
 
 class StoryServiceError(RuntimeError):
     """Safe error suitable for the Story page."""
@@ -118,6 +120,29 @@ class StoryService:
 
     def list_revisions(self, project_id: str) -> list[dict[str, Any]]:
         return self.repository.list_story_revisions(project_id)
+
+    def get_latest_draft(self, project_id: str) -> dict[str, Any] | None:
+        """Return the newest durable Draft for cold-restart recovery."""
+        return next(
+            (item for item in self.list_revisions(project_id)
+             if item["status"] is StoryRevisionStatus.DRAFT),
+            None,
+        )
+
+    def recover_draft(self, project_id: str, revision_id: str | None = None) -> dict[str, Any] | None:
+        """Load only a project-scoped DRAFT persisted by ``save_draft``."""
+        revision = self.get_revision(revision_id) if revision_id else self.get_latest_draft(project_id)
+        if revision is None:
+            return None
+        if revision["project_id"] != project_id:
+            raise ValueError("Story Bible Draft 不属于该项目")
+        if revision["status"] is not StoryRevisionStatus.DRAFT:
+            raise ValueError("只有 DRAFT revision 可以恢复")
+        return revision
+
+    @staticmethod
+    def draft_state(revision: dict[str, Any], working: Any):
+        return draft_state(revision, working)
 
     def _next_version(self, project_id: str) -> int:
         latest = self.get_latest_revision(project_id)

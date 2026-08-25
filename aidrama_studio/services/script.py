@@ -7,6 +7,7 @@ from aidrama_studio.services.llm_runtime import LLMInvocationError, LLMInvocatio
 from aidrama_studio.services.script_parser import parse_structured_script
 from aidrama_studio.services.script_prompt import build_script_prompt, build_script_repair_prompt
 from aidrama_studio.storage import ProjectRepository
+from .drafts import draft_state
 
 def _now(): return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -19,6 +20,17 @@ class ScriptService:
         return self._llm_gateway.readiness(project_id)
     def get_revision(self, revision_id): return self.repository.get_script_revision(revision_id)
     def list_revisions(self, project_id): return self.repository.list_script_revisions(project_id)
+    def get_latest_draft(self, project_id):
+        """Return the newest durable Draft for cold-restart recovery."""
+        return next((item for item in self.list_revisions(project_id) if item["status"] is ScriptRevisionStatus.DRAFT), None)
+    def recover_draft(self, project_id, revision_id=None):
+        revision = self.get_revision(revision_id) if revision_id else self.get_latest_draft(project_id)
+        if revision is None: return None
+        if revision["project_id"] != project_id: raise ValueError("Structured Script Draft 不属于该项目")
+        if revision["status"] is not ScriptRevisionStatus.DRAFT: raise ValueError("只有 DRAFT revision 可以恢复")
+        return revision
+    @staticmethod
+    def draft_state(revision, working): return draft_state(revision, working)
     def get_latest_revision(self, project_id):
         items = self.list_revisions(project_id); return items[0] if items else None
     def get_approved_revision(self, project_id):
@@ -54,6 +66,25 @@ class ScriptService:
         rev = self.get_revision(revision_id)
         if not rev or rev["status"] is not ScriptRevisionStatus.APPROVED: raise ValueError("只有 APPROVED revision 可以创建新的 DRAFT")
         return self._create(rev["project_id"], rev["source_story_revision_id"], rev["content"])
+
+    def create_revision_from_story(self, project_id: str, story_revision_id: str, content: StructuredScript | None = None):
+        """Create a new Draft pinned to the current Story revision.
+
+        This is the repair entry for an outdated script.  It preserves human
+        content when it still validates against the new Story; otherwise the
+        caller receives a validation error instead of silently dropping edits.
+        """
+        project = self.repository.get_project(project_id)
+        story = self.repository.get_story_revision(story_revision_id)
+        if project is None or story is None or story["project_id"] != project_id:
+            raise ValueError("Story Bible revision 不属于该项目")
+        if story["status"] is not StoryRevisionStatus.APPROVED:
+            raise ValueError("修复必须基于 APPROVED Story Bible")
+        if content is None:
+            return self.create_manual_script(project, story)
+        normalized = StructuredScript.model_validate(content.model_dump(mode="json"))
+        normalized.validate_against(story["content"])
+        return self._create(project_id, story_revision_id, normalized)
     def is_outdated(self, revision_or_id):
         rev = self.get_revision(revision_or_id) if isinstance(revision_or_id, str) else revision_or_id
         if not rev: return False
