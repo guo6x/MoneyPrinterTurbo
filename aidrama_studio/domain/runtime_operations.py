@@ -2,9 +2,29 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class ProviderDeploymentRegion(StrEnum):
+    MAINLAND_CHINA = "MAINLAND_CHINA"
+    INTERNATIONAL = "INTERNATIONAL"
+    LOCAL = "LOCAL"
+    UNSPECIFIED = "UNSPECIFIED"
+
+
+class ProviderPreset(StrEnum):
+    MAINLAND = "MAINLAND"
+    INTERNATIONAL = "INTERNATIONAL"
+    CUSTOM = "CUSTOM"
+
+
+class ProviderVerificationState(StrEnum):
+    NOT_VERIFIED = "NOT_VERIFIED"
+    VERIFIED = "VERIFIED"
+    VERIFICATION_FAILED = "VERIFICATION_FAILED"
 
 
 class CapabilityProfile(BaseModel):
@@ -15,8 +35,29 @@ class CapabilityProfile(BaseModel):
     capability: str = Field(min_length=1, max_length=80)
     provider_id: str = Field(min_length=1, max_length=160)
     model_id: str = Field(min_length=1, max_length=240)
+    endpoint_profile_id: str = Field(default="LEGACY", min_length=1, max_length=160)
+    deployment_region: ProviderDeploymentRegion = ProviderDeploymentRegion.UNSPECIFIED
+    endpoint_class: str = Field(default="UNSPECIFIED", min_length=1, max_length=160)
+    endpoint_url: str | None = Field(default=None, max_length=500)
+    credential_reference: str | None = Field(default=None, max_length=160)
+    verification_state: ProviderVerificationState = ProviderVerificationState.NOT_VERIFIED
+    verified_at: str | None = Field(default=None, max_length=80)
+    selection_priority: int = Field(default=100, ge=0, le=10000)
     profile: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
+    created_at: str = Field(min_length=1, max_length=80)
+    updated_at: str = Field(min_length=1, max_length=80)
+
+
+class ProviderSelectionSettings(BaseModel):
+    """Scope-aware convenience choices that only reference canonical profiles."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(min_length=1, max_length=160)
+    project_id: str | None = Field(default=None, max_length=80)
+    preset: ProviderPreset = ProviderPreset.CUSTOM
+    selections: dict[str, str] = Field(default_factory=dict)
     created_at: str = Field(min_length=1, max_length=80)
     updated_at: str = Field(min_length=1, max_length=80)
 
@@ -78,4 +119,13 @@ class VisionAnalysisRecord(BaseModel):
     created_at: str = Field(min_length=1, max_length=80)
 
 
-__all__ = ["CapabilityProfile", "ProviderTask", "VisionAnalysisRecord", "VisionFrameManifest"]
+__all__ = [
+    "CapabilityProfile",
+    "ProviderDeploymentRegion",
+    "ProviderPreset",
+    "ProviderSelectionSettings",
+    "ProviderTask",
+    "ProviderVerificationState",
+    "VisionAnalysisRecord",
+    "VisionFrameManifest",
+]

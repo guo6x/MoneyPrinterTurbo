@@ -346,7 +346,16 @@ class GeminiVisionProvider(VisionAnalysisProvider):
                 self.provider_name,
                 False,
                 str(exc),
-                {"model": self.config.model},
+                {
+                    "model": self.config.model,
+                    "configured": bool(self.config.api_key),
+                    "deployment_region": "INTERNATIONAL",
+                    "endpoint_class": "GOOGLE_GEMINI_PUBLIC",
+                    "endpoint_profile_id": "runtime:VISION:GOOGLE_GEMINI_VISION:GOOGLE_GEMINI_PUBLIC",
+                    "credential_reference": "GEMINI_API_KEY",
+                    "verification_state": "NOT_VERIFIED",
+                },
+                configured=bool(self.config.api_key),
             )
         if not self.config.api_key:
             reason = "Gemini credential unavailable"
@@ -367,7 +376,15 @@ class GeminiVisionProvider(VisionAnalysisProvider):
                 "input": "video+sampled_frames+exact_references",
                 "structured_output": True,
                 "live_authorized": self.config.allow_paid_live_tests,
+                "configured": bool(self.config.api_key),
+                "deployment_region": "INTERNATIONAL",
+                "endpoint_class": "GOOGLE_GEMINI_PUBLIC",
+                "endpoint_profile_id": "runtime:VISION:GOOGLE_GEMINI_VISION:GOOGLE_GEMINI_PUBLIC",
+                "credential_reference": "GEMINI_API_KEY",
+                "verification_state": "NOT_VERIFIED",
             },
+            configured=bool(self.config.api_key),
+            verified=False,
         )
 
     def analyze(self, *, request: VisionAnalysisRequest) -> VisionAnalysis:

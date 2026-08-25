@@ -1159,6 +1159,76 @@ def _migration_024_vision_analysis_provenance(connection: sqlite3.Connection) ->
     )
 
 
+def _migration_025_regional_provider_selection(connection: sqlite3.Connection) -> None:
+    """Add non-secret regional endpoint metadata and frozen selection provenance."""
+
+    profile_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(provider_capability_profiles)")
+    }
+    profile_additions = (
+        ("endpoint_profile_id", "TEXT NOT NULL DEFAULT 'LEGACY'"),
+        ("deployment_region", "TEXT NOT NULL DEFAULT 'UNSPECIFIED'"),
+        ("endpoint_class", "TEXT NOT NULL DEFAULT 'UNSPECIFIED'"),
+        ("endpoint_url", "TEXT"),
+        ("credential_reference", "TEXT"),
+        ("verification_state", "TEXT NOT NULL DEFAULT 'NOT_VERIFIED'"),
+        ("verified_at", "TEXT"),
+        ("selection_priority", "INTEGER NOT NULL DEFAULT 100"),
+    )
+    for name, definition in profile_additions:
+        if name not in profile_columns:
+            connection.execute(
+                f"ALTER TABLE provider_capability_profiles ADD COLUMN {name} {definition}"
+            )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_provider_profiles_region "
+        "ON provider_capability_profiles(capability, deployment_region, enabled, selection_priority, id)"
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS provider_selection_settings (
+            id TEXT PRIMARY KEY,
+            project_id TEXT,
+            preset TEXT NOT NULL,
+            selections_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_selection_project "
+        "ON provider_selection_settings(project_id) WHERE project_id IS NOT NULL"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_selection_global "
+        "ON provider_selection_settings((1)) WHERE project_id IS NULL"
+    )
+
+    runtime_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(runtime_plans)")
+    }
+    runtime_additions = (
+        ("endpoint_profile_id", "TEXT"),
+        ("deployment_region", "TEXT NOT NULL DEFAULT 'UNSPECIFIED'"),
+        ("endpoint_class", "TEXT NOT NULL DEFAULT 'UNSPECIFIED'"),
+        ("credential_reference", "TEXT"),
+        ("selection_source", "TEXT NOT NULL DEFAULT 'LEGACY'"),
+        ("transmitted_content_types_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("estimated_request_count", "INTEGER NOT NULL DEFAULT 1"),
+    )
+    for name, definition in runtime_additions:
+        if name not in runtime_columns:
+            connection.execute(f"ALTER TABLE runtime_plans ADD COLUMN {name} {definition}")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runtime_plans_endpoint "
+        "ON runtime_plans(project_id, endpoint_profile_id, created_at DESC)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1184,6 +1254,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (22, _migration_022_runtime_operations),
     (23, _migration_023_final_assembly_provenance),
     (24, _migration_024_vision_analysis_provenance),
+    (25, _migration_025_regional_provider_selection),
 )
 
 

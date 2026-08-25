@@ -43,6 +43,8 @@ class CapabilityStatus:
     available: bool
     reason: str = ""
     metadata: Mapping[str, object] = field(default_factory=dict)
+    configured: bool | None = None
+    verified: bool = False
 
     def public_dict(self) -> dict[str, object]:
         """Return safe readiness metadata (never key/token values)."""
@@ -52,6 +54,8 @@ class CapabilityStatus:
             "available": self.available,
             "reason": self.reason,
             "metadata": dict(self.metadata),
+            "configured": self.available if self.configured is None else self.configured,
+            "verified": self.verified,
         }
 
 
@@ -256,9 +260,43 @@ class MPTLLMProvider(LLMProvider):
     @property
     def status(self) -> CapabilityStatus:
         from .ai import llm_configuration_status
+        from app.models.llm_provider import get_llm_provider
 
         ready, reason = llm_configuration_status()
-        return CapabilityStatus(CapabilityKind.LLM, self.provider_name, ready, reason)
+        provider_id = str(self._config_snapshot.get("llm_provider", "")).strip().lower()
+        provider = get_llm_provider(provider_id)
+        model = "runtime"
+        credential_reference = None
+        if provider is not None:
+            model = str(
+                self._config_snapshot.get(
+                    provider.config_key("model_name"), provider.default_model
+                )
+                or provider.default_model
+                or "runtime"
+            )
+            credential_reference = provider.config_key("api_key").upper()
+        if provider_id == "ollama":
+            region = "LOCAL"
+        elif provider_id in {"moonshot", "qwen", "deepseek", "siliconflow", "hunyuan", "baidu"}:
+            region = "MAINLAND_CHINA"
+        elif provider_id:
+            region = "INTERNATIONAL"
+        else:
+            region = "UNSPECIFIED"
+        metadata = {
+            "model": model,
+            "deployment_region": region,
+            "endpoint_class": f"MPT_LLM_{provider_id.upper() or 'UNSPECIFIED'}",
+            "endpoint_profile_id": f"runtime:LLM:MPT_LLM:{provider_id or 'unspecified'}",
+            "credential_reference": credential_reference,
+            "configured": ready,
+            "verification_state": "NOT_VERIFIED",
+        }
+        return CapabilityStatus(
+            CapabilityKind.LLM, self.provider_name, ready, reason, metadata,
+            configured=ready, verified=False,
+        )
 
     def generate_structured(self, prompt: str, *, schema: Mapping[str, object] | None = None) -> dict[str, object]:
         if not self.status.available:
@@ -299,7 +337,33 @@ class RuntimeVideoProvider(VideoGenerationProvider):
             "mode": self.capability.value,
             "model": str(getattr(config, "model", getattr(self.adapter, "model_id", "runtime"))),
         }
-        return CapabilityStatus(self.capability, self.provider_name, configured, reason, metadata)
+        adapter_status = getattr(self.adapter, "status", None)
+        if adapter_status is not None and hasattr(adapter_status, "metadata"):
+            metadata.update(dict(adapter_status.metadata))
+            reason = str(adapter_status.reason or reason)
+            available = bool(adapter_status.available)
+            explicit_configured = getattr(adapter_status, "configured", None)
+            configured = configured if explicit_configured is None else bool(explicit_configured)
+            verified = bool(getattr(adapter_status, "verified", False))
+        else:
+            available = configured
+            verified = False
+        defaults = {
+            "WAN_VIDEO": ("MAINLAND_CHINA", "DASHSCOPE_CN", "DASHSCOPE_API_KEY"),
+            "SEEDANCE": ("MAINLAND_CHINA", "ARK_CN_BEIJING", "ARK_API_KEY"),
+            "MPT_STOCK": ("LOCAL", "MPT_LOCAL", None),
+        }.get(self.provider_name.upper(), ("UNSPECIFIED", f"{self.provider_name.upper()}_RUNTIME", None))
+        metadata.setdefault("deployment_region", defaults[0])
+        metadata.setdefault("endpoint_class", defaults[1])
+        metadata.setdefault("endpoint_profile_id", f"runtime:{self.capability.value}:{self.provider_name}:{defaults[1]}")
+        if defaults[2]:
+            metadata.setdefault("credential_reference", defaults[2])
+        metadata["configured"] = configured
+        metadata.setdefault("verification_state", "NOT_VERIFIED")
+        return CapabilityStatus(
+            self.capability, self.provider_name, available, reason, metadata,
+            configured=configured, verified=verified,
+        )
 
     def validate(self, snapshot: ProductionInputSnapshot) -> bool:
         return self.adapter.validate(snapshot)
@@ -368,10 +432,10 @@ class MPTTTSProvider(TTSProvider):
         try:
             import app.services.voice  # noqa: F401
         except Exception:
-            return CapabilityStatus(CapabilityKind.TTS, self.provider_name, False, "MPT TTS seam unavailable")
+            return CapabilityStatus(CapabilityKind.TTS, self.provider_name, False, "MPT TTS seam unavailable", configured=False)
         if not self.enabled:
-            return CapabilityStatus(CapabilityKind.TTS, self.provider_name, False, "TTS 未启用；设置 AIDRAMA_TTS_ENABLED=1 后才会调用语音服务", {"voice": self.voice})
-        return CapabilityStatus(CapabilityKind.TTS, self.provider_name, True, "configured", {"voice": self.voice, "model": "MPT voice seam"})
+            return CapabilityStatus(CapabilityKind.TTS, self.provider_name, False, "TTS 未启用；设置 AIDRAMA_TTS_ENABLED=1 后才会调用语音服务", {"voice": self.voice, "deployment_region": "LOCAL", "endpoint_class": "MPT_LOCAL_TTS"}, configured=False)
+        return CapabilityStatus(CapabilityKind.TTS, self.provider_name, True, "configured", {"voice": self.voice, "model": "MPT voice seam", "deployment_region": "LOCAL", "endpoint_class": "MPT_LOCAL_TTS", "configured": True, "verification_state": "NOT_VERIFIED"}, configured=True)
 
     def synthesize(self, text: str, *, voice: str, language: str = "zh-CN", sample_rate: int = 48000) -> TTSResult:
         if not self.status.available:

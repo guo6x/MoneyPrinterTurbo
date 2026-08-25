@@ -7,8 +7,10 @@ from loguru import logger
 
 from aidrama_studio.branding import BRAND
 from aidrama_studio.components.page_header import page_header
-from aidrama_studio.services.provider_readiness import ProviderReadinessService, ReadinessState
+from aidrama_studio.domain import ProviderPreset
 from aidrama_studio.services import CredentialReadinessService, CredentialStoreError, DiagnosticsService, DiskSpaceService, WindowsCredentialStore
+from aidrama_studio.services.ai_capabilities import CapabilityKind, default_capability_registry
+from aidrama_studio.services.provider_profiles import ProviderProfileError, ProviderProfileService
 from aidrama_studio.storage import get_default_paths
 
 
@@ -19,6 +21,143 @@ CORE_MODULES = (
     "app.services.material",
     "app.services.voice",
 )
+
+_CAPABILITY_LABELS = {
+    CapabilityKind.LLM: "LLM",
+    CapabilityKind.IMAGE: "图片生成",
+    CapabilityKind.VIDEO_GENERATIVE: "视频生成",
+    CapabilityKind.VISION: "视觉理解",
+    CapabilityKind.TTS: "语音",
+}
+
+_PRESET_LABELS = {
+    ProviderPreset.MAINLAND: "中国大陆",
+    ProviderPreset.INTERNATIONAL: "国际",
+    ProviderPreset.CUSTOM: "自定义",
+}
+
+
+def _profile_label(profile) -> str:
+    region = profile.deployment_region.value
+    return f"{profile.provider_id} / {profile.model_id} · {region} · {profile.endpoint_class}"
+
+
+def _render_provider_model_settings(
+    selection_service: ProviderProfileService | None = None,
+    *,
+    project_id: str | None = None,
+) -> None:
+    service = selection_service or ProviderProfileService(
+        registry=default_capability_registry()
+    )
+    scope_options = ["全局默认"]
+    if project_id:
+        scope_options.append("当前项目默认")
+    scope_label = st.radio(
+        "设置作用域",
+        scope_options,
+        horizontal=True,
+        key="provider-selection-scope",
+    )
+    scope_project_id = project_id if scope_label == "当前项目默认" else None
+    current = service.get_settings(scope_project_id)
+    current_preset = current.preset if current else ProviderPreset.CUSTOM
+    preset_labels = list(_PRESET_LABELS.values())
+    selected_label = st.radio(
+        "模型方案",
+        preset_labels,
+        index=preset_labels.index(_PRESET_LABELS[current_preset]),
+        horizontal=True,
+        key=f"provider-preset-{scope_project_id or 'global'}",
+    )
+    selected_preset = next(
+        preset for preset, label in _PRESET_LABELS.items() if label == selected_label
+    )
+
+    selections = dict(current.selections) if current else {}
+    if selected_preset is ProviderPreset.CUSTOM:
+        st.caption("每种能力独立选择；未选择的能力保持 UNAVAILABLE，不会自动换区。")
+        for capability, label in _CAPABILITY_LABELS.items():
+            try:
+                profiles = service.inventory(scope_project_id, capability)
+            except ProviderProfileError as exc:
+                st.warning(str(exc))
+                profiles = ()
+            option_ids = [""] + [profile.id for profile in profiles]
+            by_id = {profile.id: profile for profile in profiles}
+            current_id = selections.get(capability.value, "")
+            index = option_ids.index(current_id) if current_id in option_ids else 0
+            selected_id = st.selectbox(
+                label,
+                option_ids,
+                index=index,
+                key=f"provider-custom-{scope_project_id or 'global'}-{capability.value}",
+                format_func=lambda item, choices=by_id: (
+                    "UNAVAILABLE" if not item else _profile_label(choices[item])
+                ),
+            )
+            if selected_id:
+                selections[capability.value] = selected_id
+            else:
+                selections.pop(capability.value, None)
+
+    if st.button(
+        "保存模型方案",
+        type="primary",
+        key=f"save-provider-selection-{scope_project_id or 'global'}",
+    ):
+        try:
+            service.save_settings(
+                project_id=scope_project_id,
+                preset=selected_preset,
+                selections=selections,
+            )
+        except ProviderProfileError as exc:
+            st.error(str(exc))
+        else:
+            st.success("模型方案已保存；只影响新建 RuntimePlan。")
+            st.rerun()
+
+    st.markdown("#### 当前解析结果")
+    st.caption("configured 与 verified 独立展示；未进行 live 验证不会标记为已验证。")
+    for capability, label in _CAPABILITY_LABELS.items():
+        try:
+            resolution = service.resolve(scope_project_id, capability)
+        except ProviderProfileError as exc:
+            st.warning(f"{label} · UNAVAILABLE · {exc}")
+            continue
+        public = resolution.as_public_dict()
+        with st.container(border=True):
+            st.markdown(f"**{label}** · {public['provider_id']} / {public['model_id']}")
+            state = "已配置" if public["configured"] else "未配置"
+            verified = "已验证" if public["verified"] else "未验证"
+            st.caption(f"{state} · {verified} · {public['state']}")
+            if public["deployment_region"]:
+                st.caption(
+                    f"区域：{public['deployment_region']} · Endpoint：{public['endpoint_class']}"
+                )
+            if public["state"] == "UNAVAILABLE":
+                st.warning(str(public["detail"]))
+            profile = resolution.profile
+            if profile is not None:
+                with st.expander("高级模型信息"):
+                    st.caption(f"Endpoint profile · {profile.endpoint_profile_id}")
+                    st.caption(f"模型快照 · {profile.model_id}")
+                    limits = {
+                        key: profile.profile[key]
+                        for key in (
+                            "supported_durations",
+                            "minimum_duration_seconds",
+                            "maximum_duration_seconds",
+                            "resolution",
+                            "poll_interval_seconds",
+                        )
+                        if key in profile.profile
+                    }
+                    if limits:
+                        st.json(limits)
+
+    st.info("更改模型方案只影响新 RuntimePlan；已排队、已提交、运行中和历史执行保持原冻结选择。")
 
 
 def check_media_engine() -> tuple[bool, str]:
@@ -54,20 +193,11 @@ def render() -> None:
             st.caption(detail)
 
     with st.container(border=True):
-        st.markdown("### Provider readiness")
-        st.caption("仅显示能力状态，不显示 API Key、Token 或其它 secret。")
-        readiness = ProviderReadinessService().list_capabilities()
-        columns = st.columns(len(readiness))
-        for column, capability in zip(columns, readiness):
-            with column:
-                if capability.state is ReadinessState.READY:
-                    st.success(capability.capability)
-                elif capability.state is ReadinessState.ERROR:
-                    st.error(capability.capability)
-                else:
-                    st.warning(capability.capability)
-                st.caption(capability.provider)
-                st.caption(capability.detail)
+        st.markdown("### 模型方案")
+        st.caption("中国大陆 / 国际 / 自定义均解析到同一 CapabilityRegistry 与 Provider inventory；不会创建第二套 Provider 真相。")
+        _render_provider_model_settings(
+            project_id=st.session_state.get("current_project_id")
+        )
 
     with st.container(border=True):
         st.markdown("### Provider 安全配置")

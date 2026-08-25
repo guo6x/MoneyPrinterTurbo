@@ -20,7 +20,14 @@ from .producer import ProducerService, ProducerServiceError
 from .runtime_foundation import AIInvocationService, GenerationBriefCompiler, OutputProfileService, RuntimeFoundationError, RuntimePlanService
 from .creative_intake import CreativeIntakeError, CreativeIntakeService, DocumentIngestionService, IntakeAnalyzer, SourcePackService
 from .reference_profiles import ReferenceProfileService, ReferenceProfileServiceError
-from .provider_profiles import DurationPlan, ProviderProfileError, ProviderProfileService, ReferenceTrace
+from .provider_profiles import (
+    DurationPlan,
+    ProviderProfileError,
+    ProviderProfileService,
+    ProviderSelectionState,
+    ReferenceTrace,
+    ResolvedProviderSelection,
+)
 from .background_runner import BackgroundProductionRunner, BackgroundRunnerError, SingleInstanceGuard
 from .credentials import CredentialReadinessService, CredentialStoreError, WindowsCredentialStore
 from .project_archive import ProjectArchiveError, ProjectArchiveService
@@ -115,7 +122,8 @@ __all__ = [
     "OutputProfileService", "GenerationBriefCompiler", "RuntimePlanService", "AIInvocationService", "RuntimeFoundationError",
     "CreativeIntakeService", "CreativeIntakeError", "SourcePackService", "DocumentIngestionService", "IntakeAnalyzer",
     "ReferenceProfileService", "ReferenceProfileServiceError",
-    "ProviderProfileService", "ProviderProfileError", "DurationPlan", "ReferenceTrace",
+    "ProviderProfileService", "ProviderProfileError", "ProviderSelectionState",
+    "ResolvedProviderSelection", "DurationPlan", "ReferenceTrace",
     "BackgroundProductionRunner", "BackgroundRunnerError", "SingleInstanceGuard",
     "WindowsCredentialStore", "CredentialStoreError", "CredentialReadinessService",
     "ProjectArchiveService", "ProjectArchiveError",

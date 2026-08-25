@@ -67,7 +67,18 @@ class OpenAIImageProvider(ImageGenerationProvider):
             self.provider_name,
             available,
             reason,
-            {"model": self.config.model, "live_authorized": self.config.allow_paid_live_tests},
+            {
+                "model": self.config.model,
+                "live_authorized": self.config.allow_paid_live_tests,
+                "configured": bool(self.config.api_key),
+                "deployment_region": "INTERNATIONAL",
+                "endpoint_class": "OPENAI_PUBLIC",
+                "endpoint_profile_id": "runtime:IMAGE:OPENAI_IMAGE:OPENAI_PUBLIC",
+                "credential_reference": "OPENAI_API_KEY",
+                "verification_state": "NOT_VERIFIED",
+            },
+            configured=bool(self.config.api_key),
+            verified=False,
         )
 
     def generate_candidate(

@@ -123,14 +123,15 @@ def test_forward_migrations_add_director_events_and_post_source_pin() -> None:
 def test_upgrade_from_023_adds_append_only_vision_provenance_and_is_idempotent() -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
-    for version, migration in MIGRATIONS[:-1]:
+    prior = [(version, migration) for version, migration in MIGRATIONS if version < 24]
+    for version, migration in prior:
         migration(connection)
     connection.execute(
         "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
     )
     connection.executemany(
         "INSERT INTO schema_migrations VALUES (?,?)",
-        [(version, "2026-08-25") for version, _ in MIGRATIONS[:-1]],
+        [(version, "2026-08-25") for version, _ in prior],
     )
     before = {
         row[1]
@@ -138,7 +139,7 @@ def test_upgrade_from_023_adds_append_only_vision_provenance_and_is_idempotent()
     }
     assert "reference_version_ids_json" not in before
 
-    assert apply_migrations(connection) == 1
+    assert apply_migrations(connection) == len(MIGRATIONS) - len(prior)
     columns = {
         row[1]
         for row in connection.execute("PRAGMA table_info(vision_analysis_results)")
@@ -155,6 +156,65 @@ def test_upgrade_from_023_adds_append_only_vision_provenance_and_is_idempotent()
             "SELECT version FROM schema_migrations ORDER BY version"
         )
     ] == [version for version, _ in MIGRATIONS]
+    assert apply_migrations(connection) == 0
+
+
+def test_migration_025_adds_regional_provider_selection_and_is_idempotent() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    prior = [(version, migration) for version, migration in MIGRATIONS if version < 25]
+    for _, migration in prior:
+        migration(connection)
+    connection.execute(
+        "INSERT INTO provider_capability_profiles("
+        "id,project_id,capability,provider_id,model_id,profile_json,enabled,created_at,updated_at"
+        ") VALUES ('legacy-profile',NULL,'VISION','legacy','legacy-model','{}',1,'now','now')"
+    )
+    connection.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    connection.executemany(
+        "INSERT INTO schema_migrations VALUES (?,?)",
+        [(version, "2026-08-25") for version, _ in prior],
+    )
+
+    assert apply_migrations(connection) == 1
+    profile_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(provider_capability_profiles)")
+    }
+    runtime_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(runtime_plans)")
+    }
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert {
+        "endpoint_profile_id",
+        "deployment_region",
+        "endpoint_class",
+        "credential_reference",
+        "verification_state",
+        "verified_at",
+        "selection_priority",
+    } <= profile_columns
+    assert {
+        "endpoint_profile_id",
+        "deployment_region",
+        "endpoint_class",
+        "credential_reference",
+        "selection_source",
+        "transmitted_content_types_json",
+        "estimated_request_count",
+    } <= runtime_columns
+    assert "provider_selection_settings" in tables
+    legacy = connection.execute(
+        "SELECT endpoint_profile_id,deployment_region,endpoint_class FROM provider_capability_profiles WHERE id='legacy-profile'"
+    ).fetchone()
+    assert tuple(legacy) == ("LEGACY", "UNSPECIFIED", "UNSPECIFIED")
     assert apply_migrations(connection) == 0
 
 

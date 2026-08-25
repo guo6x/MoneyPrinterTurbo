@@ -141,7 +141,7 @@ class RuntimePlanService:
         self.repository = repository or ProjectRepository()
         self.profiles = OutputProfileService(self.repository)
 
-    def create(self, project_id: str, *, production_job_id: str | None, brief: GenerationBrief, provider_capability: str, provider_id: str, model_id: str, generation_mode: str = "text_to_video", resolution: str | None = None, provider_generation_duration: float | None = None, target_creative_duration: float | None = None, audio_strategy: str = "provider_or_post", provider_parameters: Mapping[str, Any] | None = None, reference_version_ids: list[str] | tuple[str, ...] = (), reference_roles: Mapping[str, str] | None = None, continuity_strategy: str = "shot-local", authorization: Mapping[str, Any] | None = None, prompt_template_version: str = "v1", plan_id: str | None = None) -> RuntimePlan:
+    def create(self, project_id: str, *, production_job_id: str | None, brief: GenerationBrief, provider_capability: str, provider_id: str, model_id: str, endpoint_profile_id: str | None = None, deployment_region: str = "UNSPECIFIED", endpoint_class: str = "UNSPECIFIED", credential_reference: str | None = None, selection_source: str = "LEGACY", transmitted_content_types: list[str] | tuple[str, ...] = (), estimated_request_count: int = 1, generation_mode: str = "text_to_video", resolution: str | None = None, provider_generation_duration: float | None = None, target_creative_duration: float | None = None, audio_strategy: str = "provider_or_post", provider_parameters: Mapping[str, Any] | None = None, reference_version_ids: list[str] | tuple[str, ...] = (), reference_roles: Mapping[str, str] | None = None, continuity_strategy: str = "shot-local", authorization: Mapping[str, Any] | None = None, prompt_template_version: str = "v1", plan_id: str | None = None) -> RuntimePlan:
         if brief.project_id != project_id or (production_job_id is not None and brief.production_job_id != production_job_id):
             raise RuntimeFoundationError("GenerationBrief provenance 不匹配")
         profile = self.profiles.ensure_for_job(project_id, production_job_id) if production_job_id else None
@@ -149,6 +149,13 @@ class RuntimePlanService:
         profile_hash = _hash(profile_data)
         payload = {
             "provider_capability": provider_capability, "provider_id": provider_id, "model_id": model_id,
+            "endpoint_profile_id": endpoint_profile_id,
+            "deployment_region": deployment_region,
+            "endpoint_class": endpoint_class,
+            "credential_reference": credential_reference,
+            "selection_source": selection_source,
+            "transmitted_content_types": list(transmitted_content_types),
+            "estimated_request_count": int(estimated_request_count),
             "generation_mode": generation_mode, "resolution": resolution or (profile.target_resolution if profile else "1920x1080"),
             "provider_generation_duration": provider_generation_duration or brief.target_duration_seconds,
             "target_creative_duration": target_creative_duration or brief.target_duration_seconds,
@@ -191,7 +198,17 @@ class AIInvocationService:
 
 def _redact(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {str(key): _redact(item) for key, item in value.items() if str(key).lower() not in {"api_key", "apikey", "authorization", "token", "secret", "signed_url"}}
+        return {
+            str(key): _redact(item)
+            for key, item in value.items()
+            if str(key).lower()
+            not in {
+                "api_key", "apikey", "access_token", "refresh_token",
+                "authorization", "token", "secret", "password",
+                "client_secret", "private_key", "cookie", "set_cookie",
+                "signed_url",
+            }
+        }
     if isinstance(value, list):
         return [_redact(item) for item in value]
     if isinstance(value, tuple):

@@ -51,7 +51,13 @@ from aidrama_studio.domain.director import (
 from aidrama_studio.domain.runtime_foundation import AIInvocation, GenerationBrief, OutputProfile, RuntimePlan
 from aidrama_studio.domain.creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourceKind, SourcePackItem
 from aidrama_studio.domain.reference_profile import ReferenceProfile, ReferenceProfileItem
-from aidrama_studio.domain.runtime_operations import CapabilityProfile, ProviderTask, VisionAnalysisRecord, VisionFrameManifest
+from aidrama_studio.domain.runtime_operations import (
+    CapabilityProfile,
+    ProviderSelectionSettings,
+    ProviderTask,
+    VisionAnalysisRecord,
+    VisionFrameManifest,
+)
 
 from .database import DatabasePaths, connect, initialize_database, transaction
 
@@ -2169,6 +2175,11 @@ class ProjectRepository:
             execution_id=row["execution_id"], output_profile_id=row["output_profile_id"],
             generation_brief_id=row["generation_brief_id"], provider_capability=row["provider_capability"],
             provider_id=row["provider_id"], model_id=row["model_id"], generation_mode=row["generation_mode"],
+            endpoint_profile_id=row["endpoint_profile_id"], deployment_region=row["deployment_region"],
+            endpoint_class=row["endpoint_class"], credential_reference=row["credential_reference"],
+            selection_source=row["selection_source"],
+            transmitted_content_types=tuple(json.loads(row["transmitted_content_types_json"])),
+            estimated_request_count=row["estimated_request_count"],
             resolution=row["resolution"], provider_generation_duration=row["provider_generation_duration"],
             target_creative_duration=row["target_creative_duration"], audio_strategy=row["audio_strategy"],
             provider_parameters=json.loads(row["provider_parameters_json"]),
@@ -2185,12 +2196,16 @@ class ProjectRepository:
                 raise KeyError(f"项目不存在: {plan.project_id}")
             connection.execute(
                 "INSERT INTO runtime_plans(id,project_id,production_job_id,execution_id,output_profile_id,generation_brief_id,"
-                "provider_capability,provider_id,model_id,generation_mode,resolution,provider_generation_duration,target_creative_duration,"
+                "provider_capability,provider_id,model_id,endpoint_profile_id,deployment_region,endpoint_class,credential_reference,selection_source,"
+                "transmitted_content_types_json,estimated_request_count,generation_mode,resolution,provider_generation_duration,target_creative_duration,"
                 "audio_strategy,provider_parameters_json,reference_version_ids_json,reference_roles_json,continuity_strategy,"
                 "generation_brief_hash,output_profile_hash,authorization_json,prompt_template_version,plan_hash,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (plan.id, plan.project_id, plan.production_job_id, plan.execution_id, plan.output_profile_id,
                  plan.generation_brief_id, plan.provider_capability, plan.provider_id, plan.model_id,
+                 plan.endpoint_profile_id, plan.deployment_region, plan.endpoint_class, plan.credential_reference,
+                 plan.selection_source, json.dumps(list(plan.transmitted_content_types), ensure_ascii=False),
+                 plan.estimated_request_count,
                  plan.generation_mode, plan.resolution, plan.provider_generation_duration, plan.target_creative_duration,
                  plan.audio_strategy, json.dumps(plan.provider_parameters, ensure_ascii=False, sort_keys=True),
                  json.dumps(list(plan.reference_version_ids), ensure_ascii=False), json.dumps(plan.reference_roles, ensure_ascii=False, sort_keys=True),
@@ -2401,6 +2416,10 @@ class ProjectRepository:
         return CapabilityProfile(
             id=row["id"], project_id=row["project_id"], capability=row["capability"],
             provider_id=row["provider_id"], model_id=row["model_id"],
+            endpoint_profile_id=row["endpoint_profile_id"], deployment_region=row["deployment_region"],
+            endpoint_class=row["endpoint_class"], endpoint_url=row["endpoint_url"],
+            credential_reference=row["credential_reference"], verification_state=row["verification_state"],
+            verified_at=row["verified_at"], selection_priority=row["selection_priority"],
             profile=json.loads(row["profile_json"]), enabled=bool(row["enabled"]),
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
@@ -2410,8 +2429,11 @@ class ProjectRepository:
             if profile.project_id is not None and not self._project_exists(connection, profile.project_id):
                 raise KeyError(f"项目不存在: {profile.project_id}")
             connection.execute(
-                "INSERT INTO provider_capability_profiles(id,project_id,capability,provider_id,model_id,profile_json,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO provider_capability_profiles(id,project_id,capability,provider_id,model_id,endpoint_profile_id,deployment_region,endpoint_class,endpoint_url,credential_reference,verification_state,verified_at,selection_priority,profile_json,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (profile.id, profile.project_id, profile.capability, profile.provider_id, profile.model_id,
+                 profile.endpoint_profile_id, profile.deployment_region.value, profile.endpoint_class,
+                 profile.endpoint_url, profile.credential_reference, profile.verification_state.value,
+                 profile.verified_at, profile.selection_priority,
                  json.dumps(profile.profile, ensure_ascii=False, sort_keys=True), int(profile.enabled), profile.created_at, profile.updated_at),
             )
         return self.get_capability_profile(profile.id)
@@ -2437,10 +2459,45 @@ class ProjectRepository:
             raise KeyError(f"CapabilityProfile 不存在: {profile.id}")
         with connect(self.paths.database) as connection:
             connection.execute(
-                "UPDATE provider_capability_profiles SET profile_json=?,enabled=?,updated_at=? WHERE id=?",
-                (json.dumps(profile.profile, ensure_ascii=False, sort_keys=True), int(profile.enabled), profile.updated_at, profile.id),
+                "UPDATE provider_capability_profiles SET provider_id=?,model_id=?,endpoint_profile_id=?,deployment_region=?,endpoint_class=?,endpoint_url=?,credential_reference=?,verification_state=?,verified_at=?,selection_priority=?,profile_json=?,enabled=?,updated_at=? WHERE id=?",
+                (profile.provider_id, profile.model_id, profile.endpoint_profile_id,
+                 profile.deployment_region.value, profile.endpoint_class, profile.endpoint_url,
+                 profile.credential_reference, profile.verification_state.value, profile.verified_at,
+                 profile.selection_priority, json.dumps(profile.profile, ensure_ascii=False, sort_keys=True),
+                 int(profile.enabled), profile.updated_at, profile.id),
             )
         return self.get_capability_profile(profile.id)
+
+    @staticmethod
+    def _provider_selection_from_row(row) -> ProviderSelectionSettings:
+        return ProviderSelectionSettings(
+            id=row["id"], project_id=row["project_id"], preset=row["preset"],
+            selections=json.loads(row["selections_json"]), created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def get_provider_selection_settings(self, project_id: str | None = None) -> ProviderSelectionSettings | None:
+        if project_id is None:
+            query, args = "SELECT * FROM provider_selection_settings WHERE project_id IS NULL", ()
+        else:
+            query, args = "SELECT * FROM provider_selection_settings WHERE project_id=?", (project_id,)
+        with connect(self.paths.database) as connection:
+            row = connection.execute(query, args).fetchone()
+        return self._provider_selection_from_row(row) if row else None
+
+    def upsert_provider_selection_settings(self, settings: ProviderSelectionSettings) -> ProviderSelectionSettings:
+        with connect(self.paths.database) as connection:
+            if settings.project_id is not None and not self._project_exists(connection, settings.project_id):
+                raise KeyError(f"项目不存在: {settings.project_id}")
+            connection.execute(
+                "INSERT INTO provider_selection_settings(id,project_id,preset,selections_json,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET preset=excluded.preset,"
+                "selections_json=excluded.selections_json,updated_at=excluded.updated_at",
+                (settings.id, settings.project_id, settings.preset.value,
+                 json.dumps(settings.selections, ensure_ascii=False, sort_keys=True),
+                 settings.created_at, settings.updated_at),
+            )
+        return self.get_provider_selection_settings(settings.project_id)
 
     @staticmethod
     def _provider_task_from_row(row) -> ProviderTask:

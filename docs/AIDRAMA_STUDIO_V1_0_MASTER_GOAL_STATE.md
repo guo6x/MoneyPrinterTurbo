@@ -9,8 +9,8 @@ with `git rev-parse HEAD` after checkout.
 - Target branch: `goal/aidrama-studio-v1-0-final-product-release`
 - Goal base: `3ce90aad6a70e6173a3826bd4e8eb6c039e0221b`
 - Current head: `HEAD`
-- Active checkpoint: regional provider preset/per-capability switching and
-  canonical selection precedence.
+- Active checkpoint: canonical LLM invocation-ledger integration after
+  regional provider switching closure.
 - No dependency was installed and no live provider request was made.
 
 ## Completed checkpoints with current local evidence
@@ -55,9 +55,28 @@ with `git rev-parse HEAD` after checkout.
 - Migration 024 adds exact Vision reference IDs, prompt-template hash, safe
   cloud-input provenance and interaction identity without storing credentials,
   local absolute paths or remote file URLs.
+- Migration 025 extends the canonical capability profiles with explicit
+  Mainland-China / international / local deployment metadata, endpoint class,
+  non-secret credential reference and verification state. A scope-aware
+  selection setting stores only preset intent and exact profile references; it
+  does not duplicate provider/model truth.
+- Settings now offers 中国大陆 / 国际 / 自定义 model schemes and independent
+  LLM, image, generative-video, Vision and TTS choices. Resolution is
+  deterministic: explicit job endpoint > project default > global default >
+  legacy compatibility only when no policy exists. A missing or failed
+  selected provider remains UNAVAILABLE; it never crosses region or provider
+  automatically.
+- Production authorization freezes provider, model, deployment region,
+  endpoint profile/class, exact reference count, bounded request count and
+  transmitted content types. The disclosure checkbox is keyed and
+  server-validated by a selection fingerprint, so a region/model change
+  invalidates stale consent.
+- Existing RuntimePlans remain immutable after Settings changes. New plans pin
+  the newly resolved endpoint and selection source, and the background resolver
+  requires the exact frozen provider/endpoint/model identity.
 - Current validation: Python compile PASS, `git diff --check` PASS, focused
   provider/runtime/security tests PASS, complete AIDrama suite
-  `252 passed, 10 warnings`.
+  `262 passed, 10 warnings`. No live request was made.
 
 ## Externally blocked gates
 
@@ -70,10 +89,6 @@ with `git rev-parse HEAD` after checkout.
 
 ## Known remaining work
 
-- Implement the newly required Mainland/International/Custom provider preset
-  layer, per-capability selection, region/endpoint metadata, deterministic
-  precedence and no-silent-cross-region-fallback policy without creating a
-  second provider truth.
 - Finish canonical LLM invocation-ledger integration.
 - Close final subtitle timing, cloud disclosure/input provenance, remote file
   lifecycle, portable project restore/delete recovery and diagnostics repair
@@ -87,8 +102,24 @@ with `git rev-parse HEAD` after checkout.
 
 ## Next safe implementation step
 
-Add provider region/endpoint profiles and preset resolution on top of the
-canonical CapabilityRegistry/provider inventory. Prove preset switching affects
-only new RuntimePlans, mixed per-capability selection works, missing providers
-remain unavailable, and no cross-region fallback occurs without explicit user
-approval.
+Integrate the existing LLM generation seam with the append-only AI invocation
+ledger without changing provider behavior or making a live call. Pin the
+non-secret provider/model/input provenance and truthful terminal state for each
+LLM attempt.
+
+## Regional provider switching acceptance
+
+- `PER_CAPABILITY_PROVIDER_SELECTION=PASS`
+- `PROVIDER_REGION_CLASSIFICATION=PASS`
+- `REGIONAL_PROVIDER_ENDPOINTS=PASS`
+- `PROVIDER_PRESET_RESOLUTION=PASS`
+- `NO_SILENT_CROSS_REGION_FALLBACK=PASS`
+- `REGION_AWARE_PRIVACY_DISCLOSURE=PASS`
+- `PROVIDER_SWITCH_NEW_TASKS_ONLY=PASS`
+- `PROVIDER_SELECTION_PRECEDENCE=PASS`
+- `REGIONAL_PROVIDER_SETTINGS_UI=PASS`
+- `PAID_PROVIDER_SELECTION_CONFIRMATION=PASS`
+- `MAINLAND_PROVIDER_PRESET=PASS`
+- `INTERNATIONAL_PROVIDER_PRESET=PASS`
+- `CUSTOM_PROVIDER_MIX=PASS`
+- `PROVIDER_SWITCHING=PASS`

@@ -552,8 +552,16 @@ class SeedanceProductionAdapter(ProductionRuntimeAdapter):
                 "model": self.config.model,
                 "live_authorized": self.config.allow_paid_live_tests,
                 "poll_interval_seconds": 10,
+                "configured": bool(self.config.api_key),
+                "deployment_region": "MAINLAND_CHINA",
+                "endpoint_class": "ARK_CN_BEIJING",
+                "endpoint_profile_id": "runtime:VIDEO_GENERATIVE:SEEDANCE:ARK_CN_BEIJING",
+                "credential_reference": "ARK_API_KEY",
+                "verification_state": "NOT_VERIFIED",
                 "supports_cancel": False,
             },
+            configured=bool(self.config.api_key),
+            verified=False,
         )
 
     def map_input(

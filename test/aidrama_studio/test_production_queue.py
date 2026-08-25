@@ -4,16 +4,20 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from aidrama_studio.domain import ProviderDeploymentRegion
 from aidrama_studio.services import (
     BackgroundProductionRunner,
     CapabilityRegistry,
     ProductionQueueError,
     ProductionQueueService,
+    ProductionService,
+    ProductionRuntimeResolutionError,
     ProductionRuntimeResolver,
     ProductionRuntimeAdapter,
     RuntimeSubmission,
     RuntimeVideoProvider,
 )
+from aidrama_studio.services.ai_capabilities import CapabilityKind
 from aidrama_studio.services.adapters import MockProductionAdapter
 from aidrama_studio.services.streaming_artifact import StreamingArtifactSource
 from test.aidrama_studio.test_production_execution import _ready_job, context as _execution_context
@@ -34,6 +38,11 @@ def _authorization(queue, project_id, job_id):
         "model_id": preview.model_id,
         "max_paid_attempts": preview.max_paid_attempts,
         "estimated_provider_requests": preview.estimated_provider_requests,
+        "deployment_region": preview.deployment_region,
+        "endpoint_profile_id": preview.endpoint_profile_id,
+        "endpoint_class": preview.endpoint_class,
+        "reference_count": preview.reference_count,
+        "authorization_fingerprint": preview.authorization_fingerprint,
     }
 
 
@@ -109,12 +118,122 @@ def test_runtime_plan_freezes_exact_provider_model_references_and_authorization(
 
     assert plan.provider_id == "TEST_VIDEO"
     assert plan.model_id == "runtime"
+    assert plan.endpoint_profile_id == task.request_summary["endpoint_profile_id"]
+    assert plan.deployment_region == task.request_summary["deployment_region"]
+    assert plan.endpoint_class == task.request_summary["endpoint_class"]
+    assert plan.selection_source == "LEGACY_DEFAULT"
+    assert plan.transmitted_content_types == ("TEXT", "REFERENCE_IMAGE")
+    assert plan.estimated_request_count == 1
     assert plan.authorization["approved"] is True
     assert plan.authorization["authorization_id"]
     assert plan.generation_brief_hash == brief.sha256
     assert set(plan.reference_roles.values()) == {"CHARACTER:char_001", "LOCATION:loc_001"}
     assert "api_key" not in repr(plan)
     assert isinstance(ProductionRuntimeResolver(queue.registry).resolve(task, plan), MockProductionAdapter)
+    with pytest.raises(ProductionRuntimeResolutionError, match="endpoint"):
+        ProductionRuntimeResolver(queue.registry).resolve(
+            task,
+            plan.model_copy(update={"endpoint_profile_id": "different-endpoint"}),
+        )
+
+
+def test_provider_switch_changes_only_new_runtime_plans_and_stale_disclosure_is_rejected(tmp_path):
+    from aidrama_studio.domain import ProviderPreset
+    from aidrama_studio.services.provider_profiles import ProviderProfileService
+    from test.aidrama_studio.test_provider_selection import _Provider
+
+    repository, project = _execution_context.__wrapped__(tmp_path)
+    first_job = _ready_job(repository, project)
+    registry = CapabilityRegistry(
+        [
+            _Provider(
+                CapabilityKind.VIDEO_GENERATIVE,
+                "CN_VIDEO",
+                ProviderDeploymentRegion.MAINLAND_CHINA,
+                "CN_VIDEO_ENDPOINT",
+            ),
+            _Provider(
+                CapabilityKind.VIDEO_GENERATIVE,
+                "INTL_VIDEO",
+                ProviderDeploymentRegion.INTERNATIONAL,
+                "INTL_VIDEO_ENDPOINT",
+            ),
+        ]
+    )
+    profiles = ProviderProfileService(repository, registry=registry)
+    profiles.save_settings(project_id=None, preset=ProviderPreset.MAINLAND)
+    queue = ProductionQueueService(
+        repository,
+        registry=registry,
+        provider_profiles=profiles,
+    )
+
+    first_preview = queue.preview_authorization(project.id, first_job.id)
+    first_task = queue.enqueue_job(
+        project.id,
+        first_job.id,
+        authorization={
+            "approved": True,
+            "provider_id": first_preview.provider_id,
+            "model_id": first_preview.model_id,
+            "deployment_region": first_preview.deployment_region,
+            "endpoint_profile_id": first_preview.endpoint_profile_id,
+            "endpoint_class": first_preview.endpoint_class,
+            "reference_count": first_preview.reference_count,
+            "max_paid_attempts": first_preview.max_paid_attempts,
+            "estimated_provider_requests": first_preview.estimated_provider_requests,
+            "authorization_fingerprint": first_preview.authorization_fingerprint,
+        },
+    )
+    first_plan = repository.get_runtime_plan(
+        first_task.request_summary["runtime_plan_ids_by_shot"]["shot_001"]
+    )
+    frozen_dump = first_plan.model_dump(mode="json")
+
+    profiles.save_settings(project_id=None, preset=ProviderPreset.INTERNATIONAL)
+    changed_preview = queue.preview_authorization(project.id, first_job.id)
+    assert changed_preview.provider_id == "INTL_VIDEO"
+    assert changed_preview.authorization_fingerprint != first_preview.authorization_fingerprint
+    assert repository.get_runtime_plan(first_plan.id).model_dump(mode="json") == frozen_dump
+
+    queue.cancel_job(project.id, first_job.id)
+    with pytest.raises(ProductionQueueError, match="provider_id|fingerprint"):
+        queue.enqueue_job(
+            project.id,
+            first_job.id,
+            authorization={
+                "approved": True,
+                "provider_id": first_preview.provider_id,
+                "model_id": first_preview.model_id,
+                "estimated_provider_requests": first_preview.estimated_provider_requests,
+                "authorization_fingerprint": first_preview.authorization_fingerprint,
+            },
+        )
+
+    second_job = ProductionService(repository).create_production_job(project.id, "shot_001")
+    second_preview = queue.preview_authorization(project.id, second_job.id)
+    second_task = queue.enqueue_job(
+        project.id,
+        second_job.id,
+        authorization={
+            "approved": True,
+            "provider_id": second_preview.provider_id,
+            "model_id": second_preview.model_id,
+            "deployment_region": second_preview.deployment_region,
+            "endpoint_profile_id": second_preview.endpoint_profile_id,
+            "endpoint_class": second_preview.endpoint_class,
+            "reference_count": second_preview.reference_count,
+            "estimated_provider_requests": second_preview.estimated_provider_requests,
+            "authorization_fingerprint": second_preview.authorization_fingerprint,
+        },
+    )
+    second_plan = repository.get_runtime_plan(
+        second_task.request_summary["runtime_plan_ids_by_shot"]["shot_001"]
+    )
+    assert first_plan.provider_id == "CN_VIDEO"
+    assert second_plan.provider_id == "INTL_VIDEO"
+    assert second_plan.endpoint_profile_id == second_preview.endpoint_profile_id
+    assert second_plan.plan_hash != first_plan.plan_hash
 
 
 def test_background_runner_resolves_each_execution_from_frozen_runtime_plan(tmp_path):

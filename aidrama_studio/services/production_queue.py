@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping
@@ -35,10 +37,17 @@ class ProductionQueueError(RuntimeError):
 class ProductionAuthorizationPreview:
     provider_id: str
     model_id: str
+    deployment_region: str
+    endpoint_profile_id: str
+    endpoint_class: str
+    selection_source: str
     shot_count: int
+    reference_count: int
     max_paid_attempts: int
     estimated_provider_requests: int
     duration_requests_by_shot: dict[str, int]
+    transmitted_content_types: tuple[str, ...]
+    authorization_fingerprint: str
 
 
 class ProductionQueueService:
@@ -67,15 +76,57 @@ class ProductionQueueService:
         *,
         authorization: Mapping[str, object] | None = None,
         provider_id: str | None = None,
+        endpoint_profile_id: str | None = None,
     ):
         return self.enqueue_job(
             project_id,
             production_job_id,
             authorization=authorization,
             provider_id=provider_id,
+            endpoint_profile_id=endpoint_profile_id,
         )
 
     resume_job = run_job
+
+    def list_provider_options(
+        self,
+        project_id: str,
+        capability: CapabilityKind | str = CapabilityKind.VIDEO_GENERATIVE,
+    ) -> tuple[dict[str, object], ...]:
+        canonical = self.provider_profiles.resolve(project_id, capability)
+        canonical_endpoint = (
+            canonical.profile.endpoint_profile_id if canonical.profile is not None else None
+        )
+        options: list[dict[str, object]] = []
+        for profile in self.provider_profiles.inventory(project_id, capability):
+            resolved = self.provider_profiles.resolve(
+                project_id,
+                capability,
+                endpoint_profile_id=profile.endpoint_profile_id,
+            )
+            if not resolved.configured:
+                continue
+            options.append(
+                {
+                    "provider_id": profile.provider_id,
+                    "model_id": profile.model_id,
+                    "endpoint_profile_id": profile.endpoint_profile_id,
+                    "deployment_region": profile.deployment_region.value,
+                    "endpoint_class": profile.endpoint_class,
+                    "available": resolved.available,
+                    "verified": resolved.verified,
+                    "default": profile.endpoint_profile_id == canonical_endpoint,
+                }
+            )
+        options.sort(
+            key=lambda item: (
+                0 if item["default"] else 1,
+                str(item["provider_id"]),
+                str(item["model_id"]),
+                str(item["endpoint_profile_id"]),
+            )
+        )
+        return tuple(options)
 
     def preview_authorization(
         self,
@@ -83,6 +134,7 @@ class ProductionQueueService:
         production_job_id: str,
         *,
         provider_id: str | None = None,
+        endpoint_profile_id: str | None = None,
         max_paid_attempts: int = 1,
     ) -> ProductionAuthorizationPreview:
         if isinstance(max_paid_attempts, bool) or not 1 <= int(max_paid_attempts) <= 3:
@@ -93,11 +145,17 @@ class ProductionQueueService:
             if not readiness.get("ready"):
                 raise ProductionQueueError("ProductionJob 尚未 READY")
             shots = self.production_service.create_production_shots(project_id, job.id)
-            profile = self.provider_profiles.select(
+            resolved = self.provider_profiles.resolve(
                 project_id,
                 CapabilityKind.VIDEO_GENERATIVE,
                 provider_id=provider_id,
+                endpoint_profile_id=endpoint_profile_id,
+                require_available=True,
             )
+            if resolved.profile is None or not resolved.available:
+                raise CapabilityUnavailable(resolved.detail)
+            profile = resolved.profile
+            snapshot = self.execution_service.create_input_snapshot(project_id, job.id)
         except (ProductionServiceError, ProviderProfileError, CapabilityUnavailable) as exc:
             raise ProductionQueueError(str(exc)) from exc
         minimum, maximum = self._duration_limits(profile.profile)
@@ -118,13 +176,44 @@ class ProductionQueueService:
                 )
             request_counts[production_shot.shot_id] = 1
         count = len(shots)
+        reference_count = len(set(snapshot.reference_asset_versions.values()))
+        content_types = ("TEXT", "REFERENCE_IMAGE") if reference_count else ("TEXT",)
+        estimated_requests = sum(request_counts.values()) * int(max_paid_attempts)
+        fingerprint_payload = {
+            "project_id": project_id,
+            "production_job_id": production_job_id,
+            "provider_id": profile.provider_id,
+            "model_id": profile.model_id,
+            "deployment_region": profile.deployment_region.value,
+            "endpoint_profile_id": profile.endpoint_profile_id,
+            "endpoint_class": profile.endpoint_class,
+            "selection_source": resolved.source,
+            "reference_count": reference_count,
+            "estimated_provider_requests": estimated_requests,
+            "transmitted_content_types": list(content_types),
+            "disclosure_version": "regional-provider-v1",
+        }
         return ProductionAuthorizationPreview(
             provider_id=profile.provider_id,
             model_id=profile.model_id,
+            deployment_region=profile.deployment_region.value,
+            endpoint_profile_id=profile.endpoint_profile_id,
+            endpoint_class=profile.endpoint_class,
+            selection_source=resolved.source,
             shot_count=count,
+            reference_count=reference_count,
             max_paid_attempts=int(max_paid_attempts),
-            estimated_provider_requests=sum(request_counts.values()) * int(max_paid_attempts),
+            estimated_provider_requests=estimated_requests,
             duration_requests_by_shot=request_counts,
+            transmitted_content_types=content_types,
+            authorization_fingerprint=hashlib.sha256(
+                json.dumps(
+                    fingerprint_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
         )
 
     def enqueue_job(
@@ -134,6 +223,7 @@ class ProductionQueueService:
         *,
         authorization: Mapping[str, object] | None = None,
         provider_id: str | None = None,
+        endpoint_profile_id: str | None = None,
     ) -> ProviderTask:
         try:
             job = self.production_service.get_job(project_id, production_job_id)
@@ -158,6 +248,7 @@ class ProductionQueueService:
             project_id,
             production_job_id,
             provider_id=provider_id,
+            endpoint_profile_id=endpoint_profile_id,
             max_paid_attempts=max_paid_attempts,
         )
         # Bind the approval to the exact provider/model/request bound shown to
@@ -166,9 +257,16 @@ class ProductionQueueService:
         for key, expected in (
             ("provider_id", preview.provider_id),
             ("model_id", preview.model_id),
+            ("deployment_region", preview.deployment_region),
+            ("endpoint_profile_id", preview.endpoint_profile_id),
+            ("endpoint_class", preview.endpoint_class),
+            ("reference_count", preview.reference_count),
             ("estimated_provider_requests", preview.estimated_provider_requests),
+            ("authorization_fingerprint", preview.authorization_fingerprint),
         ):
             supplied = authorization.get(key)
+            if key == "authorization_fingerprint" and supplied is None:
+                raise ProductionQueueError("付费授权缺少区域感知 selection fingerprint，请重新确认")
             if supplied is not None and supplied != expected:
                 raise ProductionQueueError(f"付费授权与当前 {key} 不匹配，请重新确认")
         authorization_id = str(authorization.get("authorization_id") or uuid4().hex)
@@ -181,12 +279,21 @@ class ProductionQueueService:
             "estimated_provider_requests": preview.estimated_provider_requests,
             "provider_id": preview.provider_id,
             "model_id": preview.model_id,
+            "deployment_region": preview.deployment_region,
+            "endpoint_profile_id": preview.endpoint_profile_id,
+            "endpoint_class": preview.endpoint_class,
+            "selection_source": preview.selection_source,
+            "reference_count": preview.reference_count,
+            "transmitted_content_types": list(preview.transmitted_content_types),
+            "disclosure_version": "regional-provider-v1",
+            "authorization_fingerprint": preview.authorization_fingerprint,
         }
         try:
             provider_profile = self.provider_profiles.select(
                 project_id,
                 CapabilityKind.VIDEO_GENERATIVE,
                 provider_id=preview.provider_id,
+                endpoint_profile_id=preview.endpoint_profile_id,
             )
             snapshot = self.execution_service.create_input_snapshot(project_id, job.id)
             shot_plan = self.repository.get_shot_revision(job.shot_plan_revision_id)
@@ -211,6 +318,13 @@ class ProductionQueueService:
                     provider_capability=CapabilityKind.VIDEO_GENERATIVE.value,
                     provider_id=preview.provider_id,
                     model_id=preview.model_id,
+                    endpoint_profile_id=preview.endpoint_profile_id,
+                    deployment_region=preview.deployment_region,
+                    endpoint_class=preview.endpoint_class,
+                    credential_reference=provider_profile.credential_reference,
+                    selection_source=preview.selection_source,
+                    transmitted_content_types=preview.transmitted_content_types,
+                    estimated_request_count=1,
                     generation_mode=(
                         "image_to_video" if references else "text_to_video"
                     ),
@@ -249,6 +363,9 @@ class ProductionQueueService:
                 "attempt_number": attempt_number,
                 "runtime_plan_ids_by_shot": plan_ids,
                 "provider_profile_id": provider_profile.id,
+                "endpoint_profile_id": preview.endpoint_profile_id,
+                "deployment_region": preview.deployment_region,
+                "endpoint_class": preview.endpoint_class,
                 "shot_count": preview.shot_count,
                 **frozen_authorization,
             },

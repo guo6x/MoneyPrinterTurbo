@@ -43,9 +43,19 @@ class ProductionRuntimeResolver:
             providers = self.registry.list(CapabilityKind(capability))
         except ValueError as exc:
             raise ProductionRuntimeResolutionError(f"不支持的 runtime capability: {capability}") from exc
-        provider = next((item for item in providers if self._provider_matches(item, provider_id)), None)
+        provider = next(
+            (
+                item
+                for item in providers
+                if self._provider_matches(item, provider_id)
+                and self._endpoint_matches(item, runtime_plan)
+            ),
+            None,
+        )
         if provider is None:
-            raise ProductionRuntimeResolutionError(f"冻结 Provider 不在当前能力清单中: {provider_id}")
+            raise ProductionRuntimeResolutionError(
+                f"冻结 Provider/endpoint 不在当前能力清单中: {provider_id}"
+            )
         try:
             status = provider.status
         except Exception as exc:
@@ -74,6 +84,28 @@ class ProductionRuntimeResolver:
         }
         target = provider_id.casefold()
         return any(candidate and candidate.casefold() == target for candidate in candidates)
+
+    @staticmethod
+    def _endpoint_matches(provider: object, runtime_plan: RuntimePlan | None) -> bool:
+        if runtime_plan is None or runtime_plan.endpoint_profile_id in {None, "", "LEGACY"}:
+            return True
+        try:
+            metadata = dict(provider.status.metadata)
+        except Exception:
+            return False
+        endpoint_id = str(metadata.get("endpoint_profile_id") or "")
+        endpoint_class = str(metadata.get("endpoint_class") or "UNSPECIFIED")
+        region = str(metadata.get("deployment_region") or "UNSPECIFIED")
+        credential_reference = str(metadata.get("credential_reference") or "") or None
+        return (
+            endpoint_id == runtime_plan.endpoint_profile_id
+            and endpoint_class == runtime_plan.endpoint_class
+            and region == runtime_plan.deployment_region
+            and (
+                runtime_plan.credential_reference is None
+                or credential_reference == runtime_plan.credential_reference
+            )
+        )
 
     def _pin_adapter(
         self,

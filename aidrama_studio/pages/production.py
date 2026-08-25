@@ -557,6 +557,7 @@ def _orchestrator_action(
     *,
     ensure_job=None,
     authorization: Mapping[str, object] | None = None,
+    endpoint_profile_id: str | None = None,
 ) -> None:
     try:
         if action == "start":
@@ -568,6 +569,7 @@ def _orchestrator_action(
                 project.id,
                 _value(job, "id"),
                 authorization=authorization,
+                endpoint_profile_id=endpoint_profile_id,
             )
         elif action == "resume":
             if job is None:
@@ -576,6 +578,7 @@ def _orchestrator_action(
                 project.id,
                 _value(job, "id"),
                 authorization=authorization,
+                endpoint_profile_id=endpoint_profile_id,
             )
         elif action == "cancel":
             if job is None:
@@ -624,25 +627,85 @@ def _render_primary_action(orchestrator, production_service, project, job, readi
 
     authorization = None
     disabled = False
+    endpoint_profile_id = None
     if callable(preview_method) and job is not None:
+        options_method = getattr(orchestrator, "list_provider_options", None)
+        if callable(options_method):
+            options = list(options_method(project.id))
+            if options:
+                by_endpoint = {
+                    str(item["endpoint_profile_id"]): item for item in options
+                }
+                default_endpoint_id = str(
+                    next(
+                        (
+                            item["endpoint_profile_id"]
+                            for item in options
+                            if item.get("default")
+                        ),
+                        options[0]["endpoint_profile_id"],
+                    )
+                )
+                selected_endpoint_profile_id = st.selectbox(
+                    "本次视频 Provider",
+                    list(by_endpoint),
+                    key=(
+                        f"production-provider-override-{_value(job, 'id')}-"
+                        f"{default_endpoint_id}"
+                    ),
+                    format_func=lambda value: (
+                        f"{by_endpoint[value]['provider_id']} / {by_endpoint[value]['model_id']} · "
+                        f"{by_endpoint[value]['deployment_region']} · {by_endpoint[value]['endpoint_class']}"
+                    ),
+                )
+                endpoint_profile_id = (
+                    None
+                    if selected_endpoint_profile_id == default_endpoint_id
+                    else selected_endpoint_profile_id
+                )
         try:
-            preview = preview_method(project.id, _value(job, "id"), max_paid_attempts=1)
+            preview = preview_method(
+                project.id,
+                _value(job, "id"),
+                endpoint_profile_id=endpoint_profile_id,
+                max_paid_attempts=1,
+            )
         except ProductionQueueError as exc:
             st.warning(f"生成 Provider 尚未就绪：{exc}")
             st.button(label, type="primary", disabled=True, key=f"primary-production-{_value(job, 'id', project.id)}")
             return
         st.markdown("### 本次生成授权")
         cols = st.columns(2)
-        cols[0].metric("Provider / Model", f"{preview.provider_id} / {preview.model_id}")
-        cols[1].metric("镜头数", preview.shot_count)
+        cols[0].metric("视频 Provider", preview.provider_id)
+        cols[1].metric("模型", preview.model_id)
+        cols = st.columns(2)
+        cols[0].metric("区域 / 部署类型", f"{preview.deployment_region} / {preview.endpoint_class}")
+        cols[1].metric("参考图数量", preview.reference_count)
         st.caption(
             f"最大付费尝试：每镜头 {preview.max_paid_attempts} 次 · "
             f"预计最多 {preview.estimated_provider_requests} 次 Provider 请求。"
         )
+        content_labels = {
+            "TEXT": "文本",
+            "REFERENCE_IMAGE": "参考图片",
+            "VIDEO": "视频",
+            "AUDIO": "音频",
+        }
+        content_summary = "、".join(
+            content_labels.get(item, item)
+            for item in preview.transmitted_content_types
+        )
+        if preview.deployment_region == "LOCAL":
+            st.info("本次选择为 LOCAL，本机处理，不向云端 Provider 传输素材。")
+        else:
+            st.warning(
+                f"云传输披露：将向 {preview.provider_id}（{preview.deployment_region} / "
+                f"{preview.endpoint_class}）传输：{content_summary}。"
+            )
         st.caption("未获得可靠的当前价格数据，因此不展示或猜测货币金额。")
         approved = st.checkbox(
-            "我确认使用上述 Provider / 模型，并批准本次有界生成请求",
-            key=f"paid-authorization-{_value(job, 'id')}",
+            "我已阅读区域与传输内容披露，确认上述 Provider / 模型，并批准本次有界生成请求",
+            key=f"paid-authorization-{_value(job, 'id')}-{preview.authorization_fingerprint}",
         )
         disabled = not approved
         if approved:
@@ -650,8 +713,13 @@ def _render_primary_action(orchestrator, production_service, project, job, readi
                 "approved": True,
                 "provider_id": preview.provider_id,
                 "model_id": preview.model_id,
+                "deployment_region": preview.deployment_region,
+                "endpoint_profile_id": preview.endpoint_profile_id,
+                "endpoint_class": preview.endpoint_class,
+                "reference_count": preview.reference_count,
                 "max_paid_attempts": preview.max_paid_attempts,
                 "estimated_provider_requests": preview.estimated_provider_requests,
+                "authorization_fingerprint": preview.authorization_fingerprint,
             }
     if st.button(
         label,
@@ -666,6 +734,7 @@ def _render_primary_action(orchestrator, production_service, project, job, readi
             job,
             ensure_job=ensure_job,
             authorization=authorization,
+            endpoint_profile_id=endpoint_profile_id,
         )
 
 

@@ -259,6 +259,63 @@ def test_blocked_primary_action_is_disabled(monkeypatch):
     assert calls == [("开始整剧制作", True)]
 
 
+def test_paid_authorization_renders_region_reference_count_and_cloud_disclosure():
+    app = AppTest.from_string(
+        """
+from types import SimpleNamespace
+from aidrama_studio.pages import production as page
+
+project = SimpleNamespace(id='project-1')
+job = SimpleNamespace(id='job-1', status='READY')
+
+class Orchestrator:
+    def list_provider_options(self, project_id):
+        return ({
+            'provider_id': 'CN_VIDEO',
+            'model_id': 'video-model-v1',
+            'endpoint_profile_id': 'cn-video-endpoint',
+            'deployment_region': 'MAINLAND_CHINA',
+            'endpoint_class': 'CN_VIDEO_PUBLIC',
+            'available': True,
+            'verified': False,
+        },)
+    def preview_authorization(self, project_id, job_id, **kwargs):
+        return SimpleNamespace(
+            provider_id='CN_VIDEO',
+            model_id='video-model-v1',
+            deployment_region='MAINLAND_CHINA',
+            endpoint_profile_id='cn-video-endpoint',
+            endpoint_class='CN_VIDEO_PUBLIC',
+            reference_count=2,
+            shot_count=1,
+            max_paid_attempts=1,
+            estimated_provider_requests=1,
+            transmitted_content_types=('TEXT', 'REFERENCE_IMAGE'),
+            authorization_fingerprint='a' * 64,
+        )
+    def run_job(self, *args, **kwargs):
+        pass
+
+page._render_primary_action(
+    Orchestrator(), None, project, job, {'ready': True}, {'completed_shots': 0}
+)
+"""
+    ).run()
+
+    assert not app.exception
+    metrics = {item.label: str(item.value) for item in app.metric}
+    assert metrics["视频 Provider"] == "CN_VIDEO"
+    assert metrics["模型"] == "video-model-v1"
+    assert metrics["区域 / 部署类型"] == "MAINLAND_CHINA / CN_VIDEO_PUBLIC"
+    assert metrics["参考图数量"] == "2"
+    warning = "\n".join(str(item.value) for item in app.warning)
+    assert "CN_VIDEO" in warning
+    assert "MAINLAND_CHINA" in warning
+    assert "文本" in warning and "参考图片" in warning
+    assert app.checkbox[0].key.endswith("a" * 64)
+    assert "区域与传输内容披露" in app.checkbox[0].label
+
+
 def test_failure_reason_does_not_leak_traceback():
     reason = page._safe_failure_reason("runtime error\nTraceback (most recent call last):\nsecret absolute path")
     assert "Traceback" not in reason
