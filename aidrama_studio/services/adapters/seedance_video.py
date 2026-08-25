@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+import requests
+
 from aidrama_studio.domain import (
     GenerationBrief,
     OutputProfile,
@@ -33,7 +35,12 @@ from ..provider_result_download import (
     validate_mp4_prefix,
 )
 from ..reference_assets import ReferenceAssetService
-from .production_adapter import ProductionRuntimeAdapter, RuntimeSubmission
+from .production_adapter import (
+    ProductionRuntimeAdapter,
+    RuntimeSubmission,
+    RuntimeTransientError,
+    parse_retry_after,
+)
 
 
 DEFAULT_SEEDANCE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
@@ -49,6 +56,14 @@ MAX_VIDEO_BYTES = 1024 * 1024 * 1024
 
 class SeedanceAdapterError(RuntimeError):
     """A non-secret Seedance contract or provider failure."""
+
+
+class SeedanceTransientError(SeedanceAdapterError, RuntimeTransientError):
+    transient = True
+
+    def __init__(self, message: str, *, retry_after_seconds: float | None = None):
+        SeedanceAdapterError.__init__(self, message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -651,13 +666,18 @@ class SeedanceProductionAdapter(ProductionRuntimeAdapter):
         if not isinstance(runtime_reference, str) or not runtime_reference.strip():
             raise SeedanceAdapterError("Seedance task identity 不能为空")
         client = self._client or self._requests_client()
-        response = client.get(
-            self.config.base_url.rstrip("/")
-            + SEEDANCE_TASK_PATH
-            + f"/{runtime_reference.strip()}",
-            headers={"Authorization": f"Bearer {self.config.api_key}"},
-            timeout=self.config.timeout_seconds,
-        )
+        try:
+            response = client.get(
+                self.config.base_url.rstrip("/")
+                + SEEDANCE_TASK_PATH
+                + f"/{runtime_reference.strip()}",
+                headers={"Authorization": f"Bearer {self.config.api_key}"},
+                timeout=self.config.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise SeedanceTransientError(
+                f"Seedance polling transport failed: {type(exc).__name__}"
+            ) from exc
         return self._response_json(response)
 
     @classmethod
@@ -671,6 +691,17 @@ class SeedanceProductionAdapter(ProductionRuntimeAdapter):
     @staticmethod
     def _response_json(response: Any) -> dict[str, object]:
         status = int(getattr(response, "status_code", 200))
+        if status == 429 or status >= 500:
+            retry_after = None
+            headers = getattr(response, "headers", {})
+            try:
+                raw = headers.get("Retry-After") or headers.get("retry-after")
+                retry_after = parse_retry_after(raw)
+            except AttributeError:
+                retry_after = None
+            raise SeedanceTransientError(
+                f"Seedance HTTP {status}", retry_after_seconds=retry_after
+            )
         if status >= 400:
             raise SeedanceAdapterError(f"Seedance HTTP {status}")
         try:
@@ -701,4 +732,5 @@ __all__ = [
     "SeedanceInputMapper",
     "SeedanceProductionAdapter",
     "SeedanceProviderConfig",
+    "SeedanceTransientError",
 ]

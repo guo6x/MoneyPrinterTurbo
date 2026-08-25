@@ -9,8 +9,8 @@ with `git rev-parse HEAD` after checkout.
 - Target branch: `goal/aidrama-studio-v1-0-final-product-release`
 - Goal base: `3ce90aad6a70e6173a3826bd4e8eb6c039e0221b`
 - Current head: `HEAD`
-- Active checkpoint: provider polling/reconciliation and remaining release
-  engineering closure.
+- Active checkpoint: real Vision provider boundary and canonical AI invocation
+  provenance.
 - No dependency was installed and no live provider request was made.
 
 ## Completed checkpoints with current local evidence
@@ -35,11 +35,16 @@ with `git rev-parse HEAD` after checkout.
 - Provider success plus artifact-download failure remains a recoverable
   artifact-pending state tied to the original provider task; it does not
   submit another paid generation.
+- Provider polling now distinguishes transient 429/5xx/network interruption
+  from definitive provider failure, honors numeric or HTTP-date Retry-After,
+  applies bounded backoff, and cold-resumes the original task. Unknown states
+  require reconciliation instead of producing a false FAILED result or a new
+  paid submission.
 - Nested provider metadata and operator errors drop credentials and result
   URLs before persistence.
 - Current validation: Python compile PASS, `git diff --check` PASS, focused
   provider/runtime/security tests PASS, complete AIDrama suite
-  `235 passed, 10 warnings`.
+  `241 passed, 10 warnings`.
 
 ## Externally blocked gates
 
@@ -52,8 +57,6 @@ with `git rev-parse HEAD` after checkout.
 
 ## Known remaining work
 
-- Complete transient provider polling policy, Retry-After/backoff and orphan
-  reconciliation evidence across cold restart.
 - Finish the real Gemini Vision provider/document audit and canonical LLM
   invocation-ledger integration.
 - Close final subtitle timing, cloud disclosure/input provenance, remote file
@@ -68,6 +71,6 @@ with `git rev-parse HEAD` after checkout.
 
 ## Next safe implementation step
 
-Implement bounded transient polling/backoff and provider-task reconciliation,
-including restart tests that prove a transient status or result-download
-failure never creates a duplicate paid submission.
+Verify current official Gemini video-understanding documentation, select one
+exact V1 Vision model/input path, and implement the non-live provider contract,
+frame/reference provenance and persistence tests without making a live call.

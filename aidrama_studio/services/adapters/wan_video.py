@@ -28,7 +28,12 @@ from ..provider_result_download import (
     validate_mp4_prefix,
 )
 from ..streaming_artifact import StreamingArtifactSource
-from .production_adapter import ProductionRuntimeAdapter, RuntimeSubmission
+from .production_adapter import (
+    ProductionRuntimeAdapter,
+    RuntimeSubmission,
+    RuntimeTransientError,
+    parse_retry_after,
+)
 
 
 DEFAULT_WAN_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
@@ -62,6 +67,14 @@ class WanProviderHTTPError(WanAdapterError):
         self.code = code
         detail = f" ({code})" if code else ""
         super().__init__(f"Wan provider HTTP {status_code}{detail}")
+
+
+class WanTransientError(WanAdapterError, RuntimeTransientError):
+    transient = True
+
+    def __init__(self, message: str, *, retry_after_seconds: float | None = None):
+        WanAdapterError.__init__(self, message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 @dataclass(frozen=True)
@@ -428,7 +441,9 @@ class WanVideoClient:
                 timeout=self.config.request_timeout_seconds,
             )
         except requests.RequestException as exc:
-            raise WanAdapterError(f"Wan request failed: {type(exc).__name__}") from exc
+            raise WanTransientError(
+                f"Wan request failed: {type(exc).__name__}"
+            ) from exc
         if response.status_code < 200 or response.status_code >= 300:
             code = ""
             try:
@@ -437,7 +452,21 @@ class WanVideoClient:
                     code = str(body.get("code") or body.get("error_code") or "")[:80]
             except (TypeError, ValueError):
                 pass
-            raise WanProviderHTTPError(int(response.status_code), code)
+            status_code = int(response.status_code)
+            if status_code == 429 or status_code >= 500:
+                retry_after = None
+                try:
+                    raw = response.headers.get("Retry-After") or response.headers.get(
+                        "retry-after"
+                    )
+                    retry_after = parse_retry_after(raw)
+                except AttributeError:
+                    retry_after = None
+                raise WanTransientError(
+                    f"Wan provider HTTP {status_code}",
+                    retry_after_seconds=retry_after,
+                )
+            raise WanProviderHTTPError(status_code, code)
         try:
             body = response.json()
         except (TypeError, ValueError) as exc:
@@ -585,6 +614,7 @@ __all__ = [
     "DEFAULT_WAN_RESULT_HOSTS",
     "WanAdapterError",
     "WanProviderHTTPError",
+    "WanTransientError",
     "WanProviderConfig",
     "WanReferenceSelection",
     "WanReferenceResolver",

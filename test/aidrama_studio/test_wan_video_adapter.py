@@ -23,6 +23,7 @@ from aidrama_studio.services.adapters import (
     WanReferenceResolver,
     WanReferenceSelection,
     WanVideoClient,
+    WanTransientError,
     RuntimeSubmission,
 )
 from aidrama_studio.services.provider_result_download import validate_mp4_prefix
@@ -309,3 +310,23 @@ def test_wan_client_uses_async_header_without_exposing_key():
     assert client.create_task({"model": "wan2.7-i2v-2026-04-25"}) == "wan-task-1"
     assert session.kwargs["headers"]["X-DashScope-Async"] == "enable"
     assert session.kwargs["headers"]["Authorization"] == "Bearer secret-key"
+
+
+def test_wan_retry_after_is_exposed_as_transient_poll_failure():
+    class Response:
+        status_code = 503
+        headers = {"Retry-After": "9"}
+
+        def json(self):
+            return {"code": "ServiceUnavailable"}
+
+    class Session:
+        def request(self, *args, **kwargs):
+            return Response()
+
+    client = WanVideoClient(
+        WanProviderConfig(api_key="secret-key"), session=Session()
+    )
+    with pytest.raises(WanTransientError) as error:
+        client.get_task("wan-task-1")
+    assert error.value.retry_after_seconds == 9

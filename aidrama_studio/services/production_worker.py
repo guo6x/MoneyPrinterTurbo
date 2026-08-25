@@ -17,7 +17,12 @@ from aidrama_studio.domain import (
     ProductionExecutionStatus,
     ProductionInputSnapshot,
 )
-from aidrama_studio.services.adapters import ProductionRuntimeAdapter, RuntimeEvent
+from aidrama_studio.services.adapters import (
+    ProductionRuntimeAdapter,
+    RuntimeEvent,
+    RuntimeReconciliationRequired,
+    RuntimeTransientError,
+)
 
 from .production_artifact_storage import (
     ProductionArtifactStorageService,
@@ -173,7 +178,7 @@ class ProductionWorker:
             )
         except (TypeError, ValueError):
             effective_poll_interval = self.poll_interval
-        for _ in range(self.max_polls):
+        for poll_index in range(self.max_polls):
             if self.should_stop():
                 # Desktop shutdown pauses local polling only. The durable
                 # RUNNING execution/provider identity is intentionally left
@@ -186,9 +191,56 @@ class ProductionWorker:
                 if execution.status in self._terminal_statuses():
                     return execution
 
-                raw_status = adapter.get_status(runtime_reference)
-                status = self._normalize_status(adapter, raw_status)
+                try:
+                    raw_status = adapter.get_status(runtime_reference)
+                    status = self._normalize_status(adapter, raw_status)
+                except RuntimeTransientError as exc:
+                    task = self.execution_service.mark_provider_polling_interrupted(
+                        project_id,
+                        execution.id,
+                        exc,
+                        retry_after_seconds=exc.retry_after_seconds,
+                    )
+                    if task.state == "RECONCILIATION_REQUIRED":
+                        return self.execution_service.get_execution(
+                            project_id, execution.id
+                        )
+                    if poll_index + 1 >= self.max_polls:
+                        return self.execution_service.get_execution(
+                            project_id, execution.id
+                        )
+                    retry_delay = max(
+                        effective_poll_interval,
+                        float(exc.retry_after_seconds or 0.0),
+                    )
+                    if not self._wait_interval(retry_delay):
+                        return self.execution_service.get_execution(
+                            project_id, execution.id
+                        )
+                    continue
+                except RuntimeReconciliationRequired as exc:
+                    self.execution_service.mark_provider_reconciliation_required(
+                        project_id, execution.id, exc
+                    )
+                    return self.execution_service.get_execution(
+                        project_id, execution.id
+                    )
+                except Exception as exc:
+                    # A paid task already has durable provider identity. An
+                    # unknown polling failure is not proof that generation
+                    # failed and must never trigger an automatic re-submit.
+                    self.execution_service.mark_provider_reconciliation_required(
+                        project_id, execution.id, exc
+                    )
+                    return self.execution_service.get_execution(
+                        project_id, execution.id
+                    )
                 execution = self.execution_service.get_execution(project_id, execution.id)
+                self.execution_service.mark_provider_polling_active(
+                    project_id,
+                    execution.id,
+                    running=status is ProductionExecutionStatus.RUNNING,
+                )
                 if status == ProductionExecutionStatus.FAILED:
                     return self._fail(project_id, execution, "runtime reported FAILED")
                 if status == ProductionExecutionStatus.CANCELLED:
@@ -219,17 +271,29 @@ class ProductionWorker:
                 if execution.status in self._terminal_statuses():
                     return execution
                 return self._fail(project_id, execution, f"worker execution failed: {exc}")
-            if effective_poll_interval:
-                deadline = time.monotonic() + effective_poll_interval
-                while time.monotonic() < deadline:
-                    if self.should_stop():
-                        return self.execution_service.get_execution(project_id, execution.id)
-                    time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+            if effective_poll_interval and not self._wait_interval(
+                effective_poll_interval
+            ):
+                return self.execution_service.get_execution(project_id, execution.id)
 
         execution = self.execution_service.get_execution(project_id, execution.id)
         if execution.status in self._terminal_statuses():
             return execution
-        return self._fail(project_id, execution, "runtime polling timed out")
+        self.execution_service.mark_provider_polling_interrupted(
+            project_id,
+            execution.id,
+            "runtime polling window elapsed",
+            retry_after_seconds=max(effective_poll_interval, 10.0),
+        )
+        return self.execution_service.get_execution(project_id, execution.id)
+
+    def _wait_interval(self, seconds: float) -> bool:
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        while time.monotonic() < deadline:
+            if self.should_stop():
+                return False
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+        return not self.should_stop()
 
     def _drain_events(
         self,

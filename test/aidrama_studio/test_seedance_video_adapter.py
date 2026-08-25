@@ -18,6 +18,7 @@ from aidrama_studio.services.adapters.seedance_video import (
     SeedanceAdapterError,
     SeedanceProductionAdapter,
     SeedanceProviderConfig,
+    SeedanceTransientError,
 )
 from aidrama_studio.services.streaming_artifact import StreamingArtifactSource
 from test.aidrama_studio.test_production_execution import (
@@ -27,10 +28,10 @@ from test.aidrama_studio.test_production_execution import (
 
 
 class Response:
-    status_code = 200
-
-    def __init__(self, value):
+    def __init__(self, value, *, status=200, headers=None):
         self.value = value
+        self.status_code = status
+        self.headers = dict(headers or {})
 
     def json(self):
         return self.value
@@ -265,3 +266,11 @@ def test_seedance_status_result_shape_and_cancel_are_truthful(tmp_path):
     adapter._client.task = {"status": "succeeded", "content": {}}
     with pytest.raises(SeedanceAdapterError, match="video_url"):
         adapter.get_result("seedance-task-1")
+
+
+def test_seedance_retry_after_is_exposed_as_transient_poll_failure():
+    with pytest.raises(SeedanceTransientError) as error:
+        SeedanceProductionAdapter._response_json(
+            Response({}, status=429, headers={"Retry-After": "17"})
+        )
+    assert error.value.retry_after_seconds == 17

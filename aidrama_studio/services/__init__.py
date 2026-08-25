@@ -64,7 +64,9 @@ from .adapters import (
     MockProductionAdapter,
     ProductionRuntimeAdapter,
     RuntimeEvent,
+    RuntimeReconciliationRequired,
     RuntimeSubmission,
+    RuntimeTransientError,
     WanAdapterError,
     WanInputMapper,
     WanProductionAdapter,
@@ -74,10 +76,12 @@ from .adapters import (
     WanReferenceResolver,
     WanReferenceSelection,
     WanVideoClient,
+    WanTransientError,
     SeedanceAdapterError,
     SeedanceInputMapper,
     SeedanceProductionAdapter,
     SeedanceProviderConfig,
+    SeedanceTransientError,
 )
 
 __all__ = [
@@ -120,9 +124,10 @@ __all__ = [
     "UnavailableImageProvider", "UnavailableVisionProvider", "UnavailableTTSProvider", "DeterministicMockVisionProvider",
     "default_capability_registry",
     "ProductionOrchestrator", "ProductionOrchestratorError",
-    "ProductionRuntimeAdapter", "RuntimeSubmission", "RuntimeEvent", "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
+    "ProductionRuntimeAdapter", "RuntimeSubmission", "RuntimeEvent", "RuntimeTransientError", "RuntimeReconciliationRequired", "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
     "WanAdapterError", "WanInputMapper", "WanProductionAdapter", "WanPromptMapper",
     "WanProviderConfig", "WanProviderHTTPError", "WanReferenceResolver",
     "WanReferenceSelection", "WanVideoClient",
-    "SeedanceAdapterError", "SeedanceInputMapper", "SeedanceProductionAdapter", "SeedanceProviderConfig",
+    "WanTransientError",
+    "SeedanceAdapterError", "SeedanceInputMapper", "SeedanceProductionAdapter", "SeedanceProviderConfig", "SeedanceTransientError",
 ]

@@ -806,6 +806,113 @@ class ProductionExecutionService:
             error_message=self._safe_error(error),
         )
 
+    def mark_provider_polling_interrupted(
+        self,
+        project_id: str,
+        execution_id: str,
+        error: object,
+        *,
+        retry_after_seconds: float | None = None,
+    ) -> ProviderTask:
+        """Persist a recoverable GET/poll failure for the original task."""
+
+        execution, _ = self._get_execution(project_id, execution_id)
+        self._require_status(
+            execution,
+            ProductionExecutionStatus.RUNNING,
+            "只有 RUNNING execution 可以中断 polling",
+        )
+        task = self._execution_provider_task(project_id, execution_id)
+        try:
+            failure_count = int(task.metadata.get("poll_failure_count", 0)) + 1
+        except (TypeError, ValueError):
+            failure_count = 1
+        try:
+            requested_delay = max(0.0, float(retry_after_seconds or 0.0))
+        except (TypeError, ValueError):
+            requested_delay = 0.0
+        delay_seconds = min(
+            600.0,
+            max(requested_delay, float(10 * (2 ** min(failure_count - 1, 6)))),
+        )
+        next_poll_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+        ).isoformat(timespec="microseconds")
+        return self._update_provider_task(
+            task,
+            state=(
+                "POLLING_INTERRUPTED"
+                if failure_count <= 8
+                else "RECONCILIATION_REQUIRED"
+            ),
+            metadata={
+                "poll_failure_count": failure_count,
+                "poll_next_retry_at": next_poll_at,
+                "poll_retry_after_seconds": delay_seconds,
+            },
+            error_message=self._safe_error(error),
+        )
+
+    def mark_provider_reconciliation_required(
+        self,
+        project_id: str,
+        execution_id: str,
+        error: object,
+    ) -> ProviderTask:
+        execution, _ = self._get_execution(project_id, execution_id)
+        self._require_status(
+            execution,
+            ProductionExecutionStatus.RUNNING,
+            "只有 RUNNING execution 可以进入 reconciliation",
+        )
+        return self._update_provider_task(
+            self._execution_provider_task(project_id, execution_id),
+            state="RECONCILIATION_REQUIRED",
+            error_message=self._safe_error(error),
+        )
+
+    def mark_provider_polling_active(
+        self,
+        project_id: str,
+        execution_id: str,
+        *,
+        running: bool,
+    ) -> ProviderTask:
+        task = self._execution_provider_task(project_id, execution_id)
+        metadata = dict(task.metadata)
+        for key in (
+            "poll_failure_count",
+            "poll_next_retry_at",
+            "poll_retry_after_seconds",
+        ):
+            metadata.pop(key, None)
+        updated = task.model_copy(
+            update={
+                "state": "PROVIDER_RUNNING" if running else "PROVIDER_ACCEPTED",
+                "metadata": metadata,
+                "error_message": None,
+                "updated_at": _now(),
+            }
+        )
+        return self.repository.update_provider_task(updated)
+
+    def _execution_provider_task(
+        self, project_id: str, execution_id: str
+    ) -> ProviderTask:
+        task = next(
+            (
+                item
+                for item in self.repository.list_provider_tasks(project_id)
+                if item.execution_id == execution_id
+            ),
+            None,
+        )
+        if task is None or not task.provider_task_id:
+            raise ProductionExecutionServiceError(
+                "execution 缺少可恢复的 provider task"
+            )
+        return task
+
     def fail_execution(
         self,
         project_id: str,

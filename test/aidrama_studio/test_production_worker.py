@@ -7,6 +7,8 @@ from aidrama_studio.services import (
     ProductionExecutionService,
     ProductionRuntimeAdapter,
     ProductionWorker,
+    RuntimeReconciliationRequired,
+    RuntimeTransientError,
 )
 from aidrama_studio.services.adapters import MPTProductionAdapter, MockProductionAdapter, RuntimeSubmission
 from aidrama_studio.services.streaming_artifact import StreamingArtifactSource
@@ -120,6 +122,39 @@ class ResumableStreamingAdapter(ProductionRuntimeAdapter):
             "filename": "shot.mp4",
             "stream_source": StreamingArtifactSource(writer, 1024),
         }
+
+    def cancel(self, runtime_reference):
+        return False
+
+
+class TransientPollingAdapter(ProductionRuntimeAdapter):
+    name = "transient-provider"
+
+    def __init__(self, *, always_transient=False, reconciliation=False):
+        self.submit_count = 0
+        self.status_count = 0
+        self.always_transient = always_transient
+        self.reconciliation = reconciliation
+
+    def validate(self, snapshot):
+        return True
+
+    def submit(self, snapshot):
+        self.submit_count += 1
+        return RuntimeSubmission("paid-poll-task-1")
+
+    def get_status(self, runtime_reference):
+        self.status_count += 1
+        if self.reconciliation:
+            raise RuntimeReconciliationRequired("unknown provider status")
+        if self.always_transient or self.status_count == 1:
+            raise RuntimeTransientError(
+                "provider rate limited", retry_after_seconds=0
+            )
+        return "SUCCEEDED"
+
+    def get_result(self, runtime_reference):
+        return {"content": b"poll-recovered", "filename": "shot.mp4"}
 
     def cancel(self, runtime_reference):
         return False
@@ -319,3 +354,77 @@ def test_artifact_db_failure_compensates_finalized_file(context, monkeypatch):
     assert service.list_artifacts(project.id, execution.id) == []
     execution_root = repository.paths.projects / project.id / "production" / execution.id
     assert list(execution_root.iterdir()) == []
+
+
+def test_transient_poll_failure_recovers_without_failing_or_resubmitting(context):
+    repository, project = context
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    execution = service.enqueue_job(project.id, job.id)
+    adapter = TransientPollingAdapter()
+
+    result = ProductionWorker(service, adapter, max_polls=3).run(
+        project.id, execution.id
+    )
+
+    assert result.status is ProductionExecutionStatus.SUCCEEDED
+    assert adapter.submit_count == 1
+    assert adapter.status_count == 2
+    assert all(
+        event.event_type is not ProductionEventType.FAILED
+        for event in service.list_events(project.id, execution.id)
+    )
+
+
+def test_polling_window_interrupts_and_cold_resume_reuses_provider_task(context):
+    repository, project = context
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    execution = service.enqueue_job(project.id, job.id)
+    adapter = TransientPollingAdapter(always_transient=True)
+    worker = ProductionWorker(service, adapter, max_polls=1)
+
+    interrupted = worker.run(project.id, execution.id)
+
+    assert interrupted.status is ProductionExecutionStatus.RUNNING
+    task = next(
+        item
+        for item in repository.list_provider_tasks(project.id)
+        if item.execution_id == execution.id
+    )
+    assert task.state == "POLLING_INTERRUPTED"
+    assert task.metadata["poll_failure_count"] == 1
+    assert adapter.submit_count == 1
+
+    adapter.always_transient = False
+    adapter.status_count = 1
+    completed = ProductionWorker(service, adapter, max_polls=1).resume(
+        project.id, execution.id
+    )
+    assert completed.status is ProductionExecutionStatus.SUCCEEDED
+    assert adapter.submit_count == 1
+
+
+def test_unknown_poll_state_requires_reconciliation_without_false_failure(context):
+    repository, project = context
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    execution = service.enqueue_job(project.id, job.id)
+    adapter = TransientPollingAdapter(reconciliation=True)
+
+    result = ProductionWorker(service, adapter, max_polls=1).run(
+        project.id, execution.id
+    )
+
+    assert result.status is ProductionExecutionStatus.RUNNING
+    task = next(
+        item
+        for item in repository.list_provider_tasks(project.id)
+        if item.execution_id == execution.id
+    )
+    assert task.state == "RECONCILIATION_REQUIRED"
+    assert adapter.submit_count == 1
+    assert all(
+        event.event_type is not ProductionEventType.FAILED
+        for event in service.list_events(project.id, execution.id)
+    )

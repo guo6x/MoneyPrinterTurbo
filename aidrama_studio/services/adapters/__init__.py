@@ -2,7 +2,13 @@
 
 from .mpt_runtime import MPTAdapterError, MPTInputMapper, MPTProductionAdapter
 from .mock_adapter import MockProductionAdapter
-from .production_adapter import ProductionRuntimeAdapter, RuntimeEvent, RuntimeSubmission
+from .production_adapter import (
+    ProductionRuntimeAdapter,
+    RuntimeEvent,
+    RuntimeReconciliationRequired,
+    RuntimeSubmission,
+    RuntimeTransientError,
+)
 from .wan_video import (
     WanAdapterError,
     WanInputMapper,
@@ -13,8 +19,15 @@ from .wan_video import (
     WanReferenceResolver,
     WanReferenceSelection,
     WanVideoClient,
+    WanTransientError,
 )
-from .seedance_video import SeedanceAdapterError, SeedanceInputMapper, SeedanceProductionAdapter, SeedanceProviderConfig
+from .seedance_video import (
+    SeedanceAdapterError,
+    SeedanceInputMapper,
+    SeedanceProductionAdapter,
+    SeedanceProviderConfig,
+    SeedanceTransientError,
+)
 from .final_assembly_runtime import (
     FinalAssemblyRenderRequest,
     FinalAssemblyRuntimeAdapter,
@@ -24,10 +37,12 @@ from .final_assembly_runtime import (
 
 __all__ = [
     "ProductionRuntimeAdapter", "RuntimeEvent", "RuntimeSubmission",
+    "RuntimeTransientError", "RuntimeReconciliationRequired",
     "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
     "WanAdapterError", "WanInputMapper", "WanProductionAdapter", "WanPromptMapper",
     "WanProviderConfig", "WanProviderHTTPError", "WanReferenceResolver",
     "WanReferenceSelection", "WanVideoClient",
-    "SeedanceAdapterError", "SeedanceInputMapper", "SeedanceProductionAdapter", "SeedanceProviderConfig",
+    "WanTransientError",
+    "SeedanceAdapterError", "SeedanceInputMapper", "SeedanceProductionAdapter", "SeedanceProviderConfig", "SeedanceTransientError",
     "FinalAssemblyRenderRequest", "FinalAssemblyRuntimeAdapter", "FinalAssemblyRuntimeError", "MPTFinalAssemblyAdapter",
 ]

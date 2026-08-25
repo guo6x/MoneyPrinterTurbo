@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from aidrama_studio.services import (
@@ -8,9 +10,12 @@ from aidrama_studio.services import (
     ProductionQueueError,
     ProductionQueueService,
     ProductionRuntimeResolver,
+    ProductionRuntimeAdapter,
+    RuntimeSubmission,
     RuntimeVideoProvider,
 )
 from aidrama_studio.services.adapters import MockProductionAdapter
+from aidrama_studio.services.streaming_artifact import StreamingArtifactSource
 from test.aidrama_studio.test_production_execution import _ready_job, context as _execution_context
 
 
@@ -199,3 +204,84 @@ def test_startup_reconciliation_requeues_local_job_without_new_paid_intent(tmp_p
         if item.execution_id is None
     ]
     assert [item.id for item in job_tasks] == [task.id]
+
+
+def test_background_runner_defers_artifact_redownload_and_never_resubmits(tmp_path):
+    repository, project = _execution_context.__wrapped__(tmp_path)
+    job = _ready_job(repository, project)
+    queue = _queue(repository)
+    task = queue.enqueue_job(
+        project.id,
+        job.id,
+        authorization=_authorization(queue, project.id, job.id),
+    )
+
+    class FlakyResultAdapter(ProductionRuntimeAdapter):
+        name = "flaky-result"
+        model_id = "runtime"
+
+        def __init__(self):
+            self.submits = 0
+            self.downloads = 0
+
+        def validate(self, snapshot):
+            return True
+
+        def submit(self, snapshot):
+            self.submits += 1
+            return RuntimeSubmission("paid-task-1")
+
+        def get_status(self, runtime_reference):
+            return "SUCCEEDED"
+
+        def get_result(self, runtime_reference):
+            self.downloads += 1
+
+            def writer(sink):
+                if self.downloads == 1:
+                    raise OSError("temporary CDN interruption")
+                sink.write(b"not-a-real-video-but-a-physical-test-artifact")
+
+            return {
+                "stream_source": StreamingArtifactSource(writer, 1024),
+                "filename": "shot.mp4",
+                "artifact_type": "video",
+            }
+
+        def cancel(self, runtime_reference):
+            return False
+
+    adapter = FlakyResultAdapter()
+    runner = BackgroundProductionRunner(
+        repository,
+        adapter_factory=lambda _task, _plan: adapter,
+    )
+
+    first = runner.run_once(project.id)
+
+    assert first[0].state == "QUEUED"
+    assert first[0].metadata["not_before"]
+    assert adapter.submits == 1
+    assert runner.run_once(project.id) == []
+
+    queued = repository.get_provider_task(task.id)
+    repository.update_provider_task(
+        queued.model_copy(
+            update={
+                "metadata": dict(queued.metadata)
+                | {
+                    "not_before": (
+                        datetime.now(timezone.utc) - timedelta(seconds=1)
+                    ).isoformat()
+                }
+            }
+        )
+    )
+    second = runner.run_once(project.id)
+
+    assert second[0].state == "FAILED"  # deterministic QC rejects fake media
+    assert adapter.submits == 1
+    assert adapter.downloads == 2
+    executions = repository.list_production_executions(job.id)
+    assert len(executions) == 1
+    assert executions[0].status.value == "SUCCEEDED"

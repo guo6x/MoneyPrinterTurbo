@@ -202,6 +202,7 @@ class BackgroundProductionRunner:
                                     if child.state
                                     in {
                                         "PROVIDER_SUCCEEDED_ARTIFACT_PENDING",
+                                        "POLLING_INTERRUPTED",
                                         "RECONCILIATION_REQUIRED",
                                     }
                                 ),
@@ -215,6 +216,8 @@ class BackgroundProductionRunner:
                                 )
                                 metadata["not_before"] = pending.metadata.get(
                                     "artifact_next_retry_at"
+                                ) or pending.metadata.get(
+                                    "poll_next_retry_at"
                                 )
                         else:
                             metadata.pop("not_before", None)
@@ -240,11 +243,16 @@ class BackgroundProductionRunner:
                             state == "RUNNING"
                             and current_task is not None
                             and current_task.state
-                            == "PROVIDER_SUCCEEDED_ARTIFACT_PENDING"
+                            in {
+                                "PROVIDER_SUCCEEDED_ARTIFACT_PENDING",
+                                "POLLING_INTERRUPTED",
+                            }
                         ):
                             state = "QUEUED"
                             metadata["not_before"] = current_task.metadata.get(
                                 "artifact_next_retry_at"
+                            ) or current_task.metadata.get(
+                                "poll_next_retry_at"
                             )
                         elif state != "RUNNING":
                             metadata.pop("not_before", None)
