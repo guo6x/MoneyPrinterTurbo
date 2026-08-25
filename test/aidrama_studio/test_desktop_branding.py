@@ -277,6 +277,9 @@ def test_pyinstaller_targets_desktop_launcher_and_runtime_assets(monkeypatch, tm
     assert "--add-data" in data_args
     assert any("styles.css" in value for value in data_args)
     assert any("assets" in value for value in data_args)
+    assert any("LICENSE" in value for value in data_args)
+    assert any("NOTICE" in value for value in data_args)
+    assert any("THIRD_PARTY_NOTICES.md" in value for value in data_args)
 
 
 def test_build_entrypoint_exists_and_is_loopback_launcher():

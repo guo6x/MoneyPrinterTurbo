@@ -11,7 +11,13 @@ from aidrama_studio.domain import (
     ScriptBeatType, InteriorExterior, TimeOfDay, Scene, ScriptBeat, StructuredScript,
 )
 from aidrama_studio.pages._shared import current_project_or_stop
-from aidrama_studio.services import StoryService, StoryServiceError, ScriptService, ScriptServiceError
+from aidrama_studio.services import (
+    CreativeIntakeService,
+    ScriptService,
+    ScriptServiceError,
+    StoryService,
+    StoryServiceError,
+)
 
 
 BEAT_TYPES = ["OPENING", "DEVELOPMENT", "TURNING_POINT", "CLIMAX", "ENDING"]
@@ -50,6 +56,192 @@ def _list_text(values: list[str], separator: str = ", ") -> str:
 
 def _parse_list(value: str, separator: str = ",") -> list[str]:
     return [item.strip() for item in value.replace("，", separator).split(separator) if item.strip()]
+
+
+def _render_creative_intake(project) -> None:
+    service = CreativeIntakeService()
+    source_pack = service.source_pack
+    st.markdown("### Creative Intake / Source Pack")
+    st.caption(
+        "一句创意、现有文档和多张参考图会先进入项目隔离的 Source Pack；"
+        "原文件与 SHA-256 保持不变，不会自动发送到云端。"
+    )
+
+    idea_key = f"intake-idea-{project.id}"
+    idea = st.text_area(
+        "一句创意或长 Brief",
+        key=idea_key,
+        height=120,
+        placeholder="例如：失忆的末班车司机，在终点站遇见未来的自己。",
+    )
+    if st.button(
+        "加入 Source Pack",
+        key=f"intake-add-text-{project.id}",
+        disabled=not idea.strip(),
+    ):
+        try:
+            source_pack.import_text(project.id, idea, filename="creative-idea.txt")
+            st.toast("创意文本已安全加入 Source Pack")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"创意文本导入失败：{exc}")
+
+    uploads = st.file_uploader(
+        "导入规划文档 / 剧本 / 分镜 / 参考图片",
+        type=["txt", "md", "pdf", "docx", "pptx", "png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key=f"intake-files-{project.id}",
+        help="支持多选；扩展名、MIME、文件签名、压缩包结构和图片内容都会校验。",
+    )
+    if st.button(
+        "导入所选文件",
+        key=f"intake-import-files-{project.id}",
+        disabled=not uploads,
+    ):
+        imported = 0
+        try:
+            for upload in uploads or []:
+                source_pack.import_bytes(
+                    project.id,
+                    upload.name,
+                    upload.getvalue(),
+                    mime_type=upload.type or None,
+                )
+                imported += 1
+            st.toast(f"已处理 {imported} 个 Source Pack 文件")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"文件导入失败（已成功的条目保持不变）：{exc}")
+
+    items = source_pack.list(project.id)
+    if not items:
+        st.info("Source Pack 还是空的。先输入一句创意，或选择现有素材。")
+        return
+
+    st.markdown("#### 当前 Source Pack")
+    analyses = service.repository.list_intake_analyses(project.id)
+    latest_analysis = {item.source_id: item for item in analyses}
+    for item in items:
+        analysis = latest_analysis.get(item.id)
+        with st.container(border=True):
+            name_col, action_col = st.columns([4, 1])
+            name_col.markdown(f"**{item.display_filename}**")
+            name_col.caption(
+                f"{item.source_kind.value} · {item.extraction_state.value} · "
+                f"{item.size_bytes} bytes · SHA256 {item.sha256[:12]}…"
+            )
+            if analysis is not None:
+                name_col.caption("识别：" + " / ".join(analysis.classifications))
+            if action_col.button(
+                "分析",
+                key=f"intake-analyze-{item.id}",
+                use_container_width=True,
+            ):
+                try:
+                    service.analyzer.analyze(project.id, item.id)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"素材分析失败：{exc}")
+            if item.extracted_text:
+                with st.expander("查看提取文本（仅本地）"):
+                    st.text(item.extracted_text[:8000])
+
+    labels = {item.id: item.display_filename for item in items}
+    selected = st.multiselect(
+        "用于规范化 Creative Brief 的来源",
+        options=list(labels),
+        default=list(labels),
+        format_func=lambda source_id: labels[source_id],
+        key=f"intake-normalize-sources-{project.id}",
+    )
+    genre = st.text_input("规范化类型（可选）", key=f"intake-genre-{project.id}")
+    tone = st.text_input("规范化基调（可选）", key=f"intake-tone-{project.id}")
+    if st.button(
+        "生成本地规范化 Brief",
+        type="primary",
+        key=f"intake-normalize-{project.id}",
+        disabled=not selected,
+    ):
+        try:
+            brief = service.normalize(
+                project.id,
+                source_ids=selected,
+                overrides={"genre": genre.strip(), "tone": tone.strip()},
+            )
+            st.session_state[f"story-brief-{project.id}"] = brief.premise
+            if brief.genre:
+                st.session_state[f"story-genre-{project.id}"] = brief.genre
+            if brief.tone:
+                st.session_state[f"story-tone-{project.id}"] = brief.tone
+            st.session_state[f"story-source-ids-{project.id}"] = tuple(brief.source_ids)
+            st.session_state[f"story-normalized-brief-{project.id}"] = brief.id
+            st.toast("规范化 Brief 已创建，并已带入 Story Bible 创作区")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"规范化失败：{exc}")
+
+    briefs = service.repository.list_normalized_creative_briefs(project.id)
+    if briefs:
+        latest = briefs[-1]
+        with st.expander("最新规范化 Brief", expanded=True):
+            st.markdown(f"**{latest.title_candidate or '未命名 Brief'}**")
+            st.write(latest.premise or "暂无可提取文本；图片仍保留在 Source Pack。")
+            st.caption(f"来源 {len(latest.source_ids)} 项 · {latest.status}")
+
+    approved_story = next(
+        (
+            revision
+            for revision in service.repository.list_story_revisions(project.id)
+            if revision["status"] is StoryRevisionStatus.APPROVED
+        ),
+        None,
+    )
+    image_items = [item for item in items if item.source_kind.value == "IMAGE"]
+    if approved_story is not None and image_items:
+        st.markdown("#### 提升为锁定参考图")
+        st.caption("提升会保留 Source Pack 来源 ID 与 SHA-256，不会覆盖已有参考版本。")
+        image_labels = {item.id: item.display_filename for item in image_items}
+        source_id = st.selectbox(
+            "Source Pack 图片",
+            options=list(image_labels),
+            format_func=lambda item_id: image_labels[item_id],
+            key=f"intake-promote-source-{project.id}",
+        )
+        targets = {
+            **{
+                f"CHARACTER:{item.id}": f"角色 · {item.name}"
+                for item in approved_story["content"].characters
+            },
+            **{
+                f"LOCATION:{item.id}": f"场景 · {item.name}"
+                for item in approved_story["content"].locations
+            },
+        }
+        if targets:
+            target = st.selectbox(
+                "绑定目标",
+                options=list(targets),
+                format_func=lambda item_id: targets[item_id],
+                key=f"intake-promote-target-{project.id}",
+            )
+            if st.button(
+                "提升并锁定 Reference",
+                key=f"intake-promote-{project.id}",
+            ):
+                binding_type, binding_id = target.split(":", 1)
+                try:
+                    service.promote_image_reference(
+                        project.id,
+                        source_id,
+                        source_story_revision_id=approved_story["id"],
+                        binding_type=binding_type,
+                        binding_id=binding_id,
+                        lock=True,
+                    )
+                    st.toast("Reference 已创建、绑定并锁定")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Reference 提升失败：{exc}")
 
 
 def _render_brief(project, service: StoryService) -> None:
@@ -106,6 +298,12 @@ def _render_brief(project, service: StoryService) -> None:
                     tone=st.session_state.get(tone_key, ""),
                     target_audience=st.session_state.get(audience_key, ""),
                     creative_constraints=st.session_state.get(constraints_key, ""),
+                    source_ids=tuple(
+                        st.session_state.get(f"story-source-ids-{project.id}", ())
+                    ),
+                    normalized_brief_id=st.session_state.get(
+                        f"story-normalized-brief-{project.id}"
+                    ),
                 )
             st.session_state.story_revision_id = revision["id"]
             st.toast(f"Story Bible v{revision['version']} 已生成")
@@ -451,28 +649,34 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
 def render() -> None:
     page_header("创意与剧本", "STORY DEVELOPMENT", "从一句创意建立可生产的 Story Bible，并保留每一次 revision。")
     project = current_project_or_stop()
-    service = StoryService()
-    revisions = service.list_revisions(project.id)
-    current_id = st.session_state.get("story_revision_id")
-    revision = service.get_revision(current_id) if current_id else None
-    if revision is None and revisions:
-        revision = revisions[0]
-        st.session_state.story_revision_id = revision["id"]
-    left, right = st.columns([0.85, 1.65], gap="large")
-    with left:
-        _render_brief(project, service)
-    with right:
-        if revision is None:
-            st.markdown("### Story Bible")
-            st.info("右侧会展示结构化故事蓝图。你可以从左侧生成，或先创建空白 Draft。")
-        else:
-            script_service = ScriptService()
-            bible_tab, script_tab = st.tabs(["Story Bible", "Structured Script"])
-            with bible_tab:
-                _render_bible_editor(project, service, revision)
-            with script_tab:
-                approved_story = next((item for item in service.list_revisions(project.id) if item["status"] is StoryRevisionStatus.APPROVED), None)
-                if approved_story is None:
-                    st.warning("请先在 Story Bible 页确认一个 APPROVED 版本，才能编辑 Structured Script。")
-                else:
-                    _render_script_editor(project, approved_story, script_service)
+    intake_tab, development_tab = st.tabs(
+        ["创意导入 / Source Pack", "Story Bible / Structured Script"]
+    )
+    with intake_tab:
+        _render_creative_intake(project)
+    with development_tab:
+        service = StoryService()
+        revisions = service.list_revisions(project.id)
+        current_id = st.session_state.get("story_revision_id")
+        revision = service.get_revision(current_id) if current_id else None
+        if revision is None and revisions:
+            revision = revisions[0]
+            st.session_state.story_revision_id = revision["id"]
+        left, right = st.columns([0.85, 1.65], gap="large")
+        with left:
+            _render_brief(project, service)
+        with right:
+            if revision is None:
+                st.markdown("### Story Bible")
+                st.info("右侧会展示结构化故事蓝图。你可以从左侧生成，或先创建空白 Draft。")
+            else:
+                script_service = ScriptService()
+                bible_tab, script_tab = st.tabs(["Story Bible", "Structured Script"])
+                with bible_tab:
+                    _render_bible_editor(project, service, revision)
+                with script_tab:
+                    approved_story = next((item for item in service.list_revisions(project.id) if item["status"] is StoryRevisionStatus.APPROVED), None)
+                    if approved_story is None:
+                        st.warning("请先在 Story Bible 页确认一个 APPROVED 版本，才能编辑 Structured Script。")
+                    else:
+                        _render_script_editor(project, approved_story, script_service)

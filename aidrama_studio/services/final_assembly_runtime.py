@@ -113,9 +113,16 @@ class FinalAssemblyRuntimeService:
             adapter.render(request, temporary_path)
             probed = dict(adapter.probe_output(temporary_path))
             self._validate_rendered_output(probed, expected_duration)
+            actual_duration = self._duration(probed)
+            source_trace = self._align_source_trace(
+                source_trace,
+                expected_duration=expected_duration,
+                actual_duration=actual_duration,
+            )
             probed["sha256"] = self._sha256(temporary_path)
             probed["assembly_id"] = assembly_id
             probed["render_attempt_id"] = attempt_id
+            probed["expected_duration_seconds"] = expected_duration
             probed["source_items"] = source_trace
             self._atomic_finalize(temporary_path, output_path, project_id)
             temporary_path = None
@@ -331,6 +338,39 @@ class FinalAssemblyRuntimeService:
                 "timeline_end_seconds": round(end, 6),
             })
         return trace
+
+    @staticmethod
+    def _align_source_trace(
+        trace: list[dict[str, object]],
+        *,
+        expected_duration: float,
+        actual_duration: float,
+    ) -> list[dict[str, object]]:
+        """Map frozen source intervals onto the probed final-media clock.
+
+        Container/frame time bases can make a valid FFmpeg output a few
+        frames shorter than the sum of probed inputs.  Source identities and
+        original durations stay immutable; only final timeline coordinates
+        are scaled so subtitles and later post-production consume the actual
+        rendered clock rather than a conflicting theoretical duration.
+        """
+
+        if not trace or expected_duration <= 0 or actual_duration <= 0:
+            return [dict(item) for item in trace]
+        scale = actual_duration / expected_duration
+        aligned: list[dict[str, object]] = []
+        for index, item in enumerate(trace):
+            value = dict(item)
+            start = float(value.get("timeline_start_seconds", 0) or 0)
+            end = float(value.get("timeline_end_seconds", 0) or 0)
+            value["timeline_start_seconds"] = round(start * scale, 6)
+            value["timeline_end_seconds"] = (
+                round(actual_duration, 6)
+                if index == len(trace) - 1
+                else round(end * scale, 6)
+            )
+            aligned.append(value)
+        return aligned
 
     @staticmethod
     def _duration(metadata: dict[str, object]) -> float:

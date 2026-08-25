@@ -53,7 +53,7 @@ def get_brand_config() -> BrandConfig:
         product_name="AIDrama Studio",
         short_name="AIDrama",
         tagline="AI 短剧全链路制作工作台",
-        version=os.getenv("AIDRAMA_VERSION", "0.1.0").strip() or "0.1.0",
+        version=os.getenv("AIDRAMA_VERSION", "1.0.0").strip() or "1.0.0",
         logo_path=logo_path,
         icon_path=logo_path,
         company_name=os.getenv("AIDRAMA_COMPANY_NAME", "").strip(),

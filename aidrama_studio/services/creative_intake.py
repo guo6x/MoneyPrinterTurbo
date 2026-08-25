@@ -228,6 +228,28 @@ class SourcePackService:
         self.get(project_id, source_id)
         return self.import_bytes(project_id, filename, data, mime_type=mime_type, version_of_id=source_id, metadata=metadata)
 
+    def resolve_path(self, project_id: str, source_id: str) -> Path:
+        source = self.get(project_id, source_id)
+        raw = source.storage_path.replace("\\", "/")
+        relative = PurePosixPath(raw)
+        if relative.is_absolute() or PureWindowsPath(source.storage_path).drive or any(
+            part in {"", ".", ".."} for part in relative.parts
+        ):
+            raise CreativeIntakeError("Source Pack storage path 无效")
+        root = self._project_root(project_id).resolve()
+        target = (root / Path(*relative.parts)).resolve()
+        if root not in target.parents or not target.is_file():
+            raise CreativeIntakeError("Source Pack 文件不存在或越过项目目录")
+        if target.stat().st_size != source.size_bytes:
+            raise CreativeIntakeError("Source Pack 文件大小与不可变记录不一致")
+        digest = hashlib.sha256()
+        with target.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() != source.sha256:
+            raise CreativeIntakeError("Source Pack SHA256 校验失败")
+        return target
+
     def _require_project(self, project_id: str) -> None:
         if self.repository.get_project(project_id) is None:
             raise CreativeIntakeError(f"项目不存在: {project_id}")
@@ -282,15 +304,184 @@ class CreativeIntakeService:
         self.analyzer = IntakeAnalyzer(self.repository)
 
     def normalize(self, project_id: str, *, source_ids: list[str] | tuple[str, ...], overrides: Mapping[str, Any] | None = None) -> NormalizedCreativeBrief:
-        sources = [self.source_pack.get(project_id, source_id) for source_id in source_ids]
+        normalized_source_ids = tuple(str(source_id) for source_id in source_ids)
+        if not normalized_source_ids:
+            raise CreativeIntakeError("规范化 Brief 至少需要一个 Source Pack 来源")
+        if len(set(normalized_source_ids)) != len(normalized_source_ids):
+            raise CreativeIntakeError("规范化 Brief 的 Source Pack 来源不能重复")
+        sources = [
+            self.source_pack.get(project_id, source_id)
+            for source_id in normalized_source_ids
+        ]
         text = "\n".join(source.extracted_text or "" for source in sources)
         words = text.strip().splitlines()
         first = words[0].strip() if words else ""
-        content = {"title_candidate": first[:200], "premise": text[:2000], "genre": "", "tone": "", "themes": (), "characters": (), "locations": (), "story_information": {}, "visual_direction": {}, "existing_script_maturity": "UNKNOWN", "existing_shot_maturity": "UNKNOWN", "constraints": (), "source_ids": tuple(source_ids)}
+        content = {"title_candidate": first[:200], "premise": text[:2000], "genre": "", "tone": "", "themes": (), "characters": (), "locations": (), "story_information": {}, "visual_direction": {}, "existing_script_maturity": "UNKNOWN", "existing_shot_maturity": "UNKNOWN", "constraints": (), "source_ids": normalized_source_ids}
         if overrides:
+            allowed = set(NormalizedCreativeBrief.model_fields) - {
+                "id",
+                "project_id",
+                "status",
+                "source_ids",
+                "created_at",
+                "updated_at",
+            }
+            unknown = set(overrides) - allowed
+            if unknown:
+                raise CreativeIntakeError(
+                    "规范化 Brief override 字段无效: " + ", ".join(sorted(unknown))
+                )
             content.update(dict(overrides))
         now = _now()
         return self.repository.create_normalized_creative_brief(NormalizedCreativeBrief(id=uuid4().hex, project_id=project_id, created_at=now, updated_at=now, **content))
+
+    def promote_image_reference(
+        self,
+        project_id: str,
+        source_id: str,
+        *,
+        source_story_revision_id: str,
+        binding_type: str,
+        binding_id: str,
+        lock: bool = True,
+    ) -> dict[str, object]:
+        """Promote one immutable Source Pack image through the asset services."""
+
+        from aidrama_studio.domain import (
+            ReferenceAsset,
+            ReferenceAssetBinding,
+            ReferenceAssetType,
+            ReferenceAssetVersion,
+            ReferenceBindingType,
+            SourceKind,
+            StoryRevisionStatus,
+        )
+        from aidrama_studio.storage.reference_assets import (
+            MAX_REFERENCE_IMAGE_BYTES,
+            image_sha256,
+            reference_blob_path,
+            store_immutable_blob,
+            validate_image_input,
+        )
+
+        source = self.source_pack.get(project_id, source_id)
+        if source.source_kind is not SourceKind.IMAGE:
+            raise CreativeIntakeError("只有图片 Source Pack 条目可以提升为 Reference Asset")
+        try:
+            normalized_binding = ReferenceBindingType(binding_type)
+        except ValueError as exc:
+            raise CreativeIntakeError("Reference binding type 无效") from exc
+        if normalized_binding not in {
+            ReferenceBindingType.CHARACTER,
+            ReferenceBindingType.LOCATION,
+        }:
+            raise CreativeIntakeError("Source Pack 图片只支持提升为角色或场景参考")
+        story = self.repository.get_story_revision(source_story_revision_id)
+        if (
+            story is None
+            or story["project_id"] != project_id
+            or story["status"] is not StoryRevisionStatus.APPROVED
+        ):
+            raise CreativeIntakeError("Reference promotion 需要当前项目已确认的 Story Bible")
+        targets = (
+            story["content"].characters
+            if normalized_binding is ReferenceBindingType.CHARACTER
+            else story["content"].locations
+        )
+        if not any(item.id == binding_id for item in targets):
+            raise CreativeIntakeError("Reference promotion target 不存在于 source Story Bible")
+        asset_type = (
+            ReferenceAssetType.CHARACTER_REFERENCE
+            if normalized_binding is ReferenceBindingType.CHARACTER
+            else ReferenceAssetType.LOCATION_REFERENCE
+        )
+        path = self.source_pack.resolve_path(project_id, source_id)
+        if path.stat().st_size > MAX_REFERENCE_IMAGE_BYTES:
+            raise CreativeIntakeError("Reference 图片超过 15 MB 限制")
+        payload = path.read_bytes()
+        try:
+            safe_name, normalized_mime, suffix = validate_image_input(
+                payload,
+                source.display_filename,
+                source.mime_type,
+            )
+        except ValueError as exc:
+            raise CreativeIntakeError(str(exc)) from exc
+        digest = image_sha256(payload)
+        if digest != source.sha256:
+            raise CreativeIntakeError("Source Pack SHA256 校验失败")
+
+        now = _now()
+        asset_id = uuid4().hex
+        version_id = uuid4().hex
+        binding_record_id = uuid4().hex
+        existing = self.repository.find_reference_version_by_hash(project_id, digest)
+        newly_written_target: Path | None = None
+        if existing is not None:
+            relative_path = existing.storage_path
+        else:
+            target, relative_path = reference_blob_path(
+                self.repository.paths.projects,
+                project_id,
+                asset_id,
+                digest,
+                suffix,
+            )
+            target_existed = target.exists()
+            store_immutable_blob(target, payload)
+            if not target_existed:
+                newly_written_target = target
+        asset = ReferenceAsset(
+            id=asset_id,
+            project_id=project_id,
+            asset_type=asset_type,
+            created_at=now,
+            updated_at=now,
+        )
+        version = ReferenceAssetVersion(
+            id=version_id,
+            asset_id=asset_id,
+            project_id=project_id,
+            version_number=1,
+            filename=safe_name,
+            mime_type=normalized_mime,
+            size_bytes=len(payload),
+            sha256=digest,
+            storage_path=relative_path,
+            metadata={
+                "source_story_revision_id": source_story_revision_id,
+                "source_pack_item_id": source.id,
+                "source_pack_sha256": source.sha256,
+            },
+            created_at=now,
+        )
+        binding = ReferenceAssetBinding(
+            id=binding_record_id,
+            project_id=project_id,
+            asset_version_id=version_id,
+            binding_type=normalized_binding,
+            binding_id=binding_id,
+            created_at=now,
+        )
+        try:
+            asset, version, binding = self.repository.create_reference_promotion(
+                asset,
+                version,
+                binding,
+                activate=lock,
+            )
+        except Exception:
+            # Database rollback is authoritative.  Best-effort compensation
+            # removes only a blob created by this promotion and only when no
+            # immutable version record adopted its digest.
+            if (
+                newly_written_target is not None
+                and self.repository.find_reference_version_by_hash(project_id, digest)
+                is None
+            ):
+                newly_written_target.unlink(missing_ok=True)
+            raise
+        return {"asset": asset, "version": version, "binding": binding}
 
 
 __all__ = ["CreativeIntakeError", "CreativeIntakeService", "DocumentIngestionService", "IntakeAnalyzer", "SourcePackService"]

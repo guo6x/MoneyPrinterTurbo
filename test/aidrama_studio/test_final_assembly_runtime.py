@@ -204,3 +204,31 @@ def test_successful_output_resolver_handles_missing_file_and_rejects_cross_proje
     assert runtime.resolve_output_path(project.id, assembly.id, attempt.id) is None
     with pytest.raises(FinalAssemblyRuntimeServiceError):
         runtime.resolve_output_path("other-project", assembly.id, attempt.id)
+
+
+def test_final_timeline_is_aligned_to_actual_container_duration():
+    trace = [
+        {
+            "production_shot_id": "shot-1",
+            "source_duration_seconds": 1.0,
+            "timeline_start_seconds": 0.0,
+            "timeline_end_seconds": 1.0,
+        },
+        {
+            "production_shot_id": "shot-2",
+            "source_duration_seconds": 1.0,
+            "timeline_start_seconds": 1.0,
+            "timeline_end_seconds": 2.0,
+        },
+    ]
+
+    aligned = FinalAssemblyRuntimeService._align_source_trace(
+        trace,
+        expected_duration=2.0,
+        actual_duration=1.92,
+    )
+
+    assert [item["timeline_start_seconds"] for item in aligned] == [0.0, 0.96]
+    assert [item["timeline_end_seconds"] for item in aligned] == [0.96, 1.92]
+    assert [item["source_duration_seconds"] for item in aligned] == [1.0, 1.0]
+    assert trace[1]["timeline_end_seconds"] == 2.0

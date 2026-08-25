@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, Callable
 
 from aidrama_studio.domain import (
     AspectRatio,
@@ -570,6 +570,108 @@ class ProjectRepository:
                 (binding.id, binding.project_id, binding.asset_version_id, binding.binding_type.value, binding.binding_id, binding.created_at),
             )
         return self.get_reference_binding(binding.id)
+
+    def create_reference_promotion(
+        self,
+        asset: ReferenceAsset,
+        version: ReferenceAssetVersion,
+        binding: ReferenceAssetBinding,
+        *,
+        activate: bool,
+        _fault_hook: Callable[[str], None] | None = None,
+    ) -> tuple[ReferenceAsset, ReferenceAssetVersion, ReferenceAssetBinding]:
+        """Persist a promoted Source Pack reference as one SQLite unit.
+
+        The immutable blob is finalized before this call.  Every canonical DB
+        identity becomes visible together, or none of them does.  The private
+        hook exists only for crash/fault-injection acceptance tests.
+        """
+
+        if not (
+            asset.project_id == version.project_id == binding.project_id
+            and version.asset_id == asset.id
+            and binding.asset_version_id == version.id
+        ):
+            raise ValueError("Reference promotion identities do not belong together")
+        allowed = {
+            ReferenceBindingType.CHARACTER: {ReferenceAssetType.CHARACTER_REFERENCE},
+            ReferenceBindingType.LOCATION: {ReferenceAssetType.LOCATION_REFERENCE},
+            ReferenceBindingType.SHOT: {
+                ReferenceAssetType.CHARACTER_REFERENCE,
+                ReferenceAssetType.LOCATION_REFERENCE,
+                ReferenceAssetType.STYLE_REFERENCE,
+                ReferenceAssetType.PROP_REFERENCE,
+            },
+        }
+        if asset.asset_type not in allowed.get(binding.binding_type, set()):
+            raise ValueError("ReferenceAsset 类型与 binding 类型不兼容")
+
+        def inject(stage: str) -> None:
+            if _fault_hook is not None:
+                _fault_hook(stage)
+
+        with self.transaction() as connection:
+            if not self._project_exists(connection, asset.project_id):
+                raise KeyError(f"项目不存在: {asset.project_id}")
+            connection.execute(
+                "INSERT INTO reference_assets(id,project_id,asset_type,current_version_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (
+                    asset.id,
+                    asset.project_id,
+                    asset.asset_type.value,
+                    None,
+                    asset.created_at,
+                    asset.updated_at,
+                ),
+            )
+            inject("asset")
+            connection.execute(
+                "INSERT INTO reference_asset_versions"
+                "(id,asset_id,project_id,version_number,filename,mime_type,size_bytes,sha256,storage_path,metadata_json,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    version.id,
+                    version.asset_id,
+                    version.project_id,
+                    version.version_number,
+                    version.filename,
+                    version.mime_type,
+                    version.size_bytes,
+                    version.sha256,
+                    version.storage_path,
+                    json.dumps(version.metadata, ensure_ascii=False, sort_keys=True),
+                    version.created_at,
+                ),
+            )
+            inject("version")
+            connection.execute(
+                "INSERT INTO reference_asset_bindings"
+                "(id,project_id,asset_version_id,binding_type,binding_id,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (
+                    binding.id,
+                    binding.project_id,
+                    binding.asset_version_id,
+                    binding.binding_type.value,
+                    binding.binding_id,
+                    binding.created_at,
+                ),
+            )
+            inject("binding")
+            if activate:
+                connection.execute(
+                    "UPDATE reference_assets SET current_version_id=?,updated_at=? WHERE id=?",
+                    (version.id, asset.updated_at, asset.id),
+                )
+            inject("activated")
+
+        stored_asset = self.get_reference_asset(asset.id)
+        stored_version = self.get_reference_asset_version(version.id)
+        stored_binding = self.get_reference_binding(binding.id)
+        if stored_asset is None or stored_version is None or stored_binding is None:
+            raise RuntimeError("Reference promotion transaction did not persist all records")
+        return stored_asset, stored_version, stored_binding
 
     def get_reference_binding(self, binding_id: str) -> ReferenceAssetBinding | None:
         with connect(self.paths.database) as connection:

@@ -215,9 +215,26 @@ class StoryService:
         tone: str,
         target_audience: str = "",
         creative_constraints: str = "",
+        source_ids: tuple[str, ...] | list[str] = (),
+        normalized_brief_id: str | None = None,
     ) -> dict[str, Any]:
         if not brief.strip():
             raise StoryServiceError("请先填写核心创意或项目 Brief。")
+        normalized_source_ids = tuple(str(item) for item in source_ids)
+        for source_id in normalized_source_ids:
+            source = self.repository.get_source_pack_item(source_id)
+            if source is None or source.project_id != project.id:
+                raise StoryServiceError("Story 输入 Source Pack 来源不属于该项目")
+        if normalized_brief_id is not None:
+            normalized = self.repository.get_normalized_creative_brief(
+                normalized_brief_id
+            )
+            if normalized is None or normalized.project_id != project.id:
+                raise StoryServiceError("规范化 Creative Brief 不属于该项目")
+            if not normalized_source_ids:
+                normalized_source_ids = tuple(normalized.source_ids)
+            elif normalized_source_ids != tuple(normalized.source_ids):
+                raise StoryServiceError("Story 输入来源与规范化 Creative Brief 不匹配")
         generation_input = {
             "brief": brief.strip(),
             "genre": genre.strip(),
@@ -226,6 +243,8 @@ class StoryService:
             "creative_constraints": creative_constraints.strip(),
             "project_aspect_ratio": project.aspect_ratio.value,
             "project_target_duration_seconds": project.target_duration_seconds,
+            "source_ids": list(normalized_source_ids),
+            "normalized_brief_id": normalized_brief_id,
         }
         prompt = build_story_bible_prompt(
             project,
@@ -244,6 +263,7 @@ class StoryService:
                 repair_prompt_builder=lambda raw, exc: build_repair_prompt(
                     raw, str(exc)
                 ),
+                input_source_ids=normalized_source_ids,
             )
         except LLMInvocationError as exc:
             logger.warning(f"Story Bible generation failed: {exc}")

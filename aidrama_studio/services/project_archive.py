@@ -565,7 +565,15 @@ class ProjectArchiveService:
             r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", product_version
         ):
             raise ProjectArchiveError("项目归档 product version 无效")
-        if product_version.split(".", 1)[0] != BRAND.version.split(".", 1)[0]:
+        # V1 is the first public product release. Preserve import compatibility
+        # with verified 0.x preview archives while still rejecting unknown
+        # future major formats.
+        archive_major = product_version.split(".", 1)[0]
+        current_major = BRAND.version.split(".", 1)[0]
+        compatible_majors = {current_major}
+        if current_major == "1":
+            compatible_majors.add("0")
+        if archive_major not in compatible_majors:
             raise ProjectArchiveError("项目归档 product major version 不兼容")
         if manifest["schema_version"] != self._schema_version():
             raise ProjectArchiveError("项目归档 schema version 不兼容")

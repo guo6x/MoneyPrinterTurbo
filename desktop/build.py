@@ -51,6 +51,9 @@ def runtime_data_args() -> list[str]:
         *_add_data(package_root / "Main.py", "aidrama_studio"),
         *_add_data(package_root / "styles.css", "aidrama_studio"),
         *_add_data(package_root / "assets", "aidrama_studio/assets"),
+        *_add_data(PROJECT_ROOT / "LICENSE", "."),
+        *_add_data(PROJECT_ROOT / "NOTICE", "."),
+        *_add_data(PROJECT_ROOT / "THIRD_PARTY_NOTICES.md", "."),
     ]
 
 
@@ -97,7 +100,17 @@ def main() -> int:
     except RuntimeError as exc:
         print(f"AIDrama desktop build unavailable: {exc}", file=sys.stderr)
         return 2
-    return subprocess.call(command, cwd=str(PROJECT_ROOT))
+    result = subprocess.call(command, cwd=str(PROJECT_ROOT))
+    if result != 0:
+        return result
+    from desktop.release import ReleaseDefinitionError, write_package_release_metadata
+
+    try:
+        write_package_release_metadata(PROJECT_ROOT / "dist" / "AIDramaStudio")
+    except ReleaseDefinitionError as exc:
+        print(f"AIDrama release metadata unavailable: {exc}", file=sys.stderr)
+        return 3
+    return 0
 
 
 if __name__ == "__main__":

@@ -9,8 +9,8 @@ with `git rev-parse HEAD` after checkout.
 - Target branch: `goal/aidrama-studio-v1-0-final-product-release`
 - Goal base: `3ce90aad6a70e6173a3826bd4e8eb6c039e0221b`
 - Current head: `HEAD`
-- Active checkpoint: close remaining non-live provider provenance, release,
-  E2E, browser and security gates after upstream reconciliation.
+- Active checkpoint: close browser acceptance, final security/self-audit and
+  truthful externally blocked desktop/live release gates.
 - No dependency was installed and no live provider request was made.
 
 ## Completed checkpoints with current local evidence
@@ -158,6 +158,38 @@ with `git rev-parse HEAD` after checkout.
 - Provider-provenance focused tests pass with `24 passed`; the complete
   AIDrama suite passes with `314 passed, 11 warnings`, and Python compile plus
   `git diff --check` pass.
+- Creative Intake is exposed as a normal-user Source Pack tab with one-line
+  text, multi-document and multi-image import, deterministic advisory
+  classification, local normalization and explicit image promotion. Story
+  generation persists the exact Source Pack IDs and normalized-brief ID in
+  both the LLM invocation provenance and Story revision input snapshot.
+- Source Pack image promotion validates the approved Story target before any
+  mutation, verifies the immutable source file by size/SHA and image decoder,
+  then writes asset/version/binding/lock as one SQLite transaction. Injected
+  failure rolls back all canonical rows and compensates a newly finalized
+  unreferenced blob.
+- FinalAssembly now maps its immutable source identities and original source
+  durations onto the probed final-container clock. This closes the real FFmpeg
+  frame-timebase drift that otherwise made a valid final subtitle extend past
+  the actual final MP4.
+- A real non-live end-to-end acceptance covers mixed Source Pack input,
+  canonical fake-LLM planning boundaries, Story/Script/Shot approval, two
+  promoted and locked references, one mock-external production submission
+  returning a real local MP4, deterministic physical-media QC, human review,
+  real FinalAssembly, subtitle+BGM FFmpeg post render, cold repository reload,
+  and `.aidrama` export/import into a clean data root with identity and SHA
+  verification. Provider submission count remains exactly one.
+- Release engineering now freezes product version `1.0.0`, retains verified
+  preview-archive import compatibility, includes LICENSE/NOTICE/third-party
+  notices in the build definition, generates a lock-scoped CycloneDX 1.5 SBOM,
+  streaming checksums and build provenance, and supplies a stable per-user
+  Inno Setup definition that preserves AppData on upgrade/uninstall.
+- Release auditing fails closed on unapproved Microsoft YaHei/STHeiti fonts
+  and reports every packaged FFmpeg executable for exact-binary review.
+- Current checkpoint validation: release/archive/desktop/Story focused tests
+  `53 passed`; Creative Intake/reference/Story focused tests `35 passed`;
+  non-live E2E plus FinalAssembly runtime `9 passed`; complete AIDrama suite
+  `333 passed, 11 warnings`; Python compile and `git diff --check` pass.
 
 ## Externally blocked gates
 
@@ -167,20 +199,21 @@ with `git rev-parse HEAD` after checkout.
 - PyInstaller desktop build and Windows installer execution require missing
   build tools; none may be installed silently.
 - Code signing requires an external signing certificate.
+- The currently available imageio-ffmpeg binary is GPLv3-or-later and includes
+  GPL codecs; redistribution remains blocked on a release-owner legal/compliance
+  decision for that exact binary and its obligations.
 
 ## Known remaining work
 
-- Complete distribution license/SBOM and build/installer definitions without
-  installing tools.
-- Run full non-live E2E, portable restore E2E, browser acceptance at both
-  required resolutions, full project regression, startup/desktop smokes,
-  security matrix and final self-audit.
+- Run browser acceptance at both required resolutions, full project
+  regression, startup/desktop source smokes, security matrix and final
+  self-audit.
 - Update the final closure report with evidence and truthful external blockers.
 
 ## Next safe implementation step
 
-Complete non-live E2E and portable/cold-resume evidence, then close
-release/legal/build definitions, browser acceptance and the final self-audit.
+Run browser acceptance and security self-audit, then refresh the complete
+regression/startup evidence and write the final closure report.
 
 ## Provider provenance and remote lifecycle acceptance
 

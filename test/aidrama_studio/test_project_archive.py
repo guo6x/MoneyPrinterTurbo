@@ -226,6 +226,22 @@ def test_import_validates_schema_and_product_version(tmp_path: Path, field: str,
         ProjectArchiveService(_repo(tmp_path / "target")).import_project(archive)
 
 
+def test_v1_import_preserves_verified_preview_archive_compatibility(tmp_path: Path):
+    source = _repo(tmp_path / "source")
+    project = ProjectService(source).create("Preview archive")
+    archive = ProjectArchiveService(source).export_project(
+        project.id, tmp_path / "preview.aidrama"
+    )
+    _rewrite_manifest(
+        archive,
+        lambda manifest: manifest.__setitem__("product_version", "0.1.0"),
+    )
+
+    target = _repo(tmp_path / "target")
+    imported = ProjectArchiveService(target).import_project(archive)
+    assert imported == project.id
+
+
 def test_import_rejects_manifest_and_file_tampering(tmp_path: Path):
     source = _repo(tmp_path / "source")
     project = ProjectService(source).create("Hashes")
