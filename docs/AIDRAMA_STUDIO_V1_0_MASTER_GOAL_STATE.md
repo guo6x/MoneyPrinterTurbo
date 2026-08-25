@@ -9,8 +9,8 @@ with `git rev-parse HEAD` after checkout.
 - Target branch: `goal/aidrama-studio-v1-0-final-product-release`
 - Goal base: `3ce90aad6a70e6173a3826bd4e8eb6c039e0221b`
 - Current head: `HEAD`
-- Active checkpoint: reconcile the narrowly audited upstream MPT security
-  commits after portable recovery/startup-reconciliation closure.
+- Active checkpoint: close remaining non-live provider provenance, release,
+  E2E, browser and security gates after upstream reconciliation.
 - No dependency was installed and no live provider request was made.
 
 ## Completed checkpoints with current local evidence
@@ -137,6 +137,16 @@ with `git rev-parse HEAD` after checkout.
   recovery/diagnostics/worker tests `55 passed, 1 expected duplicate-ZIP
   warning`, complete AIDrama suite `313 passed, 11 warnings`, and
   AIDrama/original-MPT HTTP startup smokes PASS. No live request was made.
+- Six narrowly audited upstream commits are reconciled with exact `-x`
+  provenance: custom-audio confinement, `/tasks` symlink defense, safe local
+  material upload, request-ID sanitization, configured API-key enforcement and
+  Windows/mapped-drive logging-path handling. No wholesale upstream merge was
+  performed.
+- Focused upstream/MPT regressions pass with `149 passed, 3 skipped, 79
+  subtests passed`; `test_webui_task.py` passes all 16 tests and closes the
+  historical Windows separator baseline.
+- Complete repository regression after reconciliation: `944 passed, 11
+  skipped, 14 warnings, 4402 subtests passed`; new regressions: `0`.
 
 ## Externally blocked gates
 
@@ -149,10 +159,10 @@ with `git rev-parse HEAD` after checkout.
 
 ## Known remaining work
 
-- Close provider-specific cloud disclosure/input provenance and remote-file
-  lifecycle evidence that remain incomplete for Wan/Gemini paths.
-- Complete upstream MPT security delta review, distribution license/SBOM and
-  build/installer definitions without installing tools.
+- Close provider-specific cloud input provenance and remote-file lifecycle
+  evidence that remain incomplete for Wan/Gemini paths.
+- Complete distribution license/SBOM and build/installer definitions without
+  installing tools.
 - Run full non-live E2E, portable restore E2E, browser acceptance at both
   required resolutions, full project regression, startup/desktop smokes,
   security matrix and final self-audit.
@@ -160,9 +170,23 @@ with `git rev-parse HEAD` after checkout.
 
 ## Next safe implementation step
 
-Reconcile the six already-audited upstream MPT security commits as narrow,
-reviewable patches (no wholesale upstream merge), run their focused regressions
-and the full project suite, then continue release/legal/build definitions.
+Close remaining safe provider-provenance and non-live E2E work, then complete
+release/legal/build definitions, browser acceptance and the final self-audit.
+
+## Upstream reconciliation acceptance
+
+- `UPSTREAM_MPT_DELTA_AUDIT=PASS`
+- `UPSTREAM_SECURITY_FIXES_RECONCILED=PASS`
+- `WINDOWS_PATH_BASELINE_FIXED=PASS`
+- `FULL_PROJECT_TEST_RESULT=944 passed, 11 skipped, 4402 subtests passed`
+- `NEW_REGRESSIONS=0`
+- MPT core change files: `app/asgi.py`, `app/controllers/base.py`,
+  `app/controllers/v1/llm.py`, `app/controllers/v1/video.py`,
+  `app/models/exception.py`, `app/services/material_upload.py`,
+  `app/services/task.py`, `app/utils/logging_utils.py`, `cli.py`, and
+  `config.example.toml`.
+- MPT core change reason: narrowly reconciled upstream security fixes and one
+  proven Windows logging-path defect; no broad refactor.
 
 ## Project recovery and startup acceptance
 

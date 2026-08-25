@@ -13,7 +13,7 @@ from app.controllers.manager.base_manager import TaskQueueFullError
 from app.controllers.v1 import video as video_controller
 from app.models import const
 from app.models.exception import HttpException
-from app.models.schema import TaskDeletionResponse, TaskListResponse, TaskQueryResponse
+from app.models.schema import TaskListResponse, TaskQueryResponse
 from app.services import material_upload
 from app.services import state as sm
 from app.utils import utils
