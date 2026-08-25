@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from aidrama_studio.branding import BRAND
+from aidrama_studio.storage.migrations import MIGRATIONS
 from desktop.release import (
     ReleaseDefinitionError,
     audit_distribution_tree,
@@ -78,7 +79,9 @@ def test_release_metadata_is_lock_scoped_hashed_and_path_safe(tmp_path: Path):
     build = json.loads(provenance.read_text(encoding="utf-8"))
     assert build["product_version"] == BRAND.version == "1.0.0"
     assert build["git_commit"] == "a" * 40
-    assert build["schema_migration_version"] == 27
+    assert build["schema_migration_version"] == max(
+        version for version, _ in MIGRATIONS
+    )
     assert build["sbom"] == "release/sbom.cdx.json"
     serialized = json.dumps(build)
     assert str(tmp_path) not in serialized

@@ -178,9 +178,9 @@ def test_migration_025_adds_regional_provider_selection_and_is_idempotent() -> N
         [(version, "2026-08-25") for version, _ in prior],
     )
 
-    # Starting immediately before 025 now applies both the regional provider
-    # migration and the subsequent versioned OutputProfile migration.
-    assert apply_migrations(connection) == 3
+    # Starting immediately before 025 applies every later migration in order;
+    # this remains correct as append-only schema versions are added.
+    assert apply_migrations(connection) == len(MIGRATIONS) - len(prior)
     profile_columns = {
         row[1]
         for row in connection.execute("PRAGMA table_info(provider_capability_profiles)")
@@ -218,7 +218,7 @@ def test_migration_025_adds_regional_provider_selection_and_is_idempotent() -> N
         for row in connection.execute(
             "SELECT version FROM schema_migrations WHERE version>=25 ORDER BY version"
         )
-    ] == [25, 26, 27]
+    ] == [version for version, _ in MIGRATIONS if version >= 25]
     legacy = connection.execute(
         "SELECT endpoint_profile_id,deployment_region,endpoint_class FROM provider_capability_profiles WHERE id='legacy-profile'"
     ).fetchone()

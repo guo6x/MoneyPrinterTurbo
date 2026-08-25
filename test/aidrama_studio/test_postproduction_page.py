@@ -166,5 +166,6 @@ page.render()
     ).run(timeout=30)
     assert not app.exception
     assert any("制作完成" in item.value for item in app.success)
-    assert any(item.label == "导出 MP4" for item in app.download_button)
+    assert any(item.label == "后台导出 MP4" for item in app.button)
+    assert not app.download_button
     assert any(item.label == "时长" and "00:03" in str(item.value) for item in app.metric)

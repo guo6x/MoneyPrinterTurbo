@@ -608,11 +608,67 @@ class PostProductionService:
         return self.update_plan(project_id, plan_id, audio_mix=config)
 
     # Rendering ---------------------------------------------------------
-    def render(self, project_id: str, plan_id: str, *, subtitle_track_id: str | None = None, music_track_id: str | None = None, voice_track_id: str | None = None) -> PostRenderAttempt:
+    def build_pending_attempt(
+        self,
+        project_id: str,
+        plan_id: str,
+        *,
+        heavy_job_id: str | None = None,
+    ) -> PostRenderAttempt:
+        plan = self._ensure_source_attempt_pinned(
+            project_id, self.get_plan(project_id, plan_id)
+        )
+        attempt_number = max(
+            (
+                item.attempt_number
+                for item in self.repository.list_post_render_attempts(
+                    project_id, plan_id
+                )
+            ),
+            default=0,
+        ) + 1
+        return PostRenderAttempt(
+            id=uuid4().hex,
+            project_id=project_id,
+            plan_id=plan_id,
+            source_final_assembly_id=plan.source_final_assembly_id,
+            source_final_assembly_render_attempt_id=plan.source_final_assembly_render_attempt_id,
+            attempt_number=attempt_number,
+            adapter_name=getattr(
+                self.media_adapter, "name", self.media_adapter.__class__.__name__
+            ),
+            heavy_job_id=heavy_job_id,
+            created_at=_now(),
+        )
+
+    def render(self, project_id: str, plan_id: str, *, subtitle_track_id: str | None = None, music_track_id: str | None = None, voice_track_id: str | None = None, prepared_attempt_id: str | None = None) -> PostRenderAttempt:
         plan = self.get_plan(project_id, plan_id)
         plan = self._ensure_source_attempt_pinned(project_id, plan)
-        attempt_number = max((item.attempt_number for item in self.repository.list_post_render_attempts(project_id, plan_id)), default=0) + 1
-        attempt = self.repository.create_post_render_attempt(PostRenderAttempt(id=uuid4().hex, project_id=project_id, plan_id=plan_id, source_final_assembly_id=plan.source_final_assembly_id, source_final_assembly_render_attempt_id=plan.source_final_assembly_render_attempt_id, attempt_number=attempt_number, adapter_name=getattr(self.media_adapter, "name", self.media_adapter.__class__.__name__), created_at=_now()))
+        if prepared_attempt_id is None:
+            attempt = self.repository.create_post_render_attempt(
+                self.build_pending_attempt(project_id, plan_id)
+            )
+        else:
+            attempt = self.repository.get_post_render_attempt(prepared_attempt_id)
+            if (
+                attempt is None
+                or attempt.project_id != project_id
+                or attempt.plan_id != plan_id
+                or attempt.source_final_assembly_id != plan.source_final_assembly_id
+                or attempt.source_final_assembly_render_attempt_id
+                != plan.source_final_assembly_render_attempt_id
+                or attempt.status is not PostRenderAttemptStatus.PENDING
+            ):
+                raise PostProductionServiceError(
+                    "prepared PostRenderAttempt 不存在、已运行或 provenance 已变化"
+                )
+            adapter_name = getattr(
+                self.media_adapter, "name", self.media_adapter.__class__.__name__
+            )
+            if attempt.adapter_name != adapter_name:
+                raise PostProductionServiceError(
+                    "prepared Post adapter 与当前 runtime 不一致"
+                )
         temporary: Path | None = None
         try:
             source = self._resolve_final_source(project_id, plan)
@@ -746,6 +802,25 @@ class PostProductionService:
     render_post_production = render
     start_post_render = render
     run = render
+
+    def render_prepared(
+        self,
+        project_id: str,
+        plan_id: str,
+        attempt_id: str,
+        *,
+        subtitle_track_id: str | None = None,
+        music_track_id: str | None = None,
+        voice_track_id: str | None = None,
+    ) -> PostRenderAttempt:
+        return self.render(
+            project_id,
+            plan_id,
+            subtitle_track_id=subtitle_track_id,
+            music_track_id=music_track_id,
+            voice_track_id=voice_track_id,
+            prepared_attempt_id=attempt_id,
+        )
 
     def retry(self, project_id: str, plan_id: str, **kwargs: Any) -> PostRenderAttempt:
         return self.render(project_id, plan_id, **kwargs)

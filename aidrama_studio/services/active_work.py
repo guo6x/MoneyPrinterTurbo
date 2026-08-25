@@ -9,7 +9,10 @@ TERMINAL_PROVIDER_STATES = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
 
 
 def project_has_active_work(
-    connection: sqlite3.Connection, project_id: str
+    connection: sqlite3.Connection,
+    project_id: str,
+    *,
+    excluding_heavy_job_id: str | None = None,
 ) -> bool:
     """Return whether canonical durable state can still mutate project storage.
 
@@ -63,13 +66,22 @@ def project_has_active_work(
             "post_render_attempts",
             "project_id=? AND status IN ('PENDING','RUNNING')",
         ),
+        (
+            "heavy_jobs",
+            "project_id=? AND (status IS NULL OR status NOT IN "
+            "('SUCCEEDED','FAILED','CANCELLED','INTERRUPTED'))",
+        ),
     )
     for table, predicate in checks:
         if table not in tables:
             continue
+        parameters: tuple[object, ...] = (project_id,)
+        if table == "heavy_jobs" and excluding_heavy_job_id is not None:
+            predicate += " AND id<>?"
+            parameters = (project_id, excluding_heavy_job_id)
         if connection.execute(
             f'SELECT 1 FROM "{table}" WHERE {predicate} LIMIT 1',
-            (project_id,),
+            parameters,
         ).fetchone():
             return True
     return False

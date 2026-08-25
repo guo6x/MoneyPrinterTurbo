@@ -160,6 +160,7 @@ class FinalAssemblyRenderAttempt(BaseModel):
     attempt_number: int = Field(ge=1)
     status: FinalAssemblyRenderAttemptStatus = FinalAssemblyRenderAttemptStatus.PENDING
     adapter_name: str = Field(min_length=1, max_length=120)
+    heavy_job_id: str | None = Field(default=None, max_length=64)
     output_relative_path: str | None = Field(default=None, max_length=1000)
     metadata_json: dict[str, object] = Field(default_factory=dict)
     error_message: str | None = Field(default=None, max_length=4000)

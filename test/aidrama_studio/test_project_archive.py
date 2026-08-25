@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from aidrama_studio.services import ProjectArchiveError, ProjectArchiveService, ProjectService
+from aidrama_studio.domain import HeavyJobType
+from aidrama_studio.services import (
+    HeavyJobService,
+    ProjectArchiveError,
+    ProjectArchiveService,
+    ProjectService,
+)
 from aidrama_studio.storage.database import DatabasePaths
 from aidrama_studio.storage.repositories import ProjectRepository
 
@@ -381,3 +387,47 @@ def test_delete_rechecks_provider_state_in_delete_transaction(tmp_path: Path, mo
         ProjectService(repository).delete(project.id, confirmed=True)
     assert repository.get_project(project.id) is not None
     assert marker.read_text(encoding="utf-8") == "still here"
+
+
+def test_export_fails_closed_while_another_heavy_job_is_active(tmp_path: Path):
+    repository = _repo(tmp_path / "source")
+    project = ProjectService(repository).create("Busy export")
+    HeavyJobService(repository).enqueue(
+        HeavyJobType.UPSCALE,
+        project.id,
+        {"cancel_supported": True},
+        idempotency_key="active-upscale",
+    )
+    with pytest.raises(ProjectArchiveError, match="活动任务"):
+        ProjectArchiveService(repository).export_project(
+            project.id, tmp_path / "blocked.aidrama"
+        )
+    assert not (tmp_path / "blocked.aidrama").exists()
+
+
+def test_export_zips_staging_snapshot_and_excludes_partial_outputs(
+    tmp_path: Path, monkeypatch
+):
+    repository = _repo(tmp_path / "source")
+    project = ProjectService(repository).create("Snapshot")
+    root = repository.project_directory(project.id)
+    source = root / "note.txt"
+    source.write_text("snapshot-before", encoding="utf-8")
+    (root / ".dead.in-progress.mp4").write_bytes(b"partial")
+    (root / "delivery.partial").write_bytes(b"partial")
+    archive_path = tmp_path / "snapshot.aidrama"
+    original_write = zipfile.ZipFile.write
+
+    def mutate_live_after_snapshot(archive, filename, arcname=None, *args, **kwargs):
+        if arcname == "files/note.txt":
+            source.write_text("live-after-snapshot", encoding="utf-8")
+        return original_write(archive, filename, arcname, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", mutate_live_after_snapshot)
+    ProjectArchiveService(repository).export_project(project.id, archive_path)
+
+    with zipfile.ZipFile(archive_path) as archive:
+        assert archive.read("files/note.txt").decode("utf-8") == "snapshot-before"
+        assert "files/.dead.in-progress.mp4" not in archive.namelist()
+        assert "files/delivery.partial" not in archive.namelist()
+    assert source.read_text(encoding="utf-8") == "live-after-snapshot"

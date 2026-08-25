@@ -51,6 +51,13 @@ from aidrama_studio.domain.director import (
 from aidrama_studio.domain.runtime_foundation import AIInvocation, GenerationBrief, OutputProfile, RuntimePlan
 from aidrama_studio.domain.creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourceKind, SourcePackItem
 from aidrama_studio.domain.creative_control import CreativeLock
+from aidrama_studio.domain.heavy_job import (
+    HeavyJob,
+    HeavyJobEvent,
+    HeavyJobEventType,
+    HeavyJobStatus,
+    HeavyJobType,
+)
 from aidrama_studio.domain.reference_profile import ReferenceProfile, ReferenceProfileItem
 from aidrama_studio.domain.runtime_operations import (
     CapabilityProfile,
@@ -1732,6 +1739,7 @@ class ProjectRepository:
             attempt_number=row["attempt_number"],
             status=row["status"],
             adapter_name=row["adapter_name"],
+            heavy_job_id=row["heavy_job_id"] if "heavy_job_id" in row.keys() else None,
             output_relative_path=row["output_relative_path"],
             metadata_json=json.loads(row["metadata_json"]),
             error_message=row["error_message"],
@@ -1751,9 +1759,9 @@ class ProjectRepository:
                 """
                 INSERT INTO final_assembly_render_attempts(
                     id,final_assembly_id,attempt_number,status,adapter_name,
-                    output_relative_path,metadata_json,error_message,started_at,
+                    heavy_job_id,output_relative_path,metadata_json,error_message,started_at,
                     finished_at,created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     attempt.id,
@@ -1761,6 +1769,7 @@ class ProjectRepository:
                     attempt.attempt_number,
                     attempt.status.value,
                     attempt.adapter_name,
+                    attempt.heavy_job_id,
                     attempt.output_relative_path,
                     json.dumps(attempt.metadata_json, ensure_ascii=False, sort_keys=True),
                     attempt.error_message,
@@ -1994,6 +2003,7 @@ class ProjectRepository:
             source_final_assembly_render_attempt_id=row["source_final_assembly_render_attempt_id"] if "source_final_assembly_render_attempt_id" in row.keys() else None,
             attempt_number=row["attempt_number"],
             status=PostRenderAttemptStatus(row["status"]), adapter_name=row["adapter_name"],
+            heavy_job_id=row["heavy_job_id"] if "heavy_job_id" in row.keys() else None,
             output_relative_path=row["output_relative_path"], metadata_json=json.loads(row["metadata_json"]),
             error_message=row["error_message"], started_at=row["started_at"], finished_at=row["finished_at"],
             created_at=row["created_at"],
@@ -2176,8 +2186,8 @@ class ProjectRepository:
             if plan is None or plan["project_id"] != attempt.project_id or plan["source_final_assembly_id"] != attempt.source_final_assembly_id or plan["source_final_assembly_render_attempt_id"] != attempt.source_final_assembly_render_attempt_id:
                 raise ValueError("PostRenderAttempt provenance 不属于该项目/plan")
             connection.execute(
-                "INSERT INTO post_render_attempts(id,project_id,plan_id,source_final_assembly_id,source_final_assembly_render_attempt_id,attempt_number,status,adapter_name,output_relative_path,metadata_json,error_message,started_at,finished_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (attempt.id, attempt.project_id, attempt.plan_id, attempt.source_final_assembly_id, attempt.source_final_assembly_render_attempt_id, attempt.attempt_number, attempt.status.value, attempt.adapter_name, attempt.output_relative_path, json.dumps(attempt.metadata_json, ensure_ascii=False, sort_keys=True), attempt.error_message, attempt.started_at, attempt.finished_at, attempt.created_at),
+                "INSERT INTO post_render_attempts(id,project_id,plan_id,source_final_assembly_id,source_final_assembly_render_attempt_id,attempt_number,status,adapter_name,heavy_job_id,output_relative_path,metadata_json,error_message,started_at,finished_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (attempt.id, attempt.project_id, attempt.plan_id, attempt.source_final_assembly_id, attempt.source_final_assembly_render_attempt_id, attempt.attempt_number, attempt.status.value, attempt.adapter_name, attempt.heavy_job_id, attempt.output_relative_path, json.dumps(attempt.metadata_json, ensure_ascii=False, sort_keys=True), attempt.error_message, attempt.started_at, attempt.finished_at, attempt.created_at),
             )
         return self.get_post_render_attempt(attempt.id)
 
@@ -2778,6 +2788,542 @@ class ProjectRepository:
                  task.next_poll_at, task.error_message, task.updated_at, task.id),
             )
         return self.get_provider_task(task.id)
+
+    # Unified durable heavy work ---------------------------------------
+    @staticmethod
+    def _heavy_job_from_row(row) -> HeavyJob:
+        return HeavyJob(
+            id=row["id"],
+            job_type=HeavyJobType(row["job_type"]),
+            project_id=row["project_id"],
+            status=HeavyJobStatus(row["status"]),
+            stage=row["stage"],
+            progress=row["progress"],
+            idempotency_key=row["idempotency_key"],
+            input_snapshot=json.loads(row["input_snapshot_json"]),
+            input_sha256=row["input_sha256"],
+            output_provenance=json.loads(row["output_provenance_json"]),
+            safe_error=row["safe_error"],
+            cancel_requested=bool(row["cancel_requested"]),
+            retry_of_job_id=row["retry_of_job_id"],
+            created_at=row["created_at"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+        )
+
+    @staticmethod
+    def _heavy_job_event_from_row(row) -> HeavyJobEvent:
+        return HeavyJobEvent(
+            id=row["id"],
+            heavy_job_id=row["heavy_job_id"],
+            sequence_number=row["sequence_number"],
+            event_type=HeavyJobEventType(row["event_type"]),
+            stage=row["stage"],
+            progress=row["progress"],
+            payload=json.loads(row["payload_json"]),
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _insert_heavy_job_event(
+        connection: sqlite3.Connection,
+        *,
+        event_id: str,
+        heavy_job_id: str,
+        event_type: HeavyJobEventType,
+        created_at: str,
+        stage: str | None = None,
+        progress: float | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        next_sequence = int(
+            connection.execute(
+                "SELECT COALESCE(MAX(sequence_number),0)+1 FROM heavy_job_events "
+                "WHERE heavy_job_id=?",
+                (heavy_job_id,),
+            ).fetchone()[0]
+        )
+        connection.execute(
+            "INSERT INTO heavy_job_events("
+            "id,heavy_job_id,sequence_number,event_type,stage,progress,payload_json,created_at"
+            ") VALUES (?,?,?,?,?,?,?,?)",
+            (
+                event_id,
+                heavy_job_id,
+                next_sequence,
+                event_type.value,
+                stage,
+                progress,
+                json.dumps(payload or {}, ensure_ascii=False, sort_keys=True),
+                created_at,
+            ),
+        )
+
+    def create_heavy_job(
+        self,
+        job: HeavyJob,
+        *,
+        queued_event_id: str,
+        final_attempt: FinalAssemblyRenderAttempt | None = None,
+        post_attempt: PostRenderAttempt | None = None,
+    ) -> HeavyJob:
+        """Atomically persist a job and its attempt identity, when applicable."""
+        if final_attempt is not None and post_attempt is not None:
+            raise ValueError("一个 HeavyJob 只能绑定一种 render attempt")
+        with self.transaction() as connection:
+            if job.project_id is not None and not self._project_exists(connection, job.project_id):
+                raise KeyError(f"项目不存在: {job.project_id}")
+            if job.project_id is None and job.job_type is not HeavyJobType.PROJECT_IMPORT:
+                raise ValueError("只有 PROJECT_IMPORT 可以没有 project_id")
+            existing = connection.execute(
+                "SELECT * FROM heavy_jobs WHERE idempotency_key=? AND project_id IS ?",
+                (job.idempotency_key, job.project_id),
+            ).fetchone()
+            if existing is not None:
+                current = self._heavy_job_from_row(existing)
+                if current.job_type is not job.job_type or current.input_sha256 != job.input_sha256:
+                    raise ValueError("HeavyJob idempotency key 与不同输入冲突")
+                return current
+            if job.retry_of_job_id:
+                parent = connection.execute(
+                    "SELECT project_id,status FROM heavy_jobs WHERE id=?",
+                    (job.retry_of_job_id,),
+                ).fetchone()
+                if (
+                    parent is None
+                    or parent["project_id"] != job.project_id
+                    or parent["status"] not in {
+                        HeavyJobStatus.FAILED.value,
+                        HeavyJobStatus.CANCELLED.value,
+                        HeavyJobStatus.INTERRUPTED.value,
+                    }
+                ):
+                    raise ValueError("HeavyJob retry 必须引用同项目的可重试终态 job")
+            connection.execute(
+                "INSERT INTO heavy_jobs("
+                "id,job_type,project_id,status,stage,progress,idempotency_key,"
+                "input_snapshot_json,input_sha256,output_provenance_json,safe_error,"
+                "cancel_requested,retry_of_job_id,created_at,started_at,finished_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    job.id,
+                    job.job_type.value,
+                    job.project_id,
+                    job.status.value,
+                    job.stage,
+                    job.progress,
+                    job.idempotency_key,
+                    json.dumps(job.input_snapshot, ensure_ascii=False, sort_keys=True),
+                    job.input_sha256,
+                    json.dumps(job.output_provenance, ensure_ascii=False, sort_keys=True),
+                    job.safe_error,
+                    int(job.cancel_requested),
+                    job.retry_of_job_id,
+                    job.created_at,
+                    job.started_at,
+                    job.finished_at,
+                ),
+            )
+            if final_attempt is not None:
+                if (
+                    job.job_type is not HeavyJobType.FINAL_ASSEMBLY_RENDER
+                    or final_attempt.heavy_job_id != job.id
+                ):
+                    raise ValueError("FinalAssembly attempt HeavyJob provenance 无效")
+                assembly = connection.execute(
+                    "SELECT project_id FROM final_assemblies WHERE id=?",
+                    (final_attempt.final_assembly_id,),
+                ).fetchone()
+                if assembly is None or assembly["project_id"] != job.project_id:
+                    raise ValueError("FinalAssembly attempt 不属于 HeavyJob project")
+                connection.execute(
+                    "INSERT INTO final_assembly_render_attempts("
+                    "id,final_assembly_id,attempt_number,status,adapter_name,heavy_job_id,"
+                    "output_relative_path,metadata_json,error_message,started_at,finished_at,created_at"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        final_attempt.id,
+                        final_attempt.final_assembly_id,
+                        final_attempt.attempt_number,
+                        final_attempt.status.value,
+                        final_attempt.adapter_name,
+                        final_attempt.heavy_job_id,
+                        final_attempt.output_relative_path,
+                        json.dumps(final_attempt.metadata_json, ensure_ascii=False, sort_keys=True),
+                        final_attempt.error_message,
+                        final_attempt.started_at,
+                        final_attempt.finished_at,
+                        final_attempt.created_at,
+                    ),
+                )
+            if post_attempt is not None:
+                if job.job_type is not HeavyJobType.POST_RENDER or post_attempt.heavy_job_id != job.id:
+                    raise ValueError("Post attempt HeavyJob provenance 无效")
+                plan = connection.execute(
+                    "SELECT project_id,source_final_assembly_id,source_final_assembly_render_attempt_id "
+                    "FROM post_production_plans WHERE id=?",
+                    (post_attempt.plan_id,),
+                ).fetchone()
+                if (
+                    plan is None
+                    or plan["project_id"] != job.project_id
+                    or plan["source_final_assembly_id"] != post_attempt.source_final_assembly_id
+                    or plan["source_final_assembly_render_attempt_id"]
+                    != post_attempt.source_final_assembly_render_attempt_id
+                ):
+                    raise ValueError("Post attempt 不属于 HeavyJob project/plan")
+                connection.execute(
+                    "INSERT INTO post_render_attempts("
+                    "id,project_id,plan_id,source_final_assembly_id,"
+                    "source_final_assembly_render_attempt_id,attempt_number,status,adapter_name,"
+                    "heavy_job_id,output_relative_path,metadata_json,error_message,started_at,"
+                    "finished_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        post_attempt.id,
+                        post_attempt.project_id,
+                        post_attempt.plan_id,
+                        post_attempt.source_final_assembly_id,
+                        post_attempt.source_final_assembly_render_attempt_id,
+                        post_attempt.attempt_number,
+                        post_attempt.status.value,
+                        post_attempt.adapter_name,
+                        post_attempt.heavy_job_id,
+                        post_attempt.output_relative_path,
+                        json.dumps(post_attempt.metadata_json, ensure_ascii=False, sort_keys=True),
+                        post_attempt.error_message,
+                        post_attempt.started_at,
+                        post_attempt.finished_at,
+                        post_attempt.created_at,
+                    ),
+                )
+            self._insert_heavy_job_event(
+                connection,
+                event_id=queued_event_id,
+                heavy_job_id=job.id,
+                event_type=HeavyJobEventType.QUEUED,
+                stage=job.stage,
+                progress=job.progress,
+                created_at=job.created_at,
+            )
+        created = self.get_heavy_job(job.id)
+        if created is None:
+            raise RuntimeError("HeavyJob 创建后不可读取")
+        return created
+
+    def get_heavy_job(self, job_id: str) -> HeavyJob | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM heavy_jobs WHERE id=?", (job_id,)).fetchone()
+        return self._heavy_job_from_row(row) if row else None
+
+    def get_heavy_job_by_idempotency(
+        self, project_id: str | None, idempotency_key: str
+    ) -> HeavyJob | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM heavy_jobs WHERE project_id IS ? AND idempotency_key=?",
+                (project_id, idempotency_key),
+            ).fetchone()
+        return self._heavy_job_from_row(row) if row else None
+
+    def list_heavy_jobs(
+        self,
+        project_id: str | None = None,
+        *,
+        status: HeavyJobStatus | None = None,
+        job_type: HeavyJobType | None = None,
+        include_unscoped: bool = False,
+    ) -> list[HeavyJob]:
+        clauses: list[str] = []
+        values: list[object] = []
+        if project_id is not None:
+            clauses.append("project_id=?")
+            values.append(project_id)
+        elif not include_unscoped:
+            clauses.append("project_id IS NOT NULL")
+        if status is not None:
+            clauses.append("status=?")
+            values.append(status.value)
+        if job_type is not None:
+            clauses.append("job_type=?")
+            values.append(job_type.value)
+        query = "SELECT * FROM heavy_jobs"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(values)).fetchall()
+        return [self._heavy_job_from_row(row) for row in rows]
+
+    def list_heavy_job_events(self, job_id: str) -> list[HeavyJobEvent]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(
+                "SELECT * FROM heavy_job_events WHERE heavy_job_id=? "
+                "ORDER BY sequence_number",
+                (job_id,),
+            ).fetchall()
+        return [self._heavy_job_event_from_row(row) for row in rows]
+
+    def claim_next_heavy_job(
+        self,
+        *,
+        started_at: str,
+        event_id: str,
+        project_id: str | None = None,
+    ) -> HeavyJob | None:
+        with self.transaction() as connection:
+            query = "SELECT * FROM heavy_jobs WHERE status='QUEUED'"
+            values: tuple[object, ...] = ()
+            if project_id is not None:
+                query += " AND project_id=?"
+                values = (project_id,)
+            query += " ORDER BY created_at,id LIMIT 1"
+            row = connection.execute(query, values).fetchone()
+            if row is None:
+                return None
+            cursor = connection.execute(
+                "UPDATE heavy_jobs SET status='RUNNING',stage='STARTING',started_at=? "
+                "WHERE id=? AND status='QUEUED'",
+                (started_at, row["id"]),
+            )
+            if cursor.rowcount != 1:
+                return None
+            self._insert_heavy_job_event(
+                connection,
+                event_id=event_id,
+                heavy_job_id=row["id"],
+                event_type=HeavyJobEventType.STARTED,
+                stage="STARTING",
+                created_at=started_at,
+            )
+        return self.get_heavy_job(row["id"])
+
+    def update_heavy_job_progress(
+        self,
+        job_id: str,
+        *,
+        stage: str,
+        progress: float | None,
+        event_id: str,
+        created_at: str,
+        payload: dict[str, object] | None = None,
+    ) -> HeavyJob:
+        with self.transaction() as connection:
+            current = connection.execute(
+                "SELECT status FROM heavy_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"HeavyJob 不存在: {job_id}")
+            if current["status"] != HeavyJobStatus.RUNNING.value:
+                raise ValueError("只有 RUNNING HeavyJob 可以更新进度")
+            connection.execute(
+                "UPDATE heavy_jobs SET stage=?,progress=? WHERE id=?",
+                (stage, progress, job_id),
+            )
+            self._insert_heavy_job_event(
+                connection,
+                event_id=event_id,
+                heavy_job_id=job_id,
+                event_type=(
+                    HeavyJobEventType.PROGRESS
+                    if progress is not None
+                    else HeavyJobEventType.STAGE
+                ),
+                stage=stage,
+                progress=progress,
+                payload=payload,
+                created_at=created_at,
+            )
+        result = self.get_heavy_job(job_id)
+        if result is None:
+            raise RuntimeError("HeavyJob 更新后不可读取")
+        return result
+
+    def finish_heavy_job(
+        self,
+        job_id: str,
+        *,
+        status: HeavyJobStatus,
+        stage: str,
+        event_id: str,
+        finished_at: str,
+        output_provenance: dict[str, object] | None = None,
+        safe_error: str | None = None,
+    ) -> HeavyJob:
+        allowed = {
+            HeavyJobStatus.SUCCEEDED,
+            HeavyJobStatus.FAILED,
+            HeavyJobStatus.CANCELLED,
+            HeavyJobStatus.INTERRUPTED,
+        }
+        if status not in allowed:
+            raise ValueError("finish_heavy_job 需要终态")
+        event_type = HeavyJobEventType(status.value)
+        with self.transaction() as connection:
+            current = connection.execute(
+                "SELECT status FROM heavy_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"HeavyJob 不存在: {job_id}")
+            valid_sources = (
+                {HeavyJobStatus.QUEUED.value, HeavyJobStatus.RUNNING.value}
+                if status is HeavyJobStatus.CANCELLED
+                else {HeavyJobStatus.RUNNING.value}
+            )
+            if current["status"] not in valid_sources:
+                raise ValueError(
+                    f"HeavyJob transition 无效: {current['status']} -> {status.value}"
+                )
+            connection.execute(
+                "UPDATE heavy_jobs SET status=?,stage=?,progress=?,"
+                "output_provenance_json=?,safe_error=?,finished_at=? WHERE id=?",
+                (
+                    status.value,
+                    stage,
+                    100.0 if status is HeavyJobStatus.SUCCEEDED else None,
+                    json.dumps(output_provenance or {}, ensure_ascii=False, sort_keys=True),
+                    safe_error,
+                    finished_at,
+                    job_id,
+                ),
+            )
+            if status in {HeavyJobStatus.FAILED, HeavyJobStatus.CANCELLED}:
+                child_status = (
+                    "CANCELLED"
+                    if status is HeavyJobStatus.CANCELLED
+                    else "FAILED"
+                )
+                message = safe_error or (
+                    "任务已取消"
+                    if status is HeavyJobStatus.CANCELLED
+                    else "后台任务失败"
+                )
+                connection.execute(
+                    "UPDATE final_assembly_render_attempts SET status=?,error_message=?,"
+                    "finished_at=? WHERE heavy_job_id=? AND status IN ('PENDING','RUNNING')",
+                    (child_status, message, finished_at, job_id),
+                )
+                assembly_rows = connection.execute(
+                    "SELECT final_assembly_id FROM final_assembly_render_attempts "
+                    "WHERE heavy_job_id=?",
+                    (job_id,),
+                ).fetchall()
+                assembly_status = (
+                    "CANCELLED"
+                    if status is HeavyJobStatus.CANCELLED
+                    else "FAILED"
+                )
+                for assembly_row in assembly_rows:
+                    connection.execute(
+                        "UPDATE final_assemblies SET status=?,updated_at=? "
+                        "WHERE id=? AND status IN ('READY','ASSEMBLING')",
+                        (
+                            assembly_status,
+                            finished_at,
+                            assembly_row["final_assembly_id"],
+                        ),
+                    )
+                connection.execute(
+                    "UPDATE post_render_attempts SET status=?,error_message=?,"
+                    "finished_at=? WHERE heavy_job_id=? AND status IN ('PENDING','RUNNING')",
+                    (child_status, message, finished_at, job_id),
+                )
+            self._insert_heavy_job_event(
+                connection,
+                event_id=event_id,
+                heavy_job_id=job_id,
+                event_type=event_type,
+                stage=stage,
+                progress=100.0 if status is HeavyJobStatus.SUCCEEDED else None,
+                payload=output_provenance if status is HeavyJobStatus.SUCCEEDED else {},
+                created_at=finished_at,
+            )
+        result = self.get_heavy_job(job_id)
+        if result is None:
+            raise RuntimeError("HeavyJob 完成后不可读取")
+        return result
+
+    def request_heavy_job_cancel(
+        self, job_id: str, *, event_id: str, created_at: str
+    ) -> HeavyJob:
+        with self.transaction() as connection:
+            row = connection.execute("SELECT * FROM heavy_jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"HeavyJob 不存在: {job_id}")
+            status = HeavyJobStatus(row["status"])
+            if status in {
+                HeavyJobStatus.SUCCEEDED,
+                HeavyJobStatus.FAILED,
+                HeavyJobStatus.CANCELLED,
+                HeavyJobStatus.INTERRUPTED,
+            }:
+                return self._heavy_job_from_row(row)
+            connection.execute(
+                "UPDATE heavy_jobs SET cancel_requested=1 WHERE id=?", (job_id,)
+            )
+            self._insert_heavy_job_event(
+                connection,
+                event_id=event_id,
+                heavy_job_id=job_id,
+                event_type=HeavyJobEventType.CANCEL_REQUESTED,
+                stage=row["stage"],
+                progress=row["progress"],
+                created_at=created_at,
+            )
+        result = self.get_heavy_job(job_id)
+        if result is None:
+            raise RuntimeError("HeavyJob cancel 请求后不可读取")
+        return result
+
+    def recover_interrupted_heavy_jobs(
+        self, *, finished_at: str, event_ids: dict[str, str]
+    ) -> list[HeavyJob]:
+        """Truthfully close local RUNNING records left by a dead process."""
+        changed_ids: list[str] = []
+        with self.transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM heavy_jobs WHERE status='RUNNING' ORDER BY created_at,id"
+            ).fetchall()
+            for row in rows:
+                job_id = str(row["id"])
+                event_id = event_ids.get(job_id)
+                if not event_id:
+                    raise ValueError("每个 interrupted HeavyJob 都需要 event id")
+                message = "上次本地进程在任务完成前退出；可从相同冻结输入显式重试。"
+                connection.execute(
+                    "UPDATE heavy_jobs SET status='INTERRUPTED',stage='INTERRUPTED',"
+                    "progress=NULL,safe_error=?,finished_at=? WHERE id=? AND status='RUNNING'",
+                    (message, finished_at, job_id),
+                )
+                connection.execute(
+                    "UPDATE final_assembly_render_attempts SET status='FAILED',error_message=?,"
+                    "finished_at=? WHERE heavy_job_id=? AND status IN ('PENDING','RUNNING')",
+                    (message, finished_at, job_id),
+                )
+                assembly_rows = connection.execute(
+                    "SELECT final_assembly_id FROM final_assembly_render_attempts WHERE heavy_job_id=?",
+                    (job_id,),
+                ).fetchall()
+                for assembly_row in assembly_rows:
+                    connection.execute(
+                        "UPDATE final_assemblies SET status='FAILED',updated_at=? "
+                        "WHERE id=? AND status='ASSEMBLING'",
+                        (finished_at, assembly_row["final_assembly_id"]),
+                    )
+                connection.execute(
+                    "UPDATE post_render_attempts SET status='FAILED',error_message=?,"
+                    "finished_at=? WHERE heavy_job_id=? AND status IN ('PENDING','RUNNING')",
+                    (message, finished_at, job_id),
+                )
+                self._insert_heavy_job_event(
+                    connection,
+                    event_id=event_id,
+                    heavy_job_id=job_id,
+                    event_type=HeavyJobEventType.INTERRUPTED,
+                    stage="INTERRUPTED",
+                    created_at=finished_at,
+                )
+                changed_ids.append(job_id)
+        return [job for job_id in changed_ids if (job := self.get_heavy_job(job_id))]
 
     @staticmethod
     def _vision_frame_manifest_from_row(row) -> VisionFrameManifest:

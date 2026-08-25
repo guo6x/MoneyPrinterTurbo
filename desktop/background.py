@@ -12,6 +12,7 @@ from aidrama_studio.services.background_runner import (
     BackgroundProductionRunner,
     SingleInstanceGuard,
 )
+from aidrama_studio.services.heavy_job_runner import HeavyJobRunner
 from aidrama_studio.services.production_execution import ProductionExecutionService
 from aidrama_studio.services.production_worker import ProductionWorker
 from aidrama_studio.services.security import sanitize_error
@@ -34,9 +35,11 @@ class DesktopBackgroundRunnerHost:
     repository: ProjectRepository = field(default_factory=ProjectRepository)
     interval_seconds: float = 2.0
     runner_factory: Callable[..., BackgroundProductionRunner] = BackgroundProductionRunner
+    heavy_runner_factory: Callable[..., HeavyJobRunner] = HeavyJobRunner
     _stop_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _runner: BackgroundProductionRunner | None = field(default=None, init=False, repr=False)
+    _heavy_runner: HeavyJobRunner | None = field(default=None, init=False, repr=False)
     _instance_guard: SingleInstanceGuard | None = field(default=None, init=False, repr=False)
 
     def start(self) -> None:
@@ -66,8 +69,10 @@ class DesktopBackgroundRunnerHost:
                 self.repository,
                 worker_factory=worker_factory,
             )
+            self._heavy_runner = self.heavy_runner_factory(self.repository)
             for project in self.repository.list_projects():
                 self._runner.reconcile(project.id)
+            self._heavy_runner.reconcile()
             self._thread = threading.Thread(
                 target=self._run,
                 name="AIDramaProductionRunner",
@@ -78,6 +83,7 @@ class DesktopBackgroundRunnerHost:
             guard.release()
             self._instance_guard = None
             self._runner = None
+            self._heavy_runner = None
             raise
 
     def _run(self) -> None:
@@ -85,6 +91,8 @@ class DesktopBackgroundRunnerHost:
             try:
                 if self._runner is not None:
                     self._runner.run_once()
+                if self._heavy_runner is not None:
+                    self._heavy_runner.run_once()
             except Exception as exc:
                 logger.warning("AIDrama background runner cycle failed: {}", sanitize_error(exc))
             self._stop_event.wait(self.interval_seconds)
@@ -99,6 +107,7 @@ class DesktopBackgroundRunnerHost:
             return
         self._thread = None
         self._runner = None
+        self._heavy_runner = None
         guard, self._instance_guard = self._instance_guard, None
         if guard is not None:
             guard.release()

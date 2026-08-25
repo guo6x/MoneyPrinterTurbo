@@ -292,3 +292,72 @@ regression/startup evidence and write the final closure report.
 - `INTERNATIONAL_PROVIDER_PRESET=PASS`
 - `CUSTOM_PROVIDER_MIX=PASS`
 - `PROVIDER_SWITCHING=PASS`
+
+## Duration/editability addendum — durable heavy-work checkpoint
+
+This checkpoint absorbs Part 13–16 of the final consolidated addendum into
+the same V1 architecture. It does not create a competing production queue:
+paid Provider submission/poll/download truth remains in the existing
+`ProviderTask` lifecycle, while one desktop-owned host now dispatches that
+runner and the canonical local `HeavyJob` runner from the same durable loop.
+
+- Migration 028 adds project-scoped `heavy_jobs` and append-only
+  `heavy_job_events`. Immutable input JSON/SHA, idempotency, retry ancestry,
+  stage/progress, safe errors, cancellation truth and terminal timestamps are
+  persisted in SQLite. FinalAssembly/Post attempts are atomically bound to the
+  HeavyJob that owns them.
+- FinalAssembly, its real 1080p→4K deterministic normalization, Post render
+  and media probe/hash/finalize work no longer execute inside a Streamlit
+  button request. UI actions enqueue and return immediately, then display
+  durable queued/running/stage/terminal truth.
+- A process restart converts abandoned local `RUNNING` work to
+  `INTERRUPTED`, closes its bound render attempt without publishing partial
+  media, and permits only an explicit retry that creates a new job and attempt
+  from frozen inputs.
+- Unknown-duration operations expose a truthful stage with no invented
+  percentage. Measurable copies persist current/total/unit evidence and derive
+  percentage from those values.
+- Final and Post MP4 export no longer call `Path.read_bytes()`. A user-selected
+  absolute destination is served by a chunked, fsync'd, SHA/size-verified,
+  atomic no-overwrite delivery copy. The canonical project artifact is never
+  moved, renamed or deleted.
+- Local preflight checks required source paths and the actual destination
+  volume's free space. Hardware acceleration is reported as `NOT_USED` for
+  copy/archive work and `NOT_ASSERTED` for media work; no acceleration claim is
+  fabricated.
+- Project export/import use HeavyJob handlers. Export rejects all other active
+  project work, holds a database write snapshot while copying live files once
+  into staging, excludes `.tmp`/`.partial`/`.in-progress`, and builds/verifies
+  the archive only from staging. This removes the prior hash-then-reread-live
+  TOCTOU window.
+- Focused validation covers migration constraints, event/input immutability,
+  idempotent enqueue, project isolation, ordered events, null versus measurable
+  progress, real/unsupported cancellation, cold recovery, retry history,
+  linked FinalAssembly attempt recovery, Unicode/space/parenthesis large-media
+  copy, no-overwrite/cancel cleanup, active-work archive blocking, staging
+  consistency and background project export→import. Result: `57 passed, 11
+  warnings`; the complete AIDrama suite passes with `358 passed, 11
+  warnings`; Python compile and `git diff --check` pass.
+
+Checkpoint acceptance:
+
+- `HEAVY_JOB_BACKGROUND_EXECUTION=PASS`
+- `DURABLE_HEAVY_JOB_MODEL=PASS`
+- `FINAL_ASSEMBLY_NONBLOCKING=PASS`
+- `POST_RENDER_NONBLOCKING=PASS`
+- `FOUR_K_RENDER_NONBLOCKING=PASS`
+- `LOCAL_RENDER_INTERRUPTION_RECOVERY=PASS`
+- `TRUTHFUL_HEAVY_JOB_PROGRESS=PASS`
+- `LARGE_FINAL_VIDEO_EXPORT=PASS`
+- `USER_SELECTED_EXPORT_DESTINATION=PASS`
+- `LOCAL_RESOURCE_PREFLIGHT=PASS`
+- `HARDWARE_CAPABILITY_TRUTH=PASS`
+- `CONSISTENT_PROJECT_EXPORT_SNAPSHOT=PASS`
+
+Remaining addendum engineering work after this checkpoint includes canonical
+image candidate selection/promotion, creative video regeneration and current
+qualified-shot-source truth, dependency-aware outdated propagation, Preview
+promotion, provider `CONTENT_REJECTED`, exact final target-duration control,
+and the four required addendum E2E acceptances. Browser, full-repository and
+release/installer gates remain pending or externally blocked as recorded
+above.

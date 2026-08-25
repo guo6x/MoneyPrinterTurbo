@@ -31,6 +31,9 @@ from .provider_profiles import (
     ResolvedProviderSelection,
 )
 from .background_runner import BackgroundProductionRunner, BackgroundRunnerError, SingleInstanceGuard
+from .heavy_jobs import HeavyJobService, HeavyJobServiceError, LocalResourcePreflight
+from .heavy_job_runner import HeavyJobContext, HeavyJobRunner, HeavyJobRunnerError
+from .large_media_export import LargeMediaExportError, LargeMediaExportService
 from .credentials import CredentialReadinessService, CredentialStoreError, WindowsCredentialStore
 from .project_archive import ProjectArchiveError, ProjectArchiveService
 from .current_state import CurrentProductionState, CurrentProductionStateService
@@ -129,6 +132,9 @@ __all__ = [
     "ProviderProfileService", "ProviderProfileError", "ProviderSelectionState",
     "ResolvedProviderSelection", "DurationPlan", "ReferenceTrace",
     "BackgroundProductionRunner", "BackgroundRunnerError", "SingleInstanceGuard",
+    "HeavyJobService", "HeavyJobServiceError", "LocalResourcePreflight",
+    "HeavyJobContext", "HeavyJobRunner", "HeavyJobRunnerError",
+    "LargeMediaExportError", "LargeMediaExportService",
     "WindowsCredentialStore", "CredentialStoreError", "CredentialReadinessService",
     "ProjectArchiveService", "ProjectArchiveError",
     "VisionFrameSamplingService", "VisionQCResult", "VisionQCService",

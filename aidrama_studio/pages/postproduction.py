@@ -7,7 +7,7 @@ output validation, and path security remain owned by the canonical services.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import streamlit as st
@@ -19,12 +19,14 @@ from aidrama_studio.services import (
     FinalAssemblyRuntimeServiceError,
     FinalAssemblyService,
     FinalAssemblyServiceError,
+    HeavyJobService,
+    HeavyJobServiceError,
     ProductionService,
     PostProductionService,
     PostProductionServiceError,
     ProviderReadinessService,
 )
-from aidrama_studio.domain import AudioMixConfig
+from aidrama_studio.domain import AudioMixConfig, HeavyJobStatus, HeavyJobType
 
 
 _ASSEMBLY_LABELS = {
@@ -247,14 +249,34 @@ def _render_action(
             return None
         if st.button("生成成片", type="primary", key=f"generate-final-{project.id}"):
             try:
-                with st.spinner("正在生成成片…"):
-                    created = manifest_service.create_assembly(project.id, _value(job, "id"), freeze=True)
-                    runtime_service.render(project.id, created.id)
-                st.success("成片制作完成")
+                created = manifest_service.create_assembly(
+                    project.id, _value(job, "id"), freeze=True
+                )
+                HeavyJobService(
+                    getattr(manifest_service, "repository", None)
+                ).enqueue_final_assembly(project.id, created.id)
+                st.success("成片任务已加入后台队列；可以安全离开本页面。")
                 st.rerun()
             except Exception as exc:
                 st.error(_safe_error(exc))
         return None
+
+    repository = getattr(manifest_service, "repository", None)
+    active_job = None
+    if repository is not None:
+        active_job = _latest_job_for_target(
+            HeavyJobService(repository),
+            project.id,
+            HeavyJobType.FINAL_ASSEMBLY_RENDER,
+            "assembly_id",
+            assembly.id,
+        )
+        _render_heavy_job_status(active_job)
+        if active_job is not None and active_job.status in {
+            HeavyJobStatus.QUEUED,
+            HeavyJobStatus.RUNNING,
+        }:
+            return assembly
 
     if status in {"READY", "FAILED", "CANCELLED"}:
         if status == "READY":
@@ -273,12 +295,25 @@ def _render_action(
             key=f"render-final-{assembly.id}",
         ):
             try:
-                with st.spinner("正在生成成片…"):
-                    if status == "FAILED":
-                        runtime_service.retry(project.id, assembly.id)
-                    else:
-                        runtime_service.render(project.id, assembly.id)
-                st.success("成片制作完成")
+                heavy = HeavyJobService(
+                    getattr(manifest_service, "repository", None)
+                )
+                latest = _latest_job_for_target(
+                    heavy,
+                    project.id,
+                    HeavyJobType.FINAL_ASSEMBLY_RENDER,
+                    "assembly_id",
+                    assembly.id,
+                )
+                if status == "FAILED" and latest is not None and latest.status in {
+                    HeavyJobStatus.FAILED,
+                    HeavyJobStatus.CANCELLED,
+                    HeavyJobStatus.INTERRUPTED,
+                }:
+                    heavy.retry(latest.id)
+                else:
+                    heavy.enqueue_final_assembly(project.id, assembly.id)
+                st.success("成片任务已加入后台队列；状态会自动持久化。")
                 st.rerun()
             except Exception as exc:
                 st.error(_safe_error(exc))
@@ -288,6 +323,46 @@ def _render_action(
     elif status == "SUCCEEDED":
         st.success("成片制作完成")
     return assembly
+
+
+def _latest_job_for_target(
+    service: HeavyJobService,
+    project_id: str,
+    job_type: HeavyJobType,
+    target_key: str,
+    target_id: str,
+):
+    try:
+        jobs = service.list_jobs(project_id, job_type=job_type)
+    except Exception:
+        return None
+    return next(
+        (
+            job
+            for job in reversed(jobs)
+            if str(job.input_snapshot.get(target_key) or "") == str(target_id)
+        ),
+        None,
+    )
+
+
+def _render_heavy_job_status(job: Any | None) -> None:
+    if job is None:
+        return
+    status = _status_value(job)
+    stage = str(_value(job, "stage", "处理中") or "处理中")
+    progress = _value(job, "progress", None)
+    if status == "QUEUED":
+        st.info("后台任务已排队")
+    elif status == "RUNNING":
+        if progress is None:
+            st.info(f"后台处理中 · {stage}")
+        else:
+            st.info(f"后台处理中 · {stage} · {float(progress):.1f}%")
+    elif status == "INTERRUPTED":
+        st.warning("上次本地进程中断；冻结输入仍保留，可显式重试。")
+    elif status == "FAILED":
+        st.warning(_safe_error(_value(job, "safe_error", "后台任务失败")))
 
 
 def _safe_download_name(title: object) -> str:
@@ -342,18 +417,33 @@ def _render_preview_and_export(project: Any, assembly: Any, runtime_service: Fin
         return
     st.video(str(output_path))
     _render_metadata(selected)
-    try:
-        content = output_path.read_bytes()
-    except OSError:
-        st.warning("成片文件不可用")
-        return
-    st.download_button(
-        "导出 MP4",
-        data=content,
-        file_name=_safe_download_name(project.title),
-        mime="video/mp4",
-        key=f"download-final-{assembly.id}-{_value(selected, 'id')}",
+    destination = st.text_input(
+        "导出目标（绝对 MP4 路径）",
+        placeholder=r"D:\Videos\我的短剧-final.mp4",
+        key=f"final-export-destination-{_value(selected, 'id')}",
+        help="导出会创建独立副本；项目中的 canonical 成片不会被移动或删除。",
     )
+    if st.button(
+        "后台导出 MP4",
+        disabled=not str(destination or "").strip(),
+        key=f"export-final-{assembly.id}-{_value(selected, 'id')}",
+    ):
+        try:
+            repository = getattr(runtime_service, "repository", None)
+            root = (repository.paths.projects / project.id).resolve()
+            relative = output_path.resolve().relative_to(root).as_posix()
+            metadata = _value(selected, "metadata_json", {}) or {}
+            HeavyJobService(repository).enqueue_final_media_export(
+                project.id,
+                source_relative_path=relative,
+                source_sha256=str(metadata.get("sha256") or ""),
+                source_size_bytes=int(metadata.get("size_bytes") or output_path.stat().st_size),
+                destination=Path(str(destination)),
+            )
+            st.success("导出任务已加入后台队列；canonical 成片保持不变。")
+            st.rerun()
+        except Exception as exc:
+            st.warning(_safe_error(exc, "无法创建后台导出任务"))
 
 
 def _render_history(project: Any, assembly: Any | None, runtime_service: FinalAssemblyRuntimeService) -> list[Any]:
@@ -516,13 +606,34 @@ def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: An
         else:
             st.caption("尚未选择 BGM（可选）")
 
+    heavy_service = HeavyJobService(getattr(service, "repository", None))
+    post_job = _latest_job_for_target(
+        heavy_service,
+        project.id,
+        HeavyJobType.POST_RENDER,
+        "plan_id",
+        plan.id,
+    )
+    _render_heavy_job_status(post_job)
     if st.button("渲染最终后期成片", type="primary", key=f"post-render-{plan.id}"):
         try:
-            attempt = service.render(project.id, plan.id, subtitle_track_id=subtitle_track.id if subtitle_track else None, music_track_id=music.id if music else None)
-            st.success("最终后期成片已生成")
-            st.session_state[f"post-latest-attempt-{plan.id}"] = attempt.id
+            if post_job is not None and post_job.status in {
+                HeavyJobStatus.FAILED,
+                HeavyJobStatus.CANCELLED,
+                HeavyJobStatus.INTERRUPTED,
+            }:
+                queued = heavy_service.retry(post_job.id)
+            else:
+                queued = heavy_service.enqueue_post_render(
+                    project.id,
+                    plan.id,
+                    subtitle_track_id=subtitle_track.id if subtitle_track else None,
+                    music_track_id=music.id if music else None,
+                )
+            st.success("最终后期任务已加入后台队列")
+            st.session_state[f"post-latest-heavy-job-{plan.id}"] = queued.id
             st.rerun()
-        except PostProductionServiceError as exc:
+        except (PostProductionServiceError, HeavyJobServiceError) as exc:
             st.warning(_safe_error(exc, "后期渲染未完成"))
 
     latest = st.session_state.get(f"post-latest-attempt-{plan.id}")
@@ -533,7 +644,31 @@ def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: An
         output = service.resolve_output_path(project.id, plan.id, _value(selected, "id"))
         if output:
             st.video(str(output))
-            st.download_button("导出最终后期 MP4", data=output.read_bytes(), file_name=_safe_download_name(project.title).replace("-final", "-post"), mime="video/mp4", key=f"post-export-{selected.id}")
+            destination = st.text_input(
+                "最终后期导出目标（绝对 MP4 路径）",
+                placeholder=r"D:\Videos\我的短剧-post.mp4",
+                key=f"post-export-destination-{selected.id}",
+            )
+            if st.button(
+                "后台导出最终后期 MP4",
+                disabled=not str(destination or "").strip(),
+                key=f"post-export-{selected.id}",
+            ):
+                try:
+                    root = (service.repository.paths.projects / project.id).resolve()
+                    relative = output.resolve().relative_to(root).as_posix()
+                    metadata = _value(selected, "metadata_json", {}) or {}
+                    heavy_service.enqueue_final_media_export(
+                        project.id,
+                        source_relative_path=relative,
+                        source_sha256=str(metadata.get("sha256") or ""),
+                        source_size_bytes=int(metadata.get("size_bytes") or output.stat().st_size),
+                        destination=Path(str(destination)),
+                    )
+                    st.success("后期成片导出任务已加入后台队列")
+                    st.rerun()
+                except Exception as exc:
+                    st.warning(_safe_error(exc, "无法创建后台导出任务"))
     with st.expander("后期渲染历史", expanded=False):
         for attempt in reversed(attempts):
             st.caption(f"Attempt {_value(attempt, 'attempt_number', '—')} · {_status_value(attempt)}")
@@ -567,8 +702,10 @@ def render() -> None:
             try:
                 with st.spinner("正在创建新的成片版本…"):
                     created = manifest_service.create_assembly(project.id, _value(job, "id"), freeze=True)
-                    runtime_service.render(project.id, created.id)
-                st.success("新的成片版本已制作完成")
+                    HeavyJobService(
+                        getattr(manifest_service, "repository", None)
+                    ).enqueue_final_assembly(project.id, created.id)
+                st.success("新的成片版本已加入后台队列")
                 st.rerun()
             except Exception as exc:
                 st.error(_safe_error(exc))

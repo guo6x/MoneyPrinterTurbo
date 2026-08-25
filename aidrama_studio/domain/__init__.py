@@ -27,6 +27,7 @@ from .producer import ProducerPolicy, ProducerRecommendation, ProductionProgress
 from .runtime_foundation import AIInvocation, GenerationBrief, OutputProfile, RuntimePlan
 from .creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourceKind, SourcePackItem
 from .creative_control import CreativeLock
+from .heavy_job import HeavyJob, HeavyJobEvent, HeavyJobEventType, HeavyJobStatus, HeavyJobType
 from .reference_profile import ReferenceProfile, ReferenceProfileItem
 from .runtime_operations import (
     CapabilityProfile,
@@ -66,6 +67,7 @@ __all__ = [
     "OutputProfile", "RuntimePlan", "GenerationBrief", "AIInvocation",
     "SourceKind", "ExtractionState", "SourcePackItem", "NormalizedCreativeBrief", "IntakeAnalysis",
     "CreativeLock",
+    "HeavyJob", "HeavyJobEvent", "HeavyJobEventType", "HeavyJobStatus", "HeavyJobType",
     "ReferenceProfile", "ReferenceProfileItem",
     "CapabilityProfile", "ProviderDeploymentRegion", "ProviderPreset",
     "ProviderSelectionSettings", "ProviderTask", "ProviderVerificationState",

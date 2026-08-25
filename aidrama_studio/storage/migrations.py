@@ -1443,6 +1443,116 @@ def _migration_027_human_editability_provenance(connection: sqlite3.Connection) 
     )
 
 
+def _migration_028_durable_heavy_jobs(connection: sqlite3.Connection) -> None:
+    """One durable, restart-truthful queue for all long local operations."""
+    connection.execute(
+        """
+        CREATE TABLE heavy_jobs (
+            id TEXT PRIMARY KEY,
+            job_type TEXT NOT NULL CHECK (job_type IN (
+                'PRODUCTION','FINAL_ASSEMBLY_RENDER','POST_RENDER','UPSCALE','TTS',
+                'FINAL_MEDIA_EXPORT','PROJECT_EXPORT','PROJECT_IMPORT'
+            )),
+            project_id TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'QUEUED','RUNNING','SUCCEEDED','FAILED','CANCELLED','INTERRUPTED'
+            )),
+            stage TEXT NOT NULL,
+            progress REAL CHECK (progress IS NULL OR (progress >= 0 AND progress <= 100)),
+            idempotency_key TEXT NOT NULL,
+            input_snapshot_json TEXT NOT NULL,
+            input_sha256 TEXT NOT NULL CHECK (
+                length(input_sha256)=64 AND input_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            output_provenance_json TEXT NOT NULL DEFAULT '{}',
+            safe_error TEXT,
+            cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
+            retry_of_job_id TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            CHECK (project_id IS NOT NULL OR job_type='PROJECT_IMPORT'),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(retry_of_job_id) REFERENCES heavy_jobs(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX idx_heavy_jobs_project_idempotency "
+        "ON heavy_jobs(project_id,idempotency_key) WHERE project_id IS NOT NULL"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX idx_heavy_jobs_global_import_idempotency "
+        "ON heavy_jobs(idempotency_key) WHERE project_id IS NULL"
+    )
+    connection.execute(
+        "CREATE INDEX idx_heavy_jobs_dispatch "
+        "ON heavy_jobs(status,created_at,id)"
+    )
+    connection.execute(
+        "CREATE INDEX idx_heavy_jobs_project_history "
+        "ON heavy_jobs(project_id,created_at DESC,id DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE heavy_job_events (
+            id TEXT PRIMARY KEY,
+            heavy_job_id TEXT NOT NULL,
+            sequence_number INTEGER NOT NULL CHECK (sequence_number >= 1),
+            event_type TEXT NOT NULL CHECK (event_type IN (
+                'QUEUED','STARTED','STAGE','PROGRESS','CANCEL_REQUESTED',
+                'CANCELLED','SUCCEEDED','FAILED','INTERRUPTED'
+            )),
+            stage TEXT,
+            progress REAL CHECK (progress IS NULL OR (progress >= 0 AND progress <= 100)),
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            UNIQUE(heavy_job_id,sequence_number),
+            FOREIGN KEY(heavy_job_id) REFERENCES heavy_jobs(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_heavy_job_events_history "
+        "ON heavy_job_events(heavy_job_id,sequence_number)"
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER heavy_job_events_immutable_update
+        BEFORE UPDATE ON heavy_job_events
+        BEGIN
+            SELECT RAISE(ABORT, 'heavy_job_events are immutable');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER heavy_job_inputs_immutable
+        BEFORE UPDATE ON heavy_jobs
+        WHEN NEW.job_type != OLD.job_type
+          OR NEW.project_id IS NOT OLD.project_id
+          OR NEW.idempotency_key != OLD.idempotency_key
+          OR NEW.input_snapshot_json != OLD.input_snapshot_json
+          OR NEW.input_sha256 != OLD.input_sha256
+          OR NEW.retry_of_job_id IS NOT OLD.retry_of_job_id
+        BEGIN
+            SELECT RAISE(ABORT, 'heavy job input provenance is immutable');
+        END
+        """
+    )
+
+    for table in ("final_assembly_render_attempts", "post_render_attempts"):
+        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if "heavy_job_id" not in columns:
+            connection.execute(
+                f"ALTER TABLE {table} ADD COLUMN heavy_job_id TEXT REFERENCES heavy_jobs(id)"
+            )
+        connection.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_heavy_job "
+            f"ON {table}(heavy_job_id) WHERE heavy_job_id IS NOT NULL"
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1471,6 +1581,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (25, _migration_025_regional_provider_selection),
     (26, _migration_026_versioned_output_profiles),
     (27, _migration_027_human_editability_provenance),
+    (28, _migration_028_durable_heavy_jobs),
 )
 
 

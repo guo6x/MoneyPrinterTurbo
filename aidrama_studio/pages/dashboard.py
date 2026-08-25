@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import os
 import tempfile
 from pathlib import Path
@@ -13,7 +14,13 @@ from loguru import logger
 from aidrama_studio.components.page_header import page_header
 from aidrama_studio.components.project_card import project_card
 from aidrama_studio.domain import AspectRatio, Project, ProjectStatus
-from aidrama_studio.services import ProjectArchiveError, ProjectArchiveService, ProjectService
+from aidrama_studio.services import (
+    HeavyJobService,
+    ProjectArchiveError,
+    ProjectArchiveService,
+    ProjectService,
+)
+from aidrama_studio.domain import HeavyJobStatus, HeavyJobType
 
 
 def _export_archive_path(
@@ -63,6 +70,54 @@ def _import_archive_stream(
         return archive_service.import_project(source)
 
 
+def _stage_import_archive(
+    archive_service: ProjectArchiveService,
+    upload: BinaryIO | bytes | bytearray,
+) -> tuple[Path, str, int]:
+    """Persist uploaded bytes only; validation/restore remains background work."""
+    stream: BinaryIO
+    if isinstance(upload, (bytes, bytearray)):
+        stream = io.BytesIO(bytes(upload))
+    elif hasattr(upload, "read"):
+        stream = upload
+    else:
+        raise ProjectArchiveError("项目归档无效")
+    if hasattr(stream, "seek"):
+        stream.seek(0)
+    root = archive_service.repository.paths.archived_projects / "import-staging"
+    root.mkdir(parents=True, exist_ok=True)
+    temporary = root / f".{uuid4().hex}.uploading"
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with temporary.open("xb") as destination:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > archive_service.MAX_ARCHIVE_BYTES:
+                    raise ProjectArchiveError("项目归档超过大小限制")
+                destination.write(chunk)
+                digest.update(chunk)
+            destination.flush()
+            os.fsync(destination.fileno())
+        if total == 0:
+            raise ProjectArchiveError("项目归档为空")
+        sha256 = digest.hexdigest()
+        staged = root / f"{sha256}.aidrama"
+        if staged.exists():
+            if staged.stat().st_size != total:
+                raise ProjectArchiveError("项目导入 staging hash collision")
+            temporary.unlink()
+        else:
+            os.replace(temporary, staged)
+        return staged, sha256, total
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def _archive_download_name(title: str) -> str:
     safe = "".join(character if character.isalnum() or character in "._-" else "_" for character in str(title).strip()).strip("._-")
     return f"{(safe[:60] or 'project')}.aidrama"
@@ -89,43 +144,102 @@ def _render_recovery_notice() -> None:
 
 def _render_archive_workspace(service: ProjectService, projects: list[Project]) -> None:
     archive_service = ProjectArchiveService(service.repository)
+    heavy_service = HeavyJobService(service.repository)
     with st.expander("导出 / 导入 / 恢复项目 (.aidrama)", expanded=not projects):
-        st.caption(".aidrama 包会在导出和导入前完成结构、文件哈希与恢复验证；不包含 API 凭据。")
+        st.caption(".aidrama 会通过后台一致快照、文件哈希与恢复验证生成；不包含 API 凭据。")
         if projects:
             selected = st.selectbox(
                 "导出项目", projects, format_func=lambda item: item.title,
                 key="dashboard-export-project",
             )
-            if st.button("生成已验证的 .aidrama", key="dashboard-export-archive"):
+            export_destination = st.text_input(
+                "项目归档导出目标（绝对 .aidrama 路径）",
+                placeholder=r"D:\Backups\我的项目.aidrama",
+                key="dashboard-export-destination",
+            )
+            if st.button(
+                "后台生成已验证的 .aidrama",
+                key="dashboard-export-archive",
+                disabled=not str(export_destination or "").strip(),
+            ):
                 try:
-                    archive = _export_archive_path(archive_service, selected)
+                    heavy_service.enqueue_project_export(
+                        selected.id,
+                        destination=Path(str(export_destination)),
+                    )
                 except Exception:
                     logger.exception("failed to export project archive")
-                    st.error("项目导出失败；未生成未经验证的归档。")
+                    st.error("无法创建项目导出任务；未生成未经验证的归档。")
                 else:
-                    with archive.open("rb") as handle:
-                        st.download_button(
-                            "下载项目归档", data=handle,
-                            file_name=_archive_download_name(selected.title),
-                            mime="application/zip", key=f"download-project-archive-{selected.id}",
-                        )
+                    st.success("项目导出已加入后台队列；页面可以安全关闭。")
+                    st.rerun()
+            export_jobs = heavy_service.list_jobs(
+                selected.id, job_type=HeavyJobType.PROJECT_EXPORT
+            )
+            if export_jobs:
+                latest_export = export_jobs[-1]
+                if latest_export.status is HeavyJobStatus.RUNNING:
+                    st.info(f"项目导出处理中 · {latest_export.stage}")
+                elif latest_export.status is HeavyJobStatus.QUEUED:
+                    st.info("项目导出已排队")
+                elif latest_export.status is HeavyJobStatus.SUCCEEDED:
+                    st.success(
+                        f"项目归档已验证：{latest_export.output_provenance.get('archive_name', '完成')}"
+                    )
+                elif latest_export.status in {
+                    HeavyJobStatus.FAILED,
+                    HeavyJobStatus.INTERRUPTED,
+                }:
+                    st.warning(latest_export.safe_error or "项目导出未完成，可显式重试。")
         uploaded = st.file_uploader(
             "导入或恢复 .aidrama", type=["aidrama"], key="dashboard-import-archive",
             help="恢复保留原项目 ID；如果该项目仍存在，会安全拒绝且绝不覆盖。",
         )
         if uploaded is not None and st.button("验证并恢复为新项目", type="primary", key="dashboard-import-project"):
             try:
-                imported_id = _import_archive_stream(archive_service, uploaded)
-                imported = service.get(imported_id)
+                staged, sha256, size = _stage_import_archive(
+                    archive_service, uploaded
+                )
+                relative = staged.relative_to(
+                    archive_service.repository.paths.archived_projects
+                ).as_posix()
+                heavy_service.enqueue_project_import(
+                    staged_archive_relative_path=relative,
+                    archive_sha256=sha256,
+                    archive_size_bytes=size,
+                )
             except Exception:
-                logger.exception("failed to import project archive")
-                st.error("项目归档验证或恢复失败；现有项目未被覆盖。")
+                logger.exception("failed to queue project archive import")
+                st.error("项目归档 staging 失败；现有项目未被覆盖。")
             else:
-                st.session_state.current_project_id = imported_id
-                st.query_params["project"] = imported_id
-                st.session_state["archive_import_result"] = imported.title if imported else imported_id
-                st.success(f"已验证并恢复项目：{imported.title if imported else imported_id}")
+                st.success("项目归档已加入后台验证与恢复队列。")
                 st.rerun()
+        imports = heavy_service.list_project_imports()
+        if imports:
+            latest_import = imports[-1]
+            if latest_import.status is HeavyJobStatus.SUCCEEDED:
+                imported_id = str(
+                    latest_import.output_provenance.get("imported_project_id") or ""
+                )
+                imported = service.get(imported_id) if imported_id else None
+                st.success(
+                    f"已验证并恢复项目：{imported.title if imported else imported_id}"
+                )
+                if imported_id and st.button(
+                    "打开已恢复项目", key=f"open-imported-{latest_import.id}"
+                ):
+                    st.session_state.current_project_id = imported_id
+                    st.query_params["project"] = imported_id
+                    _navigate("story")
+            elif latest_import.status is HeavyJobStatus.RUNNING:
+                st.info(f"项目恢复处理中 · {latest_import.stage}")
+            elif latest_import.status is HeavyJobStatus.QUEUED:
+                st.info("项目恢复已排队")
+            elif latest_import.status in {
+                HeavyJobStatus.FAILED,
+                HeavyJobStatus.INTERRUPTED,
+            }:
+                st.warning(latest_import.safe_error or "项目恢复未完成，可显式重试。")
 
 
 def _navigate(page: str) -> None:

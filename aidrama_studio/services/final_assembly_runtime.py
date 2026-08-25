@@ -46,25 +46,62 @@ class FinalAssemblyRuntimeService:
         self.manifest_service = manifest_service or FinalAssemblyService(self.repository)
         self.adapter = adapter
 
-    def render(self, project_id: str, assembly_id: str):
+    def build_pending_attempt(
+        self,
+        project_id: str,
+        assembly_id: str,
+        *,
+        heavy_job_id: str | None = None,
+    ) -> FinalAssemblyRenderAttempt:
+        """Build, but do not persist, one append-only attempt identity."""
+        self._load_renderable_manifest(project_id, assembly_id)
+        adapter = self.adapter or MPTFinalAssemblyAdapter(
+            project_root=self._project_root(project_id)
+        )
+        return FinalAssemblyRenderAttempt(
+            id=uuid4().hex,
+            final_assembly_id=assembly_id,
+            attempt_number=self._next_attempt_number(assembly_id),
+            status=FinalAssemblyRenderAttemptStatus.PENDING,
+            adapter_name=getattr(adapter, "name", adapter.__class__.__name__),
+            heavy_job_id=heavy_job_id,
+            created_at=_now(),
+        )
+
+    def render(
+        self,
+        project_id: str,
+        assembly_id: str,
+        *,
+        prepared_attempt_id: str | None = None,
+    ):
         """Render a new attempt from exactly the stored manifest items."""
         manifest = self._load_renderable_manifest(project_id, assembly_id)
         adapter = self.adapter or MPTFinalAssemblyAdapter(
             project_root=self._project_root(project_id)
         )
-        attempt_number = self._next_attempt_number(assembly_id)
-        attempt_id = uuid4().hex
-        created_at = _now()
-        attempt = self.repository.create_final_assembly_render_attempt(
-            FinalAssemblyRenderAttempt(
-                id=attempt_id,
-                final_assembly_id=assembly_id,
-                attempt_number=attempt_number,
-                status=FinalAssemblyRenderAttemptStatus.PENDING,
-                adapter_name=getattr(adapter, "name", adapter.__class__.__name__),
-                created_at=created_at,
+        if prepared_attempt_id is None:
+            attempt = self.repository.create_final_assembly_render_attempt(
+                self.build_pending_attempt(project_id, assembly_id)
             )
-        )
+        else:
+            attempt = self.repository.get_final_assembly_render_attempt(
+                prepared_attempt_id
+            )
+            if (
+                attempt is None
+                or attempt.final_assembly_id != assembly_id
+                or attempt.status is not FinalAssemblyRenderAttemptStatus.PENDING
+            ):
+                raise FinalAssemblyRuntimeServiceError(
+                    "prepared FinalAssembly attempt 不存在、已运行或不属于该成片版本"
+                )
+            adapter_name = getattr(adapter, "name", adapter.__class__.__name__)
+            if attempt.adapter_name != adapter_name:
+                raise FinalAssemblyRuntimeServiceError(
+                    "prepared FinalAssembly adapter 与当前 runtime 不一致"
+                )
+        attempt_id = attempt.id
         temporary_path: Path | None = None
         try:
             source_paths = tuple(self._resolve_source_path(project_id, item.source_path) for item in manifest.items)
@@ -162,6 +199,13 @@ class FinalAssemblyRuntimeService:
     render_assembly = render
     render_final_assembly = render
     run = render
+
+    def render_prepared(
+        self, project_id: str, assembly_id: str, attempt_id: str
+    ) -> FinalAssemblyRenderAttempt:
+        return self.render(
+            project_id, assembly_id, prepared_attempt_id=attempt_id
+        )
 
     def retry(self, project_id: str, assembly_id: str):
         """Retry using the same stored READY manifest items, never latest sources."""

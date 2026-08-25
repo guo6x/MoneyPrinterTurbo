@@ -23,6 +23,7 @@ from uuid import uuid4
 
 from aidrama_studio.branding import BRAND
 from aidrama_studio.services.security import sanitize_error, sanitize_persistent_metadata
+from aidrama_studio.services.active_work import project_has_active_work
 from aidrama_studio.storage.database import DatabasePaths, backup_database
 from aidrama_studio.storage.repositories import ProjectRepository
 
@@ -88,6 +89,8 @@ class ProjectArchiveService:
         "vision_frame_manifests",
         "vision_analysis_results",
         "provider_selection_settings",
+        "heavy_jobs",
+        "heavy_job_events",
     )
 
     # Rows with NULL project_id (global provider defaults/settings) are
@@ -129,6 +132,7 @@ class ProjectArchiveService:
             "vision_frame_manifests",
             "vision_analysis_results",
             "provider_selection_settings",
+            "heavy_jobs",
         }
     )
 
@@ -144,6 +148,7 @@ class ProjectArchiveService:
         "final_assembly_items": ("final_assembly_id", "final_assemblies"),
         "final_assembly_render_attempts": ("final_assembly_id", "final_assemblies"),
         "reference_profile_items": ("profile_id", "reference_profiles"),
+        "heavy_job_events": ("heavy_job_id", "heavy_jobs"),
     }
 
     # ALTER TABLE additions without SQLite FK clauses are still project graph
@@ -201,12 +206,17 @@ class ProjectArchiveService:
         "source_pack_items": frozenset({"metadata_json"}),
         "reference_asset_versions": frozenset({"metadata_json"}),
         "runtime_plans": frozenset({"provider_parameters_json", "authorization_json"}),
+        "heavy_jobs": frozenset(
+            {"input_snapshot_json", "output_provenance_json"}
+        ),
+        "heavy_job_events": frozenset({"payload_json"}),
     }
     SANITIZED_TEXT_COLUMNS = {
         "provider_tasks": frozenset({"error_message"}),
         "production_attempts": frozenset({"error_message"}),
         "final_assembly_render_attempts": frozenset({"error_message"}),
         "post_render_attempts": frozenset({"error_message"}),
+        "heavy_jobs": frozenset({"safe_error"}),
     }
 
     def __init__(self, repository: ProjectRepository | None = None) -> None:
@@ -215,42 +225,79 @@ class ProjectArchiveService:
     def backup_database(self, destination: Path) -> Path:
         return backup_database(self.repository.paths.database, Path(destination))
 
-    def export_project(self, project_id: str, destination: Path) -> Path:
+    def export_project(
+        self,
+        project_id: str,
+        destination: Path,
+        *,
+        excluding_heavy_job_id: str | None = None,
+    ) -> Path:
         if self.repository.get_project(project_id) is None:
             raise ProjectArchiveError("项目不存在")
-        rows = self._project_rows(project_id)
-        files = self._project_files(project_id)
-        manifest: dict[str, Any] = {
-            "format": self.FORMAT,
-            "version": self.ARCHIVE_VERSION,
-            "product_version": BRAND.version,
-            "project_id": project_id,
-            "schema_version": self._schema_version(),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "tables": rows,
-            "files": files,
-        }
-        manifest["content_sha256"] = self._content_sha256(manifest)
         target = Path(destination)
         if target.exists():
             raise ProjectArchiveError("项目归档目标已存在")
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        self.repository.paths.archived_projects.mkdir(parents=True, exist_ok=True)
         try:
-            with zipfile.ZipFile(
-                temporary,
-                "x",
-                compression=zipfile.ZIP_DEFLATED,
-                compresslevel=6,
-            ) as archive:
-                archive.writestr(
-                    "manifest.json",
-                    json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2),
-                )
-                root = self._project_root(project_id)
-                for item in files:
-                    source = root / Path(*item["path"].split("/"))
-                    archive.write(source, arcname=f"files/{item['path']}")
+            with tempfile.TemporaryDirectory(
+                prefix=f".export-{project_id}-",
+                dir=self.repository.paths.archived_projects,
+            ) as snapshot_directory:
+                snapshot_root = Path(snapshot_directory) / "files"
+                snapshot_root.mkdir(parents=True, exist_ok=False)
+                # BEGIN IMMEDIATE prevents a concurrent DB transition from
+                # straddling the row/file snapshot. Existing active work is
+                # rejected; the background PROJECT_EXPORT job may exclude
+                # only its own durable row.
+                with self.repository.transaction() as connection:
+                    if project_has_active_work(
+                        connection,
+                        project_id,
+                        excluding_heavy_job_id=excluding_heavy_job_id,
+                    ):
+                        raise ProjectArchiveError(
+                            "项目仍有活动任务；暂不能创建一致归档快照"
+                        )
+                    rows = self._project_rows(project_id, connection=connection)
+                    files = self._snapshot_project_files(
+                        project_id, snapshot_root
+                    )
+                    schema_version = int(
+                        connection.execute(
+                            "SELECT COALESCE(MAX(version),0) FROM schema_migrations"
+                        ).fetchone()[0]
+                    )
+                manifest: dict[str, Any] = {
+                    "format": self.FORMAT,
+                    "version": self.ARCHIVE_VERSION,
+                    "product_version": BRAND.version,
+                    "project_id": project_id,
+                    "schema_version": schema_version,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "tables": rows,
+                    "files": files,
+                }
+                manifest["content_sha256"] = self._content_sha256(manifest)
+                with zipfile.ZipFile(
+                    temporary,
+                    "x",
+                    compression=zipfile.ZIP_DEFLATED,
+                    compresslevel=6,
+                ) as archive:
+                    archive.writestr(
+                        "manifest.json",
+                        json.dumps(
+                            manifest,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            indent=2,
+                        ),
+                    )
+                    for item in files:
+                        source = snapshot_root / Path(*item["path"].split("/"))
+                        archive.write(source, arcname=f"files/{item['path']}")
             # Validate the temporary package through the same isolated import
             # path before it becomes the caller-visible backup.
             self.verify_importable(temporary)
@@ -347,8 +394,18 @@ class ProjectArchiveService:
             del verification_repository
             gc.collect()
 
-    def _project_rows(self, project_id: str) -> dict[str, list[dict[str, Any]]]:
-        with self.repository.transaction() as connection:
+    def _project_rows(
+        self,
+        project_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        if connection is None:
+            with self.repository.transaction() as owned_connection:
+                return self._project_rows(
+                    project_id, connection=owned_connection
+                )
+        else:
             available = {
                 str(row[0])
                 for row in connection.execute(
@@ -366,6 +423,18 @@ class ProjectArchiveService:
                 if table == "projects":
                     selected = connection.execute(
                         "SELECT * FROM projects WHERE id=? ORDER BY rowid", (project_id,)
+                    ).fetchall()
+                elif table == "heavy_jobs":
+                    # Delivery-copy/export jobs can contain a user-selected
+                    # absolute destination and do not affect creative/runtime
+                    # provenance. Keep final/post/TTS history, but never put
+                    # private destination paths or the export job itself into
+                    # a portable archive.
+                    selected = connection.execute(
+                        "SELECT * FROM heavy_jobs WHERE project_id=? AND job_type "
+                        "NOT IN ('FINAL_MEDIA_EXPORT','PROJECT_EXPORT','PROJECT_IMPORT') "
+                        "ORDER BY rowid",
+                        (project_id,),
                     ).fetchall()
                 elif table in self.DIRECT_PROJECT_TABLES:
                     selected = connection.execute(
@@ -393,6 +462,53 @@ class ProjectArchiveService:
                 raise ProjectArchiveError("项目归档必须包含且仅包含一个 project row")
             return result
 
+    def _snapshot_project_files(
+        self, project_id: str, snapshot_root: Path
+    ) -> list[dict[str, Any]]:
+        """Copy each live file once; ZIP/hash later consume only the snapshot."""
+        root = self._project_root(project_id)
+        result: list[dict[str, Any]] = []
+        for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+            if not path.is_file() or path.is_symlink() or self._transient_file(path):
+                continue
+            resolved = path.resolve(strict=True)
+            if root not in resolved.parents or self._has_symlink_component(root, path):
+                raise ProjectArchiveError("项目目录包含不安全的 symlink 文件路径")
+            relative = self._safe_relative(path.relative_to(root).as_posix())
+            target = snapshot_root / Path(*relative.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            before = path.stat()
+            digest = hashlib.sha256()
+            copied = 0
+            try:
+                with path.open("rb") as source, target.open("xb") as destination:
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        destination.write(chunk)
+                        digest.update(chunk)
+                        copied += len(chunk)
+                    destination.flush()
+                    os.fsync(destination.fileno())
+            except OSError as exc:
+                raise ProjectArchiveError("项目文件快照读取失败") from exc
+            after = path.stat()
+            if (
+                before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+                or copied != before.st_size
+            ):
+                raise ProjectArchiveError("项目文件在归档快照期间发生变化")
+            result.append(
+                {
+                    "path": relative,
+                    "size_bytes": copied,
+                    "sha256": digest.hexdigest(),
+                }
+            )
+        return result
+
     def _project_files(self, project_id: str) -> list[dict[str, Any]]:
         root = self._project_root(project_id)
         result: list[dict[str, Any]] = []
@@ -400,8 +516,7 @@ class ProjectArchiveService:
             if (
                 not path.is_file()
                 or path.is_symlink()
-                or path.name.endswith(".tmp")
-                or "credentials" in path.name.lower()
+                or self._transient_file(path)
             ):
                 continue
             resolved = path.resolve(strict=True)
@@ -416,6 +531,17 @@ class ProjectArchiveService:
                 }
             )
         return result
+
+    @staticmethod
+    def _transient_file(path: Path) -> bool:
+        name = path.name.casefold()
+        return (
+            name.endswith((".tmp", ".partial", ".in-progress"))
+            or ".in-progress." in name
+            or ".partial." in name
+            or name.startswith(".in-progress")
+            or "credentials" in name
+        )
 
     def _restore_files(
         self,
