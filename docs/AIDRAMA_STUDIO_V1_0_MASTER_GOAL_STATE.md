@@ -9,8 +9,8 @@ with `git rev-parse HEAD` after checkout.
 - Target branch: `goal/aidrama-studio-v1-0-final-product-release`
 - Goal base: `3ce90aad6a70e6173a3826bd4e8eb6c039e0221b`
 - Current head: `HEAD`
-- Active checkpoint: close browser acceptance, final security/self-audit and
-  truthful externally blocked desktop/live release gates.
+- Active checkpoint: finalize browser/security evidence and truthful external
+  release blockers after the consolidated duration/editability addendum.
 - No dependency was installed and no live provider request was made.
 
 ## Completed checkpoints with current local evidence
@@ -203,17 +203,22 @@ with `git rev-parse HEAD` after checkout.
   GPL codecs; redistribution remains blocked on a release-owner legal/compliance
   decision for that exact binary and its obligations.
 
-## Known remaining work
+## Known remaining work / external blockers
 
-- Run browser acceptance at both required resolutions, full project
-  regression, startup/desktop source smokes, security matrix and final
-  self-audit.
-- Update the final closure report with evidence and truthful external blockers.
+- Live LLM/image/video/Vision/TTS, real paid multi-shot and real-user journey
+  remain blocked by missing credentials and explicit paid authorization.
+- PyInstaller/installer execution and packaged desktop acceptance require
+  missing build tools; no tool was installed silently. Code signing requires
+  an external certificate.
+- The available imageio-ffmpeg binary is GPLv3-or-later; redistribution is
+  blocked pending legal/compliance approval for that exact binary.
+- Final closure must preserve these blockers and must not mark the Release
+  Candidate gate PASS while they remain external.
 
 ## Next safe implementation step
 
-Run browser acceptance and security self-audit, then refresh the complete
-regression/startup evidence and write the final closure report.
+Keep the worktree clean, push the final closure evidence, and report the
+external live/desktop/legal blockers without weakening any gate.
 
 ## Provider provenance and remote lifecycle acceptance
 
@@ -229,7 +234,7 @@ regression/startup evidence and write the final closure report.
 - `UPSTREAM_MPT_DELTA_AUDIT=PASS`
 - `UPSTREAM_SECURITY_FIXES_RECONCILED=PASS`
 - `WINDOWS_PATH_BASELINE_FIXED=PASS`
-- `FULL_PROJECT_TEST_RESULT=944 passed, 11 skipped, 4402 subtests passed`
+- `FULL_PROJECT_TEST_RESULT=1018 passed, 11 skipped, 4402 subtests passed`
 - `NEW_REGRESSIONS=0`
 - MPT core change files: `app/asgi.py`, `app/controllers/base.py`,
   `app/controllers/v1/llm.py`, `app/controllers/v1/video.py`,
@@ -283,8 +288,8 @@ regression/startup evidence and write the final closure report.
 - `REGIONAL_PROVIDER_ENDPOINTS=PASS`
 - `PROVIDER_PRESET_RESOLUTION=PASS`
 - `NO_SILENT_CROSS_REGION_FALLBACK=PASS`
-- `REGION_AWARE_PRIVACY_DISCLOSURE=PARTIAL` (VIDEO is enforced; Story/Script
-  remote LLM and IMAGE/VISION/TTS still need the same first-transmission gate)
+- `REGION_AWARE_PRIVACY_DISCLOSURE=PASS` (LLM, IMAGE, VISION, TTS and VIDEO
+  require a current, capability-scoped disclosure before transmission)
 - `PROVIDER_SWITCH_NEW_TASKS_ONLY=PASS`
 - `PROVIDER_SELECTION_PRECEDENCE=PASS`
 - `REGIONAL_PROVIDER_SETTINGS_UI=PASS`
@@ -292,8 +297,8 @@ regression/startup evidence and write the final closure report.
 - `MAINLAND_PROVIDER_PRESET=PASS`
 - `INTERNATIONAL_PROVIDER_PRESET=PASS`
 - `CUSTOM_PROVIDER_MIX=PASS`
-- `PROVIDER_SWITCHING=PARTIAL` (configuration is complete; IMAGE/VISION/TTS
-  runtime enforcement and no-fallback evidence remain open)
+- `PROVIDER_SWITCHING=PASS` (all product capabilities resolve one exact
+  ProviderProfile; unavailable selections fail closed without fallback)
 
 ## Duration/editability addendum — durable heavy-work checkpoint
 
@@ -508,8 +513,67 @@ Checkpoint acceptance:
 
 - `PROVIDER_CONTENT_REJECTION_HANDLING=PASS`
 
-Remaining release work includes canonical IMAGE/VISION/TTS ProviderProfile
-enforcement, first-transmission Story/Script and image disclosure, Production
-UI source/regeneration controls, dependency-aware outdated propagation and
-human-editability E2E. Browser, full-repository, live, desktop and installer
-gates remain pending or externally blocked as recorded above.
+The remaining provider/UI/editability work listed in earlier checkpoints is
+closed by the final consolidated addendum checkpoint below. Live, desktop,
+installer and legal gates remain external blockers as recorded above.
+
+## Final consolidated addendum — closure evidence
+
+- Provider disclosure is one canonical `ProviderDisclosure` contract. It
+  freezes provider/model/region/endpoint identity, transmitted content types,
+  version and fingerprint. LLM, IMAGE, VISION and TTS resolve through
+  `ProviderProfileService`; missing or stale consent performs zero remote
+  calls. A structured LLM repair remains on its already-frozen selection.
+- Production Shot Board exposes candidate source projections, current
+  decision and append-only history. Preview artifacts require explicit
+  Promote. A rejected creative review exposes a real regeneration CTA that
+  calls `ProductionExecutionService` with the existing immutable snapshot;
+  the page never calls a provider or composes a snapshot.
+- `DependencyStatusService` provides one project-scoped source→current
+  revision projection, affected downstream labels and repair actions.
+  Story/Script pages show OUTDATED state, durable Draft status, dirty warnings,
+  latest-Draft cold recovery and a bounded dependency-repair CTA. Approved
+  history remains immutable.
+- Browser acceptance used the local test project at measured 1920×1080 and
+  1366×768 viewports. Dashboard, Story/Script, References and Production
+  pages rendered without horizontal overflow; screenshots are retained under
+  `.tmp/aidrama-task003-browser/` and intentionally remain untracked.
+- Stable validation after the final code checkpoints: AIDrama `387 passed,
+  11 warnings`; complete repository `1018 passed, 11 skipped, 14 warnings,
+  4402 subtests passed`; focused security/archive `35 passed, 1 warning`;
+  Python compile, `git diff --check` and secret scan pass. AIDrama and
+  original MPT Streamlit health endpoints return HTTP 200. No dependency was
+  installed and no live/paid Provider request was made.
+
+Addendum acceptance summary:
+
+- `DELIVERY_PROFILE=PASS`, `TARGET_EPISODE_DURATION=PASS`,
+  `SHOT_DURATION_EDITING=PASS`, `DURATION_BUDGET_UI=PASS`,
+  `AI_DURATION_REBALANCE=PASS`, `CREATIVE_PROVIDER_DURATION_SEPARATION=PASS`,
+  `PROVIDER_DURATION_PLANNER=PASS`, `FINAL_DURATION_CONTROL=PASS`.
+- `USER_SELECTABLE_RESOLUTION=PASS`, `NATIVE_DELIVERY_RESOLUTION_TRUTH=PASS`,
+  `PROVIDER_RESOLUTION_VALIDATION=PASS`, `DELIVERY_UPSCALE=PASS`,
+  `USER_SELECTABLE_FPS=PASS`, `NATIVE_DELIVERY_FPS_TRUTH=PASS`,
+  `PRODUCTION_QUALITY_MODE=PASS`, `PREVIEW_FINAL_GENERATION_SEPARATION=PASS`.
+- `OUTPUT_PROFILE_VERSIONING=PASS`,
+  `DURATION_CHANGE_OUTDATED_PROPAGATION=PASS`,
+  `PROJECT_OUTPUT_SETTINGS_UI=PASS`, `PRODUCTION_OUTPUT_CONFIRMATION=PASS`.
+- `HUMAN_EDITABLE_CREATIVE_PIPELINE=PASS`, `NO_SILENT_AI_OVERWRITE=PASS`,
+  `EDIT_AFTER_APPROVAL_VERSIONING=PASS`,
+  `DEPENDENCY_AWARE_OUTDATED_PROPAGATION=PASS`,
+  `SELECTIVE_REGENERATION=PASS`, `MANUAL_CREATIVE_LOCK=PASS`,
+  `IMAGE_CANDIDATE_SELECTION=PASS`, `CREATIVE_VIDEO_REGENERATION=PASS`,
+  `CURRENT_SHOT_CANDIDATE_SINGLE_TRUTH=PASS`.
+- `GENERATION_BRIEF_EDITING=PASS`, `GENERATION_OVERRIDE_PROVENANCE=PASS`,
+  `PROVIDER_PROMPT_TRACEABILITY=PASS`, `DURABLE_DRAFT_SAVE=PASS`,
+  `UNSAVED_CHANGE_PROTECTION=PASS`, `CREATIVE_DRAFT_COLD_RECOVERY=PASS`,
+  `HUMAN_EDITABILITY_E2E=PASS`, `CREATIVE_REGENERATION_E2E=PASS`.
+- `HEAVY_JOB_BACKGROUND_EXECUTION=PASS`, `DURABLE_HEAVY_JOB_MODEL=PASS`,
+  `FINAL_ASSEMBLY_NONBLOCKING=PASS`, `POST_RENDER_NONBLOCKING=PASS`,
+  `FOUR_K_RENDER_NONBLOCKING=PASS`, `LOCAL_RENDER_INTERRUPTION_RECOVERY=PASS`,
+  `TRUTHFUL_HEAVY_JOB_PROGRESS=PASS`, `LARGE_FINAL_VIDEO_EXPORT=PASS`,
+  `USER_SELECTED_EXPORT_DESTINATION=PASS`, `WINDOWS_UNICODE_PATHS=PASS`,
+  `MEDIA_COMMAND_ARGUMENT_SAFETY=PASS`, `LOCAL_RESOURCE_PREFLIGHT=PASS`,
+  `HARDWARE_CAPABILITY_TRUTH=PASS`,
+  `CONSISTENT_PROJECT_EXPORT_SNAPSHOT=PASS`.
+- `PROVIDER_CONTENT_REJECTION_HANDLING=PASS`, `V1_SCOPE_FREEZE=PASS`.
