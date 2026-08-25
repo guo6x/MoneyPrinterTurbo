@@ -60,13 +60,13 @@ class TestTaskStaticFiles(unittest.TestCase):
         self.assertEqual(accepted.status_code, 200)
         self.assertEqual(accepted.text, "protected task artifact")
 
-    def test_configured_key_does_not_protect_health_or_docs(self):
-        """健康检查和 Swagger 文档保持公开，方便部署探针与人工配置。"""
+    def test_configured_key_does_not_protect_api_documentation(self):
+        """Swagger/OpenAPI 文档保持公开，方便人工完成初始配置。"""
 
         config.app["api_key"] = "task-file-secret"
 
-        self.assertEqual(self.client.get("/ping").status_code, 200)
         self.assertEqual(self.client.get("/docs").status_code, 200)
+        self.assertEqual(self.client.get("/openapi.json").status_code, 200)
 
     def test_options_request_is_left_to_cors_middleware(self):
         """受保护文件的 CORS 预检不应被 API Key 校验提前拒绝。"""
