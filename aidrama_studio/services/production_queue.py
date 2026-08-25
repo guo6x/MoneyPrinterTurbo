@@ -22,7 +22,12 @@ from .production import ProductionService, ProductionServiceError
 from .production_orchestrator import ProductionOrchestrator, ProductionOrchestratorError
 from .production_execution import ProductionExecutionService, ProductionExecutionServiceError
 from .provider_profiles import ProviderProfileError, ProviderProfileService
-from .runtime_foundation import GenerationBriefCompiler, RuntimeFoundationError, RuntimePlanService
+from .runtime_foundation import (
+    GenerationBriefCompiler,
+    OutputProfileService,
+    RuntimeFoundationError,
+    RuntimePlanService,
+)
 
 
 def _now() -> str:
@@ -45,6 +50,13 @@ class ProductionAuthorizationPreview:
     reference_count: int
     max_paid_attempts: int
     estimated_provider_requests: int
+    target_episode_duration_seconds: float
+    native_generation_resolution: str
+    native_generation_fps: float
+    delivery_resolution: str
+    target_fps: float
+    delivery_strategy: str
+    quality_mode: str
     duration_requests_by_shot: dict[str, int]
     transmitted_content_types: tuple[str, ...]
     authorization_fingerprint: str
@@ -159,6 +171,7 @@ class ProductionQueueService:
         except (ProductionServiceError, ProviderProfileError, CapabilityUnavailable) as exc:
             raise ProductionQueueError(str(exc)) from exc
         minimum, maximum = self._duration_limits(profile.profile)
+        allowed_durations = self._allowed_durations(profile.profile)
         request_counts: dict[str, int] = {}
         shot_revision = self.repository.get_shot_revision(job.shot_plan_revision_id)
         if shot_revision is None:
@@ -168,7 +181,12 @@ class ProductionQueueService:
             duration = durations.get(production_shot.shot_id)
             if duration is None:
                 raise ProductionQueueError(f"ProductionShot 缺少冻结时长: {production_shot.shot_id}")
-            duration_plan = self.provider_profiles.plan_duration(duration, minimum=minimum, maximum=maximum)
+            duration_plan = self.provider_profiles.plan_duration(
+                duration,
+                minimum=minimum,
+                maximum=maximum,
+                allowed_durations=allowed_durations,
+            )
             if len(duration_plan.chunks) != 1:
                 raise ProductionQueueError(
                     f"镜头 {production_shot.shot_id} 需要 {len(duration_plan.chunks)} 次 provider 请求；"
@@ -179,6 +197,17 @@ class ProductionQueueService:
         reference_count = len(set(snapshot.reference_asset_versions.values()))
         content_types = ("TEXT", "REFERENCE_IMAGE") if reference_count else ("TEXT",)
         estimated_requests = sum(request_counts.values()) * int(max_paid_attempts)
+        output_profile = self._output_profile(job)
+        native_resolution = self._native_resolution(profile.profile, output_profile)
+        native_fps = self._native_fps(profile.profile)
+        delivery_resolution = output_profile.target_resolution
+        native_pixels = self._pixels(native_resolution)
+        delivery_pixels = output_profile.delivery_width * output_profile.delivery_height
+        delivery_strategy = (
+            "NATIVE" if native_resolution == delivery_resolution
+            else "DETERMINISTIC_UPSCALE" if delivery_pixels > native_pixels
+            else "DETERMINISTIC_SCALE"
+        )
         fingerprint_payload = {
             "project_id": project_id,
             "production_job_id": production_job_id,
@@ -190,6 +219,15 @@ class ProductionQueueService:
             "selection_source": resolved.source,
             "reference_count": reference_count,
             "estimated_provider_requests": estimated_requests,
+            "output_profile_id": output_profile.id,
+            "output_profile_version": output_profile.version_number,
+            "target_episode_duration_seconds": output_profile.target_episode_duration_seconds,
+            "native_generation_resolution": native_resolution,
+            "native_generation_fps": native_fps,
+            "delivery_resolution": delivery_resolution,
+            "target_fps": output_profile.target_fps,
+            "delivery_strategy": delivery_strategy,
+            "quality_mode": output_profile.quality_mode,
             "transmitted_content_types": list(content_types),
             "disclosure_version": "regional-provider-v1",
         }
@@ -204,6 +242,13 @@ class ProductionQueueService:
             reference_count=reference_count,
             max_paid_attempts=int(max_paid_attempts),
             estimated_provider_requests=estimated_requests,
+            target_episode_duration_seconds=output_profile.target_episode_duration_seconds,
+            native_generation_resolution=native_resolution,
+            native_generation_fps=native_fps,
+            delivery_resolution=delivery_resolution,
+            target_fps=output_profile.target_fps,
+            delivery_strategy=delivery_strategy,
+            quality_mode=output_profile.quality_mode,
             duration_requests_by_shot=request_counts,
             transmitted_content_types=content_types,
             authorization_fingerprint=hashlib.sha256(
@@ -262,6 +307,13 @@ class ProductionQueueService:
             ("endpoint_class", preview.endpoint_class),
             ("reference_count", preview.reference_count),
             ("estimated_provider_requests", preview.estimated_provider_requests),
+            ("target_episode_duration_seconds", preview.target_episode_duration_seconds),
+            ("native_generation_resolution", preview.native_generation_resolution),
+            ("native_generation_fps", preview.native_generation_fps),
+            ("delivery_resolution", preview.delivery_resolution),
+            ("target_fps", preview.target_fps),
+            ("delivery_strategy", preview.delivery_strategy),
+            ("quality_mode", preview.quality_mode),
             ("authorization_fingerprint", preview.authorization_fingerprint),
         ):
             supplied = authorization.get(key)
@@ -284,6 +336,13 @@ class ProductionQueueService:
             "endpoint_class": preview.endpoint_class,
             "selection_source": preview.selection_source,
             "reference_count": preview.reference_count,
+            "target_episode_duration_seconds": preview.target_episode_duration_seconds,
+            "native_generation_resolution": preview.native_generation_resolution,
+            "native_generation_fps": preview.native_generation_fps,
+            "delivery_resolution": preview.delivery_resolution,
+            "target_fps": preview.target_fps,
+            "delivery_strategy": preview.delivery_strategy,
+            "quality_mode": preview.quality_mode,
             "transmitted_content_types": list(preview.transmitted_content_types),
             "disclosure_version": "regional-provider-v1",
             "authorization_fingerprint": preview.authorization_fingerprint,
@@ -301,6 +360,7 @@ class ProductionQueueService:
                 raise ProductionQueueError("ProductionJob 缺少 Shot Plan revision")
             shot_by_id = {shot.id: shot for shot in shot_plan["content"].shots}
             minimum, maximum = self._duration_limits(provider_profile.profile)
+            allowed_durations = self._allowed_durations(provider_profile.profile)
             plan_ids: dict[str, str] = {}
             for production_shot in self.repository.list_production_shots(job.id):
                 shot = shot_by_id.get(production_shot.shot_id)
@@ -308,7 +368,8 @@ class ProductionQueueService:
                     raise ProductionQueueError(f"ProductionShot 不属于冻结 Shot Plan: {production_shot.shot_id}")
                 brief = self.brief_compiler.compile(project_id, job.id, shot.id)
                 duration_plan = self.provider_profiles.plan_duration(
-                    float(shot.duration_seconds), minimum=minimum, maximum=maximum
+                    float(shot.duration_seconds), minimum=minimum, maximum=maximum,
+                    allowed_durations=allowed_durations,
                 )
                 references = self._shot_references(snapshot.reference_asset_versions, brief)
                 plan = self.runtime_plans.create(
@@ -328,8 +389,11 @@ class ProductionQueueService:
                     generation_mode=(
                         "image_to_video" if references else "text_to_video"
                     ),
+                    resolution=preview.native_generation_resolution,
+                    native_generation_fps=preview.native_generation_fps,
                     provider_generation_duration=duration_plan.provider_duration_seconds,
                     target_creative_duration=duration_plan.target_creative_duration_seconds,
+                    duration_strategy=duration_plan.strategy,
                     audio_strategy=str(provider_profile.profile.get("audio_strategy") or "EXTERNAL_TTS"),
                     provider_parameters={
                         key: value
@@ -375,6 +439,71 @@ class ProductionQueueService:
             self.repository.update_production_job_status(job.id, ProductionJobStatus.QUEUED, updated_at=now)
         return task
 
+    def _output_profile(self, job):
+        profile = (
+            self.repository.get_output_profile(job.output_profile_id)
+            if job.output_profile_id else None
+        )
+        if profile is None:
+            profile = OutputProfileService(self.repository).ensure_for_job(
+                job.project_id, job.id
+            )
+        return profile
+
+    @staticmethod
+    def _pixels(resolution: str) -> int:
+        try:
+            width, height = (int(part) for part in resolution.lower().split("x", 1))
+        except (TypeError, ValueError) as exc:
+            raise ProductionQueueError("Provider native resolution 无效") from exc
+        return width * height
+
+    @staticmethod
+    def _native_fps(profile: Mapping[str, object]) -> float:
+        value = profile.get("native_fps", profile.get("provider_fps", 24.0))
+        try:
+            fps = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ProductionQueueError("Provider native FPS capability 无效") from exc
+        if fps <= 0 or fps > 240:
+            raise ProductionQueueError("Provider native FPS capability 无效")
+        return fps
+
+    @staticmethod
+    def _native_resolution(profile: Mapping[str, object], output_profile) -> str:
+        raw = (
+            profile.get("native_generation_resolution")
+            or profile.get("provider_resolution")
+            or profile.get("wan_resolution")
+            or profile.get("resolution")
+        )
+        supported = profile.get("supported_native_resolutions")
+        if raw is None and isinstance(supported, (list, tuple)) and supported:
+            raw = supported[-1]
+        # Legacy local/mock profiles predate capability metadata. Their
+        # explicit compatibility ceiling is 1080p and is shown as such; a 4K
+        # delivery is therefore never misrepresented as native 4K.
+        raw_text = str(raw or "1080p").strip()
+        if "x" in raw_text.lower():
+            try:
+                width, height = (
+                    int(part) for part in raw_text.lower().split("x", 1)
+                )
+            except (TypeError, ValueError) as exc:
+                raise ProductionQueueError("Provider native resolution capability 无效") from exc
+            if width < 16 or height < 16:
+                raise ProductionQueueError("Provider native resolution capability 无效")
+            return f"{width}x{height}"
+        normalized = raw_text.lower()
+        labels = {"720p": "720p", "1080p": "1080p", "1440p": "1440p", "4k": "4K"}
+        label = labels.get(normalized)
+        if label is None:
+            raise ProductionQueueError("Provider native resolution capability 无效")
+        width, height = OutputProfileService.dimensions_for(
+            label, output_profile.aspect_ratio
+        )
+        return f"{width}x{height}"
+
     def cancel_job(self, project_id: str, production_job_id: str, reason: str = "user"):
         job = self.production_service.get_job(project_id, production_job_id)
         tasks = [task for task in self.repository.list_provider_tasks(project_id) if task.execution_id is None and task.request_summary.get("production_job_id") == job.id]
@@ -412,6 +541,22 @@ class ProductionQueueService:
         except (TypeError, ValueError) as exc:
             raise ProductionQueueError("Provider duration profile 无效") from exc
         return minimum, maximum
+
+    @staticmethod
+    def _allowed_durations(profile: Mapping[str, object]) -> tuple[float, ...]:
+        raw = profile.get("supported_durations")
+        if not isinstance(raw, (list, tuple)):
+            return ()
+        values: list[float] = []
+        for item in raw:
+            try:
+                value = float(item)
+            except (TypeError, ValueError):
+                raise ProductionQueueError("Provider supported_durations 无效")
+            if value <= 0:
+                raise ProductionQueueError("Provider supported_durations 无效")
+            values.append(value)
+        return tuple(sorted(set(values)))
 
     @staticmethod
     def _shot_references(reference_versions: Mapping[str, str], brief) -> dict[str, str]:

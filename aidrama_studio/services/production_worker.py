@@ -424,6 +424,29 @@ class ProductionWorker:
             source = spec
         execution = self.execution_service.get_execution(project_id, execution_id)
         metadata.setdefault("execution_id", execution_id)
+        runtime_plan = (
+            self.execution_service.repository.get_runtime_plan(execution.runtime_plan_id)
+            if execution.runtime_plan_id else None
+        )
+        if runtime_plan is not None:
+            metadata.setdefault("quality_mode", runtime_plan.quality_mode)
+            metadata.setdefault(
+                "artifact_role",
+                "PREVIEW" if runtime_plan.quality_mode == "PREVIEW" else "FINAL_CANDIDATE",
+            )
+            metadata.setdefault(
+                "native_generation_resolution",
+                runtime_plan.native_generation_resolution,
+            )
+            metadata.setdefault(
+                "native_generation_fps", runtime_plan.native_generation_fps
+            )
+            metadata.setdefault(
+                "delivery_resolution",
+                f"{runtime_plan.delivery_width}x{runtime_plan.delivery_height}",
+            )
+            metadata.setdefault("target_fps", runtime_plan.target_fps)
+            metadata.setdefault("delivery_strategy", runtime_plan.delivery_strategy)
         if execution.input_snapshot is not None:
             shot_ids = list(execution.input_snapshot.shot_parameters)
             if shot_ids:

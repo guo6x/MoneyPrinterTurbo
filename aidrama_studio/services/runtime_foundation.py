@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Mapping
 from uuid import uuid4
@@ -30,27 +31,126 @@ class RuntimeFoundationError(RuntimeError):
 
 
 class OutputProfileService:
-    RESOLUTION_BY_RATIO = {"16:9": "1920x1080", "9:16": "1080x1920", "1:1": "1080x1080", "4:3": "1440x1080"}
+    RESOLUTION_PRESETS = {
+        "720p": (1280, 720),
+        "1080p": (1920, 1080),
+        "1440p": (2560, 1440),
+        "4K": (3840, 2160),
+    }
 
     def __init__(self, repository: ProjectRepository | None = None) -> None:
         self.repository = repository or ProjectRepository()
 
-    def create(self, project_id: str, *, aspect_ratio: str, target_duration_seconds: float, target_resolution: str | None = None, fps: float = 24.0, video_codec_target: str = "h264", audio_sample_rate: int = 48000, audio_channels: int = 2, profile_id: str | None = None) -> OutputProfile:
+    def create(
+        self,
+        project_id: str,
+        *,
+        aspect_ratio: str,
+        target_episode_duration_seconds: float | None = None,
+        delivery_resolution_label: str = "1080p",
+        delivery_width: int | None = None,
+        delivery_height: int | None = None,
+        target_fps: float = 24.0,
+        target_video_codec: str = "h264",
+        target_audio_sample_rate: int = 48000,
+        target_audio_channels: int = 2,
+        quality_mode: str = "STANDARD",
+        make_project_default: bool = True,
+        profile_id: str | None = None,
+        # Compatibility inputs from the pre-V1 profile API.
+        target_duration_seconds: float | None = None,
+        target_resolution: str | None = None,
+        fps: float | None = None,
+        video_codec_target: str | None = None,
+        audio_sample_rate: int | None = None,
+        audio_channels: int | None = None,
+    ) -> OutputProfile:
         if self.repository.get_project(project_id) is None:
             raise RuntimeFoundationError(f"项目不存在: {project_id}")
+        duration = (
+            target_episode_duration_seconds
+            if target_episode_duration_seconds is not None
+            else target_duration_seconds
+        )
+        if duration is None:
+            raise RuntimeFoundationError("OutputProfile 缺少目标成片时长")
+        if target_resolution:
+            match = re.fullmatch(r"(\d{2,5})x(\d{2,5})", target_resolution.lower())
+            if match is None:
+                raise RuntimeFoundationError("OutputProfile resolution 必须为 WIDTHxHEIGHT")
+            delivery_width = int(match.group(1))
+            delivery_height = int(match.group(2))
+            if delivery_resolution_label == "1080p":
+                delivery_resolution_label = self.label_for_dimensions(delivery_width, delivery_height)
+        if delivery_width is None or delivery_height is None:
+            delivery_width, delivery_height = self.dimensions_for(
+                delivery_resolution_label, aspect_ratio
+            )
+        profiles = self.repository.list_output_profiles(project_id)
         profile = OutputProfile(
             id=profile_id or uuid4().hex,
             project_id=project_id,
+            version_number=max((item.version_number for item in profiles), default=0) + 1,
+            is_project_default=make_project_default,
             aspect_ratio=aspect_ratio,
-            target_duration_seconds=target_duration_seconds,
-            target_resolution=target_resolution or self.RESOLUTION_BY_RATIO.get(aspect_ratio, "1920x1080"),
-            fps=fps,
-            video_codec_target=video_codec_target,
-            audio_sample_rate=audio_sample_rate,
-            audio_channels=audio_channels,
+            target_episode_duration_seconds=duration,
+            delivery_width=delivery_width,
+            delivery_height=delivery_height,
+            delivery_resolution_label=delivery_resolution_label,
+            target_fps=fps if fps is not None else target_fps,
+            target_video_codec=video_codec_target or target_video_codec,
+            target_audio_sample_rate=audio_sample_rate or target_audio_sample_rate,
+            target_audio_channels=audio_channels or target_audio_channels,
+            quality_mode=quality_mode,
             created_at=_now(),
         )
         return self.repository.create_output_profile(profile)
+
+    def current(self, project_id: str) -> OutputProfile | None:
+        if self.repository.get_project(project_id) is None:
+            raise RuntimeFoundationError(f"项目不存在: {project_id}")
+        return self.repository.get_current_output_profile(project_id)
+
+    def ensure_for_project(self, project_id: str) -> OutputProfile:
+        current = self.current(project_id)
+        if current is not None:
+            return current
+        project = self.repository.get_project(project_id)
+        if project is None:
+            raise RuntimeFoundationError(f"项目不存在: {project_id}")
+        return self.create(
+            project_id,
+            aspect_ratio=project.aspect_ratio.value,
+            target_episode_duration_seconds=float(project.target_duration_seconds),
+        )
+
+    @classmethod
+    def dimensions_for(cls, label: str, aspect_ratio: str) -> tuple[int, int]:
+        if label not in cls.RESOLUTION_PRESETS:
+            raise RuntimeFoundationError(f"不支持的画质预设: {label}")
+        width, height = cls.RESOLUTION_PRESETS[label]
+        if aspect_ratio == "9:16":
+            return height, width
+        if aspect_ratio == "1:1":
+            return height, height
+        if aspect_ratio == "4:3":
+            return round(height * 4 / 3), height
+        if aspect_ratio != "16:9":
+            raise RuntimeFoundationError(f"不支持的画幅: {aspect_ratio}")
+        return width, height
+
+    @staticmethod
+    def label_for_dimensions(width: int, height: int) -> str:
+        long_edge, short_edge = max(width, height), min(width, height)
+        if long_edge >= 3840 or short_edge >= 2160:
+            return "4K"
+        if long_edge >= 2560 or short_edge >= 1440:
+            return "1440p"
+        if long_edge >= 1920 or short_edge >= 1080:
+            return "1080p"
+        if long_edge >= 1280 or short_edge >= 720:
+            return "720p"
+        return f"{width}x{height}"
 
     def ensure_for_job(self, project_id: str, job_id: str) -> OutputProfile:
         job = self.repository.get_production_job(job_id)
@@ -60,14 +160,7 @@ class OutputProfileService:
             profile = self.repository.get_output_profile(job.output_profile_id)
             if profile is not None:
                 return profile
-        project = self.repository.get_project(project_id)
-        if project is None:
-            raise RuntimeFoundationError(f"项目不存在: {project_id}")
-        profile = self.create(
-            project_id,
-            aspect_ratio=project.aspect_ratio.value,
-            target_duration_seconds=float(project.target_duration_seconds),
-        )
+        profile = self.ensure_for_project(project_id)
         self.repository.set_production_job_output_profile(job.id, profile.id)
         return profile
 
@@ -141,12 +234,26 @@ class RuntimePlanService:
         self.repository = repository or ProjectRepository()
         self.profiles = OutputProfileService(self.repository)
 
-    def create(self, project_id: str, *, production_job_id: str | None, brief: GenerationBrief, provider_capability: str, provider_id: str, model_id: str, endpoint_profile_id: str | None = None, deployment_region: str = "UNSPECIFIED", endpoint_class: str = "UNSPECIFIED", credential_reference: str | None = None, selection_source: str = "LEGACY", transmitted_content_types: list[str] | tuple[str, ...] = (), estimated_request_count: int = 1, generation_mode: str = "text_to_video", resolution: str | None = None, provider_generation_duration: float | None = None, target_creative_duration: float | None = None, audio_strategy: str = "provider_or_post", provider_parameters: Mapping[str, Any] | None = None, reference_version_ids: list[str] | tuple[str, ...] = (), reference_roles: Mapping[str, str] | None = None, continuity_strategy: str = "shot-local", authorization: Mapping[str, Any] | None = None, prompt_template_version: str = "v1", plan_id: str | None = None) -> RuntimePlan:
+    def create(self, project_id: str, *, production_job_id: str | None, brief: GenerationBrief, provider_capability: str, provider_id: str, model_id: str, endpoint_profile_id: str | None = None, deployment_region: str = "UNSPECIFIED", endpoint_class: str = "UNSPECIFIED", credential_reference: str | None = None, selection_source: str = "LEGACY", transmitted_content_types: list[str] | tuple[str, ...] = (), estimated_request_count: int = 1, generation_mode: str = "text_to_video", resolution: str | None = None, native_generation_fps: float = 24.0, provider_generation_duration: float | None = None, target_creative_duration: float | None = None, duration_strategy: str = "EXACT", audio_strategy: str = "provider_or_post", provider_parameters: Mapping[str, Any] | None = None, reference_version_ids: list[str] | tuple[str, ...] = (), reference_roles: Mapping[str, str] | None = None, continuity_strategy: str = "shot-local", authorization: Mapping[str, Any] | None = None, prompt_template_version: str = "v1", plan_id: str | None = None) -> RuntimePlan:
         if brief.project_id != project_id or (production_job_id is not None and brief.production_job_id != production_job_id):
             raise RuntimeFoundationError("GenerationBrief provenance 不匹配")
         profile = self.profiles.ensure_for_job(project_id, production_job_id) if production_job_id else None
         profile_data = profile.model_dump(mode="json") if profile else {}
         profile_hash = _hash(profile_data)
+        native_resolution = resolution or (profile.target_resolution if profile else "1920x1080")
+        native_match = re.fullmatch(r"(\d{2,5})x(\d{2,5})", native_resolution.lower())
+        if native_match is None:
+            raise RuntimeFoundationError("provider-native resolution 必须为 WIDTHxHEIGHT")
+        native_width, native_height = int(native_match.group(1)), int(native_match.group(2))
+        delivery_width = profile.delivery_width if profile else native_width
+        delivery_height = profile.delivery_height if profile else native_height
+        delivery_pixels = delivery_width * delivery_height
+        native_pixels = native_width * native_height
+        delivery_strategy = (
+            "NATIVE" if (native_width, native_height) == (delivery_width, delivery_height)
+            else "DETERMINISTIC_UPSCALE" if delivery_pixels > native_pixels
+            else "DETERMINISTIC_SCALE"
+        )
         payload = {
             "provider_capability": provider_capability, "provider_id": provider_id, "model_id": model_id,
             "endpoint_profile_id": endpoint_profile_id,
@@ -156,9 +263,17 @@ class RuntimePlanService:
             "selection_source": selection_source,
             "transmitted_content_types": list(transmitted_content_types),
             "estimated_request_count": int(estimated_request_count),
-            "generation_mode": generation_mode, "resolution": resolution or (profile.target_resolution if profile else "1920x1080"),
+            "generation_mode": generation_mode,
+            "native_generation_resolution": native_resolution,
+            "native_generation_fps": native_generation_fps,
+            "delivery_width": delivery_width,
+            "delivery_height": delivery_height,
+            "target_fps": profile.target_fps if profile else native_generation_fps,
+            "delivery_strategy": delivery_strategy,
+            "quality_mode": profile.quality_mode if profile else "STANDARD",
             "provider_generation_duration": provider_generation_duration or brief.target_duration_seconds,
             "target_creative_duration": target_creative_duration or brief.target_duration_seconds,
+            "duration_strategy": duration_strategy,
             "audio_strategy": audio_strategy, "provider_parameters": _redact(dict(provider_parameters or {})),
             "reference_version_ids": list(reference_version_ids), "reference_roles": dict(reference_roles or {}),
             "continuity_strategy": continuity_strategy, "generation_brief_hash": brief.sha256,

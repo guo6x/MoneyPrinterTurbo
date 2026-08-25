@@ -34,6 +34,9 @@ class ProjectService:
         target_duration_seconds: int = 60,
         *,
         status: ProjectStatus | str = ProjectStatus.DRAFT,
+        delivery_resolution_label: str = "1080p",
+        target_fps: float = 30.0,
+        quality_mode: str = "STANDARD",
     ) -> Project:
         now = utc_now_iso()
         project = Project(
@@ -50,7 +53,22 @@ class ProjectService:
         try:
             directory.mkdir(parents=True, exist_ok=False)
             self.repository.create_project(project)
+            # The project-level OutputProfile is the canonical versioned
+            # delivery intent. Project duration/aspect remain synchronized
+            # compatibility projections used by creative planning.
+            from .runtime_foundation import OutputProfileService
+
+            OutputProfileService(self.repository).create(
+                project.id,
+                aspect_ratio=project.aspect_ratio.value,
+                target_episode_duration_seconds=float(project.target_duration_seconds),
+                delivery_resolution_label=delivery_resolution_label,
+                target_fps=target_fps,
+                quality_mode=quality_mode,
+            )
         except Exception:
+            with self.repository.transaction() as connection:
+                connection.execute("DELETE FROM projects WHERE id=?", (project.id,))
             if directory.exists() and not any(directory.iterdir()):
                 directory.rmdir()
             raise
@@ -79,6 +97,9 @@ class ProjectService:
         status: ProjectStatus | str,
         aspect_ratio: AspectRatio | str,
         target_duration_seconds: int,
+        delivery_resolution_label: str | None = None,
+        target_fps: float | None = None,
+        quality_mode: str | None = None,
     ) -> Project:
         existing = self.get(project_id)
         if existing is None:
@@ -89,14 +110,42 @@ class ProjectService:
 
             if CurrentProductionStateService(self.repository).workflow_stage(project_id) is not ProjectStatus.COMPLETED:
                 raise ValueError("项目尚未完成当前 canonical production/post chain")
+        requested_aspect = AspectRatio(aspect_ratio)
+        requested_duration = int(target_duration_seconds)
         updated = existing.with_updates(
             title=title.strip(),
             description=description.strip(),
             status=requested_status,
-            aspect_ratio=AspectRatio(aspect_ratio),
-            target_duration_seconds=int(target_duration_seconds),
+            aspect_ratio=requested_aspect,
+            target_duration_seconds=requested_duration,
         )
-        return self.repository.update_project(updated)
+        saved = self.repository.update_project(updated)
+        from .runtime_foundation import OutputProfileService
+
+        profiles = OutputProfileService(self.repository)
+        current = profiles.ensure_for_project(project_id)
+        next_resolution = delivery_resolution_label or current.delivery_resolution_label
+        next_fps = target_fps if target_fps is not None else current.target_fps
+        next_quality = quality_mode or current.quality_mode
+        if (
+            requested_aspect.value != current.aspect_ratio
+            or float(requested_duration) != current.target_episode_duration_seconds
+            or next_resolution != current.delivery_resolution_label
+            or float(next_fps) != current.target_fps
+            or next_quality != current.quality_mode
+        ):
+            profiles.create(
+                project_id,
+                aspect_ratio=requested_aspect.value,
+                target_episode_duration_seconds=float(requested_duration),
+                delivery_resolution_label=next_resolution,
+                target_fps=float(next_fps),
+                target_video_codec=current.target_video_codec,
+                target_audio_sample_rate=current.target_audio_sample_rate,
+                target_audio_channels=current.target_audio_channels,
+                quality_mode=next_quality,
+            )
+        return saved
 
     def delete(
         self, project_id: str, *, confirmed: bool = False

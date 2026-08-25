@@ -179,11 +179,9 @@ class ProductionService:
             raise ProductionServiceError("只有 APPROVED Shot Plan 可以创建 ProductionJob")
         readiness = self.validate_job_readiness(project_id, plan["id"])
         now = _now()
-        profile = OutputProfileService(self.repository).create(
-            project_id,
-            aspect_ratio=self.repository.get_project(project_id).aspect_ratio.value,
-            target_duration_seconds=float(self.repository.get_project(project_id).target_duration_seconds),
-        )
+        # Pin the current project OutputProfile. Later project setting changes
+        # create a new profile version and never rewrite this job's truth.
+        profile = OutputProfileService(self.repository).ensure_for_project(project_id)
         job = ProductionJob(
             id=uuid4().hex,
             project_id=project_id,

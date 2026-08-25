@@ -128,17 +128,26 @@ class MPTFinalAssemblyAdapter(FinalAssemblyRuntimeAdapter):
         try:
             concat_video_clips_with_ffmpeg([str(path) for path in request.source_paths], str(temporary), self.threads, str(output_path.parent))
             binary = self.ffmpeg_binary or self._resolve_ffmpeg()
-            resolution = str(profile.get("target_resolution") or "").lower()
+            if profile.get("delivery_width") and profile.get("delivery_height"):
+                resolution = (
+                    f"{int(profile['delivery_width'])}x{int(profile['delivery_height'])}"
+                )
+            else:
+                resolution = str(profile.get("target_resolution") or "").lower()
             match = re.fullmatch(r"(\d{2,5})x(\d{2,5})", resolution)
             if match is None:
                 raise FinalAssemblyRuntimeError("OutputProfile target_resolution 无效")
             width, height = match.groups()
-            fps = float(profile.get("fps") or 30)
+            fps = float(profile.get("target_fps") or profile.get("fps") or 30)
             if fps <= 0 or fps > 240:
                 raise FinalAssemblyRuntimeError("OutputProfile fps 无效")
-            codec = str(profile.get("video_codec_target") or "h264").lower()
+            codec = str(
+                profile.get("target_video_codec")
+                or profile.get("video_codec_target")
+                or "h264"
+            ).lower()
             video_codec = "libx265" if "265" in codec or "hevc" in codec else "libx264"
-            command = [binary, "-hide_banner", "-loglevel", "error", "-y", "-i", str(temporary), "-map", "0:v:0", "-map", "0:a?", "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps:g}", "-c:v", video_codec, "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", str(int(profile.get("audio_sample_rate") or 48000)), "-ac", str(int(profile.get("audio_channels") or 2)), str(output_path)]
+            command = [binary, "-hide_banner", "-loglevel", "error", "-y", "-i", str(temporary), "-map", "0:v:0", "-map", "0:a?", "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps:g}", "-c:v", video_codec, "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", str(int(profile.get("target_audio_sample_rate") or profile.get("audio_sample_rate") or 48000)), "-ac", str(int(profile.get("target_audio_channels") or profile.get("audio_channels") or 2)), str(output_path)]
             result = subprocess.run(command, capture_output=True, text=True, timeout=900, check=False)
             if result.returncode != 0 or not output_path.is_file() or output_path.stat().st_size <= 0:
                 raise FinalAssemblyRuntimeError("Final Assembly OutputProfile normalization failed")

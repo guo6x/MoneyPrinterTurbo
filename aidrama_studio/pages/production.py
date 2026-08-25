@@ -681,6 +681,29 @@ def _render_primary_action(orchestrator, production_service, project, job, readi
         cols = st.columns(2)
         cols[0].metric("区域 / 部署类型", f"{preview.deployment_region} / {preview.endpoint_class}")
         cols[1].metric("参考图数量", preview.reference_count)
+        cols = st.columns(2)
+        cols[0].metric("目标成片时长", f"{preview.target_episode_duration_seconds:g}s")
+        cols[1].metric("镜头数量", preview.shot_count)
+        cols = st.columns(2)
+        cols[0].metric(
+            "Provider 原生生成",
+            f"{preview.native_generation_resolution} · {preview.native_generation_fps:g}fps",
+        )
+        cols[1].metric(
+            "最终交付",
+            f"{preview.delivery_resolution} · {preview.target_fps:g}fps",
+        )
+        if preview.delivery_strategy == "DETERMINISTIC_UPSCALE":
+            st.info(
+                f"{preview.native_generation_resolution} AI 生成 → "
+                f"{preview.delivery_resolution} 确定性输出放大（不是原生 4K，也不是 AI 超分辨率）。"
+            )
+        elif preview.delivery_strategy == "DETERMINISTIC_SCALE":
+            st.info(
+                f"Provider 原生 {preview.native_generation_resolution} → "
+                f"交付 {preview.delivery_resolution} 确定性缩放。"
+            )
+        st.caption(f"生成质量：{preview.quality_mode} · 以上参数将冻结到实际 RuntimePlan。")
         st.caption(
             f"最大付费尝试：每镜头 {preview.max_paid_attempts} 次 · "
             f"预计最多 {preview.estimated_provider_requests} 次 Provider 请求。"
@@ -719,6 +742,13 @@ def _render_primary_action(orchestrator, production_service, project, job, readi
                 "reference_count": preview.reference_count,
                 "max_paid_attempts": preview.max_paid_attempts,
                 "estimated_provider_requests": preview.estimated_provider_requests,
+                "target_episode_duration_seconds": preview.target_episode_duration_seconds,
+                "native_generation_resolution": preview.native_generation_resolution,
+                "native_generation_fps": preview.native_generation_fps,
+                "delivery_resolution": preview.delivery_resolution,
+                "target_fps": preview.target_fps,
+                "delivery_strategy": preview.delivery_strategy,
+                "quality_mode": preview.quality_mode,
                 "authorization_fingerprint": preview.authorization_fingerprint,
             }
     if st.button(

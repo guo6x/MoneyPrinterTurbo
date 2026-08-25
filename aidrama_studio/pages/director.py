@@ -122,8 +122,31 @@ def _render_shot_plan(project) -> None:
     ids = [_value(p, "id") for p in plans]; current = st.session_state.get("director_plan_id", ids[0]); current = current if current in ids else ids[0]
     plan = plans[ids.index(current)]; st.session_state.director_plan_id = current
     shots_now = _value(plan, "shots", []) or []
-    m1,m2,m3,m4 = st.columns(4); m1.metric("Total Shots", len(shots_now)); m2.metric("Total Duration", f"{sum(float(_value(s,'duration_seconds',0) or 0) for s in shots_now):g}s"); m3.metric("Target Duration", f"{project.target_duration_seconds}s"); m4.metric("Status", _status(plan))
+    planned_duration = sum(float(_value(s,'duration_seconds',0) or 0) for s in shots_now)
+    difference = float(project.target_duration_seconds) - planned_duration
+    m1,m2,m3,m4,m5 = st.columns(5)
+    m1.metric("Total Shots", len(shots_now))
+    m2.metric("Current", f"{planned_duration:g}s")
+    m3.metric("Target", f"{project.target_duration_seconds}s")
+    m4.metric("Remaining" if difference >= 0 else "Over target", f"{abs(difference):g}s")
+    m5.metric("Status", _status(plan))
     st.caption(f"LOW {sum(1 for s in shots_now if _status({'status':_value(s,'risk_level','LOW')}) == 'LOW')} · MEDIUM {sum(1 for s in shots_now if _value(s,'risk_level','LOW') == 'MEDIUM')} · HIGH {sum(1 for s in shots_now if _value(s,'risk_level','LOW') == 'HIGH')} · Locked {sum(1 for s in shots_now if _value(s,'status','PLANNED') == 'LOCKED')}")
+    if st.button("AI 时长重平衡建议", key=f"duration-rebalance-{current}"):
+        try:
+            proposal = service.recommend_duration_rebalance(current, project.target_duration_seconds)
+            st.session_state[f"duration-proposal-{current}"] = proposal
+        except (ShotServiceError, ValueError, KeyError) as exc:
+            st.error(str(exc))
+    proposal = st.session_state.get(f"duration-proposal-{current}")
+    if proposal:
+        if not proposal.get("feasible"):
+            st.warning("锁定镜头时长已占满目标预算；建议保持为只读，先显式解锁或调整目标时长。")
+        elif not proposal.get("suggestions"):
+            st.success("当前时长已经接近目标，无需调整。")
+        else:
+            st.info("以下仅为建议，不会覆盖手工编辑、锁定镜头或历史批准版本。")
+            for item in proposal["suggestions"]:
+                st.caption(f"{item['shot_id']} · {item['from_seconds']:g}s → {item['to_seconds']:g}s")
     _editor(service, project, plan)
     st.markdown("#### Preview / 版本历史")
     if st.button("打开 Shot List Preview", key=f"preview-{current}"):

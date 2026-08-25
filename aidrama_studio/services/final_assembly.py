@@ -239,6 +239,9 @@ class FinalAssemblyService:
                 if not self._is_supported_video_artifact(artifact):
                     last_reason = "artifact 不是受支持的视频 artifact"
                     continue
+                if artifact.metadata_json.get("artifact_role") == "PREVIEW":
+                    last_reason = "Preview artifact 未经显式提升，不能作为最终成片来源"
+                    continue
                 try:
                     source_path = self._validate_source_path(project_id, artifact.path)
                 except FinalAssemblyServiceError as exc:

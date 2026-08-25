@@ -290,6 +290,13 @@ class Orchestrator:
             shot_count=1,
             max_paid_attempts=1,
             estimated_provider_requests=1,
+            target_episode_duration_seconds=120,
+            native_generation_resolution='1920x1080',
+            native_generation_fps=24,
+            delivery_resolution='3840x2160',
+            target_fps=30,
+            delivery_strategy='DETERMINISTIC_UPSCALE',
+            quality_mode='HIGH',
             transmitted_content_types=('TEXT', 'REFERENCE_IMAGE'),
             authorization_fingerprint='a' * 64,
         )
@@ -308,6 +315,11 @@ page._render_primary_action(
     assert metrics["模型"] == "video-model-v1"
     assert metrics["区域 / 部署类型"] == "MAINLAND_CHINA / CN_VIDEO_PUBLIC"
     assert metrics["参考图数量"] == "2"
+    assert metrics["目标成片时长"] == "120s"
+    assert metrics["Provider 原生生成"] == "1920x1080 · 24fps"
+    assert metrics["最终交付"] == "3840x2160 · 30fps"
+    info = "\n".join(str(item.value) for item in app.info)
+    assert "不是原生 4K" in info
     warning = "\n".join(str(item.value) for item in app.warning)
     assert "CN_VIDEO" in warning
     assert "MAINLAND_CHINA" in warning

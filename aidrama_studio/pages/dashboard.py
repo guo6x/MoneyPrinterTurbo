@@ -159,6 +159,21 @@ def _create_project_form(service: ProjectService) -> None:
                 step=15,
                 help="常用：30 / 45 / 60 / 90 / 120 秒，也可自定义。",
             )
+            delivery_resolution = st.selectbox(
+                "最终画质", ["720p", "1080p", "1440p", "4K"], index=1,
+                help="这是最终交付分辨率；若 Provider 原生分辨率较低，会明确显示并走确定性放大。",
+            )
+            target_fps = st.selectbox("最终帧率", [24, 25, 30, 60], index=2)
+            quality_mode = st.selectbox(
+                "生成质量",
+                ["PREVIEW", "STANDARD", "HIGH", "FINAL"],
+                index=1,
+                format_func=lambda value: {
+                    "PREVIEW": "快速预览", "STANDARD": "标准制作",
+                    "HIGH": "高质量", "FINAL": "最终成片",
+                }[value],
+                help="质量模式会冻结到新 RuntimePlan；预览产物不会自动成为最终成片来源。",
+            )
             submitted = st.form_submit_button(
                 "创建并进入创意与剧本", type="primary", use_container_width=True
             )
@@ -169,6 +184,9 @@ def _create_project_form(service: ProjectService) -> None:
                     description=description,
                     aspect_ratio=aspect,
                     target_duration_seconds=int(duration),
+                    delivery_resolution_label=delivery_resolution,
+                    target_fps=float(target_fps),
+                    quality_mode=quality_mode,
                 )
             except (ValueError, OSError) as exc:
                 logger.warning(f"invalid AIDrama project creation: {exc}")
@@ -184,6 +202,9 @@ def _create_project_form(service: ProjectService) -> None:
 
 
 def _edit_project(service: ProjectService, project: Project) -> None:
+    from aidrama_studio.services.runtime_foundation import OutputProfileService
+
+    output_profile = OutputProfileService(service.repository).ensure_for_project(project.id)
     with st.container(border=True):
         st.markdown(f"#### 编辑项目 · {project.title}")
         with st.form(f"edit-project-{project.id}"):
@@ -212,6 +233,37 @@ def _edit_project(service: ProjectService, project: Project) -> None:
                 value=project.target_duration_seconds,
                 step=15,
             )
+            resolutions = ["720p", "1080p", "1440p", "4K"]
+            delivery_resolution = st.selectbox(
+                "最终画质",
+                resolutions,
+                index=(
+                    resolutions.index(output_profile.delivery_resolution_label)
+                    if output_profile.delivery_resolution_label in resolutions else 1
+                ),
+            )
+            frame_rates = [24, 25, 30, 60]
+            current_fps = int(output_profile.target_fps)
+            target_fps = st.selectbox(
+                "最终帧率",
+                frame_rates,
+                index=frame_rates.index(current_fps) if current_fps in frame_rates else 2,
+            )
+            quality_modes = ["PREVIEW", "STANDARD", "HIGH", "FINAL"]
+            quality_mode = st.selectbox(
+                "生成质量",
+                quality_modes,
+                index=quality_modes.index(output_profile.quality_mode),
+                format_func=lambda value: {
+                    "PREVIEW": "快速预览", "STANDARD": "标准制作",
+                    "HIGH": "高质量", "FINAL": "最终成片",
+                }[value],
+            )
+            st.caption(
+                f"当前 OutputProfile v{output_profile.version_number} · "
+                f"{output_profile.delivery_width}×{output_profile.delivery_height} · "
+                "保存变更会创建新版本，只影响新的 ProductionJob / RuntimePlan。"
+            )
             save_col, cancel_col = st.columns(2)
             save = save_col.form_submit_button(
                 "保存", type="primary", use_container_width=True
@@ -229,6 +281,9 @@ def _edit_project(service: ProjectService, project: Project) -> None:
                     status=status,
                     aspect_ratio=aspect,
                     target_duration_seconds=int(duration),
+                    delivery_resolution_label=delivery_resolution,
+                    target_fps=float(target_fps),
+                    quality_mode=quality_mode,
                 )
             except (ValueError, KeyError) as exc:
                 st.error(str(exc))

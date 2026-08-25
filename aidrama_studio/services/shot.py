@@ -38,6 +38,30 @@ class ShotService:
             if s.source_script_beat_ids: reasons.append("KEY_STORY_BEAT")
             s.risk_level=RiskLevel.HIGH if len(reasons)>=2 else RiskLevel.MEDIUM if reasons else RiskLevel.LOW; s.risk_reasons=reasons
         return plan
+    def recommend_duration_rebalance(self,rev_or_id,target_duration_seconds):
+        """Return an advisory duration proposal without mutating the revision.
+
+        Manually locked shots are immutable inputs to the recommendation.
+        Applying a proposal remains a separate explicit Save Draft action.
+        """
+        rev=self.get_revision(rev_or_id) if isinstance(rev_or_id,str) else rev_or_id
+        if not rev: raise ShotServiceError("Shot Plan revision 不存在")
+        target=float(target_duration_seconds)
+        if target<=0: raise ShotServiceError("目标时长必须大于 0")
+        shots=rev["content"].shots
+        locked_total=sum(float(s.duration_seconds) for s in shots if s.status is ShotStatus.LOCKED)
+        unlocked=[s for s in shots if s.status is not ShotStatus.LOCKED]
+        unlocked_total=sum(float(s.duration_seconds) for s in unlocked)
+        available=target-locked_total
+        if available<=0 or not unlocked or unlocked_total<=0:
+            return {"target":target,"current":sum(float(s.duration_seconds) for s in shots),"locked_total":locked_total,"feasible":False,"suggestions":[]}
+        scale=available/unlocked_total
+        suggestions=[]
+        for shot in unlocked:
+            proposed=max(0.1,round(float(shot.duration_seconds)*scale,1))
+            if abs(proposed-float(shot.duration_seconds))>=0.05:
+                suggestions.append({"shot_id":shot.id,"from_seconds":float(shot.duration_seconds),"to_seconds":proposed})
+        return {"target":target,"current":sum(float(s.duration_seconds) for s in shots),"locked_total":locked_total,"feasible":True,"suggestions":suggestions}
     def validate_plan(self,rev_or_plan,project=None,*,block_extreme=False):
         rev=rev_or_plan if isinstance(rev_or_plan,dict) else None; plan=rev["content"] if rev else rev_or_plan; script,story=self._story_script(rev["project_id"] if rev else project.id); plan.validate_against(script["content"],story["content"]); self.recalculate_risk_if_needed(plan)
         if block_extreme and project and abs(plan.total_duration_seconds-project.target_duration_seconds)>project.target_duration_seconds*.30: raise ValueError("Shot duration exceeds ±30% blocking threshold")

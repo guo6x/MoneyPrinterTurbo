@@ -2206,9 +2206,14 @@ class ProjectRepository:
     def _output_profile_from_row(row) -> OutputProfile:
         return OutputProfile(
             id=row["id"], project_id=row["project_id"], aspect_ratio=row["aspect_ratio"],
-            target_duration_seconds=row["target_duration_seconds"], target_resolution=row["target_resolution"],
-            fps=row["fps"], video_codec_target=row["video_codec_target"],
-            audio_sample_rate=row["audio_sample_rate"], audio_channels=row["audio_channels"],
+            version_number=row["version_number"],
+            is_project_default=bool(row["is_project_default"]),
+            target_episode_duration_seconds=row["target_episode_duration_seconds"],
+            delivery_width=row["delivery_width"], delivery_height=row["delivery_height"],
+            delivery_resolution_label=row["delivery_resolution_label"],
+            target_fps=row["target_fps"], target_video_codec=row["target_video_codec"],
+            target_audio_sample_rate=row["target_audio_sample_rate"],
+            target_audio_channels=row["target_audio_channels"], quality_mode=row["quality_mode"],
             created_at=row["created_at"],
         )
 
@@ -2216,12 +2221,24 @@ class ProjectRepository:
         with connect(self.paths.database) as connection:
             if not self._project_exists(connection, profile.project_id):
                 raise KeyError(f"项目不存在: {profile.project_id}")
+            if profile.is_project_default:
+                connection.execute(
+                    "UPDATE output_profiles SET is_project_default=0 WHERE project_id=?",
+                    (profile.project_id,),
+                )
             connection.execute(
                 "INSERT INTO output_profiles(id,project_id,aspect_ratio,target_duration_seconds,target_resolution,fps,"
-                "video_codec_target,audio_sample_rate,audio_channels,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "video_codec_target,audio_sample_rate,audio_channels,version_number,is_project_default,"
+                "target_episode_duration_seconds,delivery_width,delivery_height,delivery_resolution_label,"
+                "target_fps,target_video_codec,target_audio_sample_rate,target_audio_channels,quality_mode,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (profile.id, profile.project_id, profile.aspect_ratio, profile.target_duration_seconds,
                  profile.target_resolution, profile.fps, profile.video_codec_target, profile.audio_sample_rate,
-                 profile.audio_channels, profile.created_at),
+                 profile.audio_channels, profile.version_number, int(profile.is_project_default),
+                 profile.target_episode_duration_seconds, profile.delivery_width, profile.delivery_height,
+                 profile.delivery_resolution_label, profile.target_fps, profile.target_video_codec,
+                 profile.target_audio_sample_rate, profile.target_audio_channels, profile.quality_mode,
+                 profile.created_at),
             )
         return self.get_output_profile(profile.id)
 
@@ -2232,8 +2249,17 @@ class ProjectRepository:
 
     def list_output_profiles(self, project_id: str) -> list[OutputProfile]:
         with connect(self.paths.database) as connection:
-            rows = connection.execute("SELECT * FROM output_profiles WHERE project_id=? ORDER BY created_at,id", (project_id,)).fetchall()
+            rows = connection.execute("SELECT * FROM output_profiles WHERE project_id=? ORDER BY version_number,id", (project_id,)).fetchall()
         return [self._output_profile_from_row(row) for row in rows]
+
+    def get_current_output_profile(self, project_id: str) -> OutputProfile | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM output_profiles WHERE project_id=? AND is_project_default=1 "
+                "ORDER BY version_number DESC,id DESC LIMIT 1",
+                (project_id,),
+            ).fetchone()
+        return self._output_profile_from_row(row) if row else None
 
     @staticmethod
     def _generation_brief_from_row(row) -> GenerationBrief:
@@ -2282,8 +2308,13 @@ class ProjectRepository:
             selection_source=row["selection_source"],
             transmitted_content_types=tuple(json.loads(row["transmitted_content_types_json"])),
             estimated_request_count=row["estimated_request_count"],
-            resolution=row["resolution"], provider_generation_duration=row["provider_generation_duration"],
-            target_creative_duration=row["target_creative_duration"], audio_strategy=row["audio_strategy"],
+            native_generation_resolution=row["native_generation_resolution"],
+            native_generation_fps=row["native_generation_fps"],
+            delivery_width=row["delivery_width"], delivery_height=row["delivery_height"],
+            target_fps=row["target_fps"], delivery_strategy=row["delivery_strategy"],
+            quality_mode=row["quality_mode"], provider_generation_duration=row["provider_generation_duration"],
+            target_creative_duration=row["target_creative_duration"],
+            duration_strategy=row["duration_strategy"], audio_strategy=row["audio_strategy"],
             provider_parameters=json.loads(row["provider_parameters_json"]),
             reference_version_ids=tuple(json.loads(row["reference_version_ids_json"])),
             reference_roles=json.loads(row["reference_roles_json"]),
@@ -2300,20 +2331,24 @@ class ProjectRepository:
                 "INSERT INTO runtime_plans(id,project_id,production_job_id,execution_id,output_profile_id,generation_brief_id,"
                 "provider_capability,provider_id,model_id,endpoint_profile_id,deployment_region,endpoint_class,credential_reference,selection_source,"
                 "transmitted_content_types_json,estimated_request_count,generation_mode,resolution,provider_generation_duration,target_creative_duration,"
-                "audio_strategy,provider_parameters_json,reference_version_ids_json,reference_roles_json,continuity_strategy,"
-                "generation_brief_hash,output_profile_hash,authorization_json,prompt_template_version,plan_hash,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "duration_strategy,audio_strategy,provider_parameters_json,reference_version_ids_json,reference_roles_json,continuity_strategy,"
+                "generation_brief_hash,output_profile_hash,authorization_json,prompt_template_version,plan_hash,"
+                "native_generation_resolution,native_generation_fps,delivery_width,delivery_height,target_fps,"
+                "delivery_strategy,quality_mode,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (plan.id, plan.project_id, plan.production_job_id, plan.execution_id, plan.output_profile_id,
                  plan.generation_brief_id, plan.provider_capability, plan.provider_id, plan.model_id,
                  plan.endpoint_profile_id, plan.deployment_region, plan.endpoint_class, plan.credential_reference,
                  plan.selection_source, json.dumps(list(plan.transmitted_content_types), ensure_ascii=False),
                  plan.estimated_request_count,
                  plan.generation_mode, plan.resolution, plan.provider_generation_duration, plan.target_creative_duration,
-                 plan.audio_strategy, json.dumps(plan.provider_parameters, ensure_ascii=False, sort_keys=True),
+                 plan.duration_strategy, plan.audio_strategy, json.dumps(plan.provider_parameters, ensure_ascii=False, sort_keys=True),
                  json.dumps(list(plan.reference_version_ids), ensure_ascii=False), json.dumps(plan.reference_roles, ensure_ascii=False, sort_keys=True),
                  plan.continuity_strategy, plan.generation_brief_hash, plan.output_profile_hash,
                  json.dumps(plan.authorization, ensure_ascii=False, sort_keys=True), plan.prompt_template_version,
-                 plan.plan_hash, plan.created_at),
+                 plan.plan_hash, plan.native_generation_resolution, plan.native_generation_fps,
+                 plan.delivery_width, plan.delivery_height, plan.target_fps, plan.delivery_strategy,
+                 plan.quality_mode, plan.created_at),
             )
         return self.get_runtime_plan(plan.id)
 

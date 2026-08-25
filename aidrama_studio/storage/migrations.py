@@ -1229,6 +1229,133 @@ def _migration_025_regional_provider_selection(connection: sqlite3.Connection) -
     )
 
 
+def _migration_026_versioned_output_profiles(connection: sqlite3.Connection) -> None:
+    """Make project delivery intent versioned and separate it from native generation."""
+    profile_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(output_profiles)")
+    }
+    profile_additions = (
+        ("version_number", "INTEGER NOT NULL DEFAULT 1"),
+        ("is_project_default", "INTEGER NOT NULL DEFAULT 0"),
+        ("target_episode_duration_seconds", "REAL NOT NULL DEFAULT 60"),
+        ("delivery_width", "INTEGER NOT NULL DEFAULT 1920"),
+        ("delivery_height", "INTEGER NOT NULL DEFAULT 1080"),
+        ("delivery_resolution_label", "TEXT NOT NULL DEFAULT '1080p'"),
+        ("target_fps", "REAL NOT NULL DEFAULT 24"),
+        ("target_video_codec", "TEXT NOT NULL DEFAULT 'h264'"),
+        ("target_audio_sample_rate", "INTEGER NOT NULL DEFAULT 48000"),
+        ("target_audio_channels", "INTEGER NOT NULL DEFAULT 2"),
+        ("quality_mode", "TEXT NOT NULL DEFAULT 'STANDARD'"),
+    )
+    for name, definition in profile_additions:
+        if name not in profile_columns:
+            connection.execute(f"ALTER TABLE output_profiles ADD COLUMN {name} {definition}")
+
+    profile_rows = connection.execute(
+        "SELECT * FROM output_profiles ORDER BY project_id,created_at,id"
+    ).fetchall()
+    versions: dict[str, int] = {}
+    latest_by_project: dict[str, str] = {}
+    for row in profile_rows:
+        project_id = str(row["project_id"])
+        version = versions.get(project_id, 0) + 1
+        versions[project_id] = version
+        latest_by_project[project_id] = str(row["id"])
+        raw_resolution = str(row["target_resolution"] or "1920x1080").lower()
+        try:
+            width_text, height_text = raw_resolution.split("x", 1)
+            width, height = int(width_text), int(height_text)
+            if width < 16 or height < 16:
+                raise ValueError
+        except (TypeError, ValueError):
+            width, height = 1920, 1080
+        long_edge, short_edge = max(width, height), min(width, height)
+        if long_edge >= 3840 or short_edge >= 2160:
+            label = "4K"
+        elif long_edge >= 2560 or short_edge >= 1440:
+            label = "1440p"
+        elif long_edge >= 1920 or short_edge >= 1080:
+            label = "1080p"
+        elif long_edge >= 1280 or short_edge >= 720:
+            label = "720p"
+        else:
+            label = f"{width}x{height}"
+        connection.execute(
+            "UPDATE output_profiles SET version_number=?,is_project_default=0,"
+            "target_episode_duration_seconds=target_duration_seconds,delivery_width=?,"
+            "delivery_height=?,delivery_resolution_label=?,target_fps=fps,"
+            "target_video_codec=video_codec_target,target_audio_sample_rate=audio_sample_rate,"
+            "target_audio_channels=audio_channels WHERE id=?",
+            (version, width, height, label, row["id"]),
+        )
+    for profile_id in latest_by_project.values():
+        connection.execute(
+            "UPDATE output_profiles SET is_project_default=1 WHERE id=?",
+            (profile_id,),
+        )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_output_profiles_project_version "
+        "ON output_profiles(project_id,version_number)"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_output_profiles_project_default "
+        "ON output_profiles(project_id) WHERE is_project_default=1"
+    )
+
+    runtime_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(runtime_plans)")
+    }
+    runtime_additions = (
+        ("native_generation_resolution", "TEXT NOT NULL DEFAULT '1920x1080'"),
+        ("native_generation_fps", "REAL NOT NULL DEFAULT 24"),
+        ("delivery_width", "INTEGER NOT NULL DEFAULT 1920"),
+        ("delivery_height", "INTEGER NOT NULL DEFAULT 1080"),
+        ("target_fps", "REAL NOT NULL DEFAULT 24"),
+        ("delivery_strategy", "TEXT NOT NULL DEFAULT 'NATIVE'"),
+        ("quality_mode", "TEXT NOT NULL DEFAULT 'STANDARD'"),
+        ("duration_strategy", "TEXT NOT NULL DEFAULT 'EXACT'"),
+    )
+    for name, definition in runtime_additions:
+        if name not in runtime_columns:
+            connection.execute(f"ALTER TABLE runtime_plans ADD COLUMN {name} {definition}")
+    plans = connection.execute(
+        "SELECT r.id,r.resolution,r.output_profile_id,o.delivery_width,o.delivery_height,"
+        "o.target_fps,o.quality_mode FROM runtime_plans r "
+        "LEFT JOIN output_profiles o ON o.id=r.output_profile_id"
+    ).fetchall()
+    for row in plans:
+        native = str(row["resolution"] or "1920x1080")
+        try:
+            native_width, native_height = (
+                int(part) for part in native.lower().split("x", 1)
+            )
+        except (TypeError, ValueError):
+            native_width, native_height = 1920, 1080
+            native = "1920x1080"
+        delivery_width = int(row["delivery_width"] or native_width)
+        delivery_height = int(row["delivery_height"] or native_height)
+        native_pixels = native_width * native_height
+        delivery_pixels = delivery_width * delivery_height
+        strategy = (
+            "NATIVE" if (native_width, native_height) == (delivery_width, delivery_height)
+            else "DETERMINISTIC_UPSCALE" if delivery_pixels > native_pixels
+            else "DETERMINISTIC_SCALE"
+        )
+        connection.execute(
+            "UPDATE runtime_plans SET native_generation_resolution=?,delivery_width=?,"
+            "delivery_height=?,target_fps=?,delivery_strategy=?,quality_mode=? WHERE id=?",
+            (
+                native,
+                delivery_width,
+                delivery_height,
+                float(row["target_fps"] or 24),
+                strategy,
+                str(row["quality_mode"] or "STANDARD"),
+                row["id"],
+            ),
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1255,6 +1382,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (23, _migration_023_final_assembly_provenance),
     (24, _migration_024_vision_analysis_provenance),
     (25, _migration_025_regional_provider_selection),
+    (26, _migration_026_versioned_output_profiles),
 )
 
 

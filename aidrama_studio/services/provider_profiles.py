@@ -582,10 +582,34 @@ class ProviderProfileService:
         return reference
 
     @staticmethod
-    def plan_duration(target_seconds: float, *, minimum: float = 2.0, maximum: float = 5.0) -> DurationPlan:
+    def plan_duration(
+        target_seconds: float,
+        *,
+        minimum: float = 2.0,
+        maximum: float = 5.0,
+        allowed_durations: tuple[float, ...] | list[float] = (),
+    ) -> DurationPlan:
         if target_seconds <= 0 or minimum <= 0 or maximum < minimum:
             raise ProviderProfileError("duration 参数无效")
         target = float(target_seconds)
+        try:
+            allowed = sorted({float(item) for item in allowed_durations if float(item) > 0})
+        except (TypeError, ValueError) as exc:
+            raise ProviderProfileError("supported duration 参数无效") from exc
+        if allowed:
+            if target <= allowed[-1]:
+                provider_duration = next(
+                    (item for item in allowed if item >= target), allowed[-1]
+                )
+                strategy = "EXACT" if provider_duration == target else "TRIM_TO_CREATIVE"
+                return DurationPlan(provider_duration, target, (provider_duration,), strategy)
+            chunks: list[float] = []
+            remaining = target
+            while remaining > 0:
+                chosen = next((item for item in allowed if item >= remaining), allowed[-1])
+                chunks.append(chosen)
+                remaining = max(0.0, round(remaining - chosen, 6))
+            return DurationPlan(max(chunks), target, tuple(chunks), "CHUNK_AND_CONTINUE")
         chunks: list[float] = []
         remaining = target
         while remaining > 0:
@@ -598,7 +622,13 @@ class ProviderProfileService:
             else:
                 chunks.append(round(chunk, 3))
                 remaining = round(remaining - chunk, 6)
-        return DurationPlan(max(chunks), target, tuple(chunks), "CHUNK_AND_CONTINUE" if len(chunks) > 1 else "SINGLE_SHOT")
+        if len(chunks) > 1:
+            strategy = "CHUNK_AND_CONTINUE"
+        elif chunks[0] > target:
+            strategy = "TRIM_TO_CREATIVE"
+        else:
+            strategy = "EXACT"
+        return DurationPlan(max(chunks), target, tuple(chunks), strategy)
 
     def compile_reference_trace(self, snapshot: ProductionInputSnapshot, *, paths: Mapping[str, str]) -> tuple[ReferenceTrace, ...]:
         if not isinstance(snapshot, ProductionInputSnapshot):
