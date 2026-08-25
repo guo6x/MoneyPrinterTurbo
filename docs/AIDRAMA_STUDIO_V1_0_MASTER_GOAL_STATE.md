@@ -536,11 +536,12 @@ installer and legal gates remain external blockers as recorded above.
   history remains immutable.
 - Browser acceptance used the local test project at measured 1920×1080 and
   1366×768 viewports. Dashboard, Story/Script, References and Production
-  pages rendered without horizontal overflow; screenshots are retained under
-  `.tmp/aidrama-task003-browser/` and intentionally remain untracked.
+  pages rendered without horizontal overflow; exact viewport screenshots are
+  retained as `.tmp/aidrama-task003-browser/final-cdp-1920.png` and
+  `final-cdp-1366.png`, intentionally untracked.
 - Stable validation after the final code checkpoints: AIDrama `387 passed,
   11 warnings`; complete repository `1018 passed, 11 skipped, 14 warnings,
-  4402 subtests passed`; focused security/archive `35 passed, 1 warning`;
+  4402 subtests passed`; focused security/archive/desktop `45 passed, 1 warning`;
   Python compile, `git diff --check` and secret scan pass. AIDrama and
   original MPT Streamlit health endpoints return HTTP 200. No dependency was
   installed and no live/paid Provider request was made.

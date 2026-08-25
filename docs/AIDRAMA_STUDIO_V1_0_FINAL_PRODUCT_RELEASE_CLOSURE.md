@@ -206,6 +206,7 @@ PRODUCTION_CONSOLE_UI=PASS
 DIRECTOR_CONSOLE_UI=PASS
 BROWSER_1920=PASS
 BROWSER_1366=PASS
+BROWSER_EVIDENCE=.tmp/aidrama-task003-browser/final-cdp-1920.png (1920x1080); .tmp/aidrama-task003-browser/final-cdp-1366.png (1366x768)
 
 NONLIVE_E2E_TEXT_IDEA=PASS
 NONLIVE_E2E_MIXED_SOURCE_PACK=PASS
@@ -236,7 +237,7 @@ MIGRATION_FRESH_INSTALL=PASS
 MIGRATION_UPGRADE_FROM_018=PASS
 MIGRATION_IDEMPOTENCY=PASS
 
-FOCUSED_V1_TESTS=provider/disclosure 25 passed; security/archive 35 passed; production UI 15 passed
+FOCUSED_V1_TESTS=provider/disclosure 25 passed; security/archive/desktop 45 passed; production UI 15 passed
 TOTAL_AIDRAMA_TESTS=387
 FULL_PROJECT_TEST_RESULT=1018 passed, 11 skipped, 14 warnings, 4402 subtests passed
 WINDOWS_PATH_BASELINE_FIXED=PASS
