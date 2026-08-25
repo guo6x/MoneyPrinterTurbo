@@ -20,6 +20,7 @@ from aidrama_studio.services.adapters.seedance_video import (
     SeedanceProviderConfig,
     SeedanceTransientError,
 )
+from aidrama_studio.services.adapters import RuntimeContentRejectedError
 from aidrama_studio.services.streaming_artifact import StreamingArtifactSource
 from test.aidrama_studio.test_production_execution import (
     _ready_job,
@@ -274,3 +275,30 @@ def test_seedance_retry_after_is_exposed_as_transient_poll_failure():
             Response({}, status=429, headers={"Retry-After": "17"})
         )
     assert error.value.retry_after_seconds == 17
+
+
+def test_seedance_unverified_policy_like_codes_are_not_misclassified():
+    with pytest.raises(SeedanceAdapterError) as http_error:
+        SeedanceProductionAdapter._response_json(
+            Response(
+                {
+                    "error": {
+                        "code": "InputTextRisk",
+                        "message": "must-not-be-persisted: user prompt",
+                    }
+                },
+                status=400,
+            )
+        )
+    assert not isinstance(http_error.value, RuntimeContentRejectedError)
+    assert "user prompt" not in str(http_error.value)
+
+    assert SeedanceProductionAdapter.map_status("failed") == "FAILED"
+
+
+def test_seedance_unknown_client_error_is_not_content_rejection():
+    with pytest.raises(SeedanceAdapterError) as error:
+        SeedanceProductionAdapter._response_json(
+            Response({"error": {"code": "InvalidParameter"}}, status=400)
+        )
+    assert not isinstance(error.value, RuntimeContentRejectedError)

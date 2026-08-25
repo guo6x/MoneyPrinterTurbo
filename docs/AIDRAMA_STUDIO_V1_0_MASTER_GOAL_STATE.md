@@ -469,3 +469,47 @@ first-transmission LLM/image disclosure, Production UI source/regeneration
 controls, dependency-aware outdated propagation, and human-editability E2E.
 Browser, full-repository, live, desktop and installer release gates remain
 pending or externally blocked as recorded above.
+
+## Duration/editability addendum — provider content-rejection checkpoint
+
+Provider content-policy failure is now a first-class terminal outcome at the
+existing runtime-adapter boundary; it does not introduce another retry or task
+system.
+
+- `RuntimeContentRejectedError` carries only canonical
+  `failure_category=CONTENT_REJECTED`, a bounded `policy_stage`, and an
+  allowlisted provider code. Raw response bodies/messages, prompts, signed
+  URLs, paths and credentials never cross the boundary.
+- Classification is fail-closed and contract-specific. Wan currently enables
+  only the confirmed exact `DataInspectionFailed` code. Ordinary HTTP 400,
+  unknown codes, and policy-looking Seedance code names without verified
+  contract evidence remain normal provider failures; no message substring or
+  blanket 4xx heuristic is used.
+- Explicit rejection wins over submission uncertainty and polling
+  reconciliation. ProviderTask becomes `CONTENT_REJECTED`; Execution/Job
+  close truthfully as failed; the immutable FAILED event records the same safe
+  category, stage/code and `automatic_retry_allowed=false`.
+- Those projections are written in one SQLite transaction. Startup/background
+  reconciliation, active-work checks and diagnostics treat
+  `CONTENT_REJECTED` as terminal and never auto-submit again or overwrite it as
+  generic `FAILED`.
+- The user may request a new attempt explicitly, but the service only appends
+  queued state. It requires a different RuntimePlan with a new authorization
+  ID, current regional disclosure fingerprint/version, and an exact frozen
+  Provider/model/region/endpoint/content-type match. The rejected execution,
+  ProviderTask and event remain immutable; no creative text is rewritten and
+  no Provider call happens inside the retry request.
+- Focused adapter/worker/background/diagnostics/queue validation passes with
+  `59 passed`; the complete AIDrama suite passes with `382 passed, 11
+  warnings`. Python compile and `git diff --check` pass. No live/paid call and
+  no dependency installation were used.
+
+Checkpoint acceptance:
+
+- `PROVIDER_CONTENT_REJECTION_HANDLING=PASS`
+
+Remaining release work includes canonical IMAGE/VISION/TTS ProviderProfile
+enforcement, first-transmission Story/Script and image disclosure, Production
+UI source/regeneration controls, dependency-aware outdated propagation and
+human-editability E2E. Browser, full-repository, live, desktop and installer
+gates remain pending or externally blocked as recorded above.

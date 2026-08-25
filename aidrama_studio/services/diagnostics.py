@@ -18,7 +18,10 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
 
 from aidrama_studio.services.ai_capabilities import CapabilityRegistry, default_capability_registry
-from aidrama_studio.services.active_work import project_has_active_work
+from aidrama_studio.services.active_work import (
+    TERMINAL_PROVIDER_STATES,
+    project_has_active_work,
+)
 from aidrama_studio.services.security import sanitize_persistent_metadata
 from aidrama_studio.storage.repositories import ProjectRepository
 
@@ -143,7 +146,7 @@ class DiagnosticsService:
             for task in self.repository.list_provider_tasks(item):
                 state = str(task.state).upper()
                 provider_states[state] = provider_states.get(state, 0) + 1
-                if state not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                if state not in TERMINAL_PROVIDER_STATES:
                     reconciliation.append(task.id)
         return {
             "stale_running_executions": stale_executions,

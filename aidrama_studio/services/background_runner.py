@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from aidrama_studio.domain import ProductionExecutionStatus, ProviderTask
 from aidrama_studio.services.adapters.production_adapter import ProductionRuntimeAdapter
+from aidrama_studio.services.active_work import TERMINAL_PROVIDER_STATES
 from aidrama_studio.services.production_worker import ProductionWorker, ProductionWorkerError
 from aidrama_studio.services.production_orchestrator import ProductionOrchestrator
 from aidrama_studio.services.production import ProductionService
@@ -305,7 +306,7 @@ class BackgroundProductionRunner:
         """Mark durable tasks from already-terminal executions without rerun."""
         changed: list[ProviderTask] = []
         for task in self.repository.list_provider_tasks(project_id):
-            if task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            if task.state in TERMINAL_PROVIDER_STATES:
                 continue
             if task.execution_id is None:
                 job_id = str(task.request_summary.get("production_job_id") or "")
@@ -418,7 +419,7 @@ class BackgroundProductionRunner:
         task = next((item for item in self.repository.list_provider_tasks(project_id) if item.execution_id == execution_id), None)
         if task is None:
             raise BackgroundRunnerError("后台任务不存在")
-        if task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+        if task.state in TERMINAL_PROVIDER_STATES:
             return task
         try:
             self.worker_factory().cancel(project_id, execution_id, reason)
@@ -432,7 +433,7 @@ class BackgroundProductionRunner:
         task = next((item for item in self.repository.list_provider_tasks(project_id) if item.execution_id == execution_id), None)
         if task is None:
             raise BackgroundRunnerError("后台任务不存在")
-        if task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+        if task.state in TERMINAL_PROVIDER_STATES:
             return task
         return self.repository.update_provider_task(task.model_copy(update={"state": "PAUSED", "updated_at": _now()}))
 

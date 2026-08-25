@@ -12,6 +12,8 @@ from uuid import uuid4
 from aidrama_studio.domain import ProductionJobStatus, ProviderTask
 from aidrama_studio.storage.repositories import ProjectRepository
 
+from .active_work import TERMINAL_PROVIDER_STATES
+
 from .ai_capabilities import (
     CapabilityKind,
     CapabilityRegistry,
@@ -541,7 +543,7 @@ class ProductionQueueService:
             task = tasks[-1]
             if task.state == "QUEUED":
                 self.repository.update_provider_task(task.model_copy(update={"state": "CANCELLED", "metadata": dict(task.metadata) | {"cancel_reason": reason}, "updated_at": _now()}))
-            elif task.state not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            elif task.state not in TERMINAL_PROVIDER_STATES:
                 self.repository.update_provider_task(task.model_copy(update={"state": "RECONCILIATION_REQUIRED", "metadata": dict(task.metadata) | {"cancel_requested": True, "cancel_reason": reason}, "updated_at": _now()}))
         if job.status not in {ProductionJobStatus.SUCCEEDED, ProductionJobStatus.FAILED, ProductionJobStatus.CANCELLED}:
             self.repository.update_production_job_status(job.id, ProductionJobStatus.CANCELLED, updated_at=_now())

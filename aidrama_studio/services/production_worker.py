@@ -19,6 +19,7 @@ from aidrama_studio.domain import (
 )
 from aidrama_studio.services.adapters import (
     ProductionRuntimeAdapter,
+    RuntimeContentRejectedError,
     RuntimeEvent,
     RuntimeReconciliationRequired,
     RuntimeTransientError,
@@ -104,6 +105,10 @@ class ProductionWorker:
                 execution.id,
                 runtime_adapter,
                 input_snapshot=shot_snapshot,
+            )
+        except RuntimeContentRejectedError as exc:
+            return self.execution_service.mark_provider_content_rejected(
+                project_id, execution.id, exc
             )
         except Exception as exc:
             # submit_execution durably records FAILED for adapter errors. A
@@ -241,6 +246,10 @@ class ProductionWorker:
                 try:
                     raw_status = adapter.get_status(runtime_reference)
                     status = self._normalize_status(adapter, raw_status)
+                except RuntimeContentRejectedError as exc:
+                    return self.execution_service.mark_provider_content_rejected(
+                        project_id, execution.id, exc
+                    )
                 except RuntimeTransientError as exc:
                     task = self.execution_service.mark_provider_polling_interrupted(
                         project_id,
@@ -313,6 +322,10 @@ class ProductionWorker:
                     return self.execution_service.complete_execution(
                         project_id, execution.id, {"runtime_reference": runtime_reference}
                     )
+            except RuntimeContentRejectedError as exc:
+                return self.execution_service.mark_provider_content_rejected(
+                    project_id, execution.id, exc
+                )
             except Exception as exc:
                 execution = self.execution_service.get_execution(project_id, execution.id)
                 if execution.status in self._terminal_statuses():
@@ -546,6 +559,8 @@ class ProductionWorker:
         if callable(mapper):
             try:
                 value = mapper(raw_status)
+            except RuntimeContentRejectedError:
+                raise
             except Exception:
                 value = raw_status
         if isinstance(value, Mapping):

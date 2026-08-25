@@ -4,6 +4,7 @@ from .mpt_runtime import MPTAdapterError, MPTInputMapper, MPTProductionAdapter
 from .mock_adapter import MockProductionAdapter
 from .production_adapter import (
     ProductionRuntimeAdapter,
+    RuntimeContentRejectedError,
     RuntimeEvent,
     RuntimeReconciliationRequired,
     RuntimeSubmission,
@@ -37,7 +38,7 @@ from .final_assembly_runtime import (
 
 __all__ = [
     "ProductionRuntimeAdapter", "RuntimeEvent", "RuntimeSubmission",
-    "RuntimeTransientError", "RuntimeReconciliationRequired",
+    "RuntimeTransientError", "RuntimeReconciliationRequired", "RuntimeContentRejectedError",
     "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
     "WanAdapterError", "WanInputMapper", "WanProductionAdapter", "WanPromptMapper",
     "WanProviderConfig", "WanProviderHTTPError", "WanReferenceResolver",

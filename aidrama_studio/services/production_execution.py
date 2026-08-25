@@ -30,10 +30,16 @@ from aidrama_studio.domain import (
     ProviderTask,
     ReferenceBindingType,
 )
-from aidrama_studio.services.adapters import ProductionRuntimeAdapter, RuntimeEvent, RuntimeSubmission
+from aidrama_studio.services.adapters import (
+    ProductionRuntimeAdapter,
+    RuntimeContentRejectedError,
+    RuntimeEvent,
+    RuntimeSubmission,
+)
 from aidrama_studio.storage.repositories import ProjectRepository
 
 from .production import ProductionService, ProductionServiceError
+from .active_work import TERMINAL_PROVIDER_STATES
 from .provider_profiles import ProviderProfileService
 from .security import sanitize_error, sanitize_persistent_metadata
 
@@ -198,6 +204,7 @@ class ProductionExecutionService:
         runtime_plan_id: str | None = None,
         generation_brief_id: str | None = None,
         _creative_retry_context: tuple[str, str] | None = None,
+        _provider_rejection_context: str | None = None,
     ) -> tuple[ProductionExecution, object]:
         """Create the immutable execution and its first/retry attempt atomically."""
         self._require_project(project_id)
@@ -207,6 +214,7 @@ class ProductionExecutionService:
         if job.status is ProductionJobStatus.CANCELLED or (
             job.status is ProductionJobStatus.SUCCEEDED
             and _creative_retry_context is None
+            and _provider_rejection_context is None
         ):
             raise ProductionExecutionServiceError("ProductionJob 已结束，不能启动新的 shot execution")
         if input_snapshot.project_id != project_id or input_snapshot.shot_plan_revision_id != job.shot_plan_revision_id:
@@ -324,7 +332,14 @@ class ProductionExecutionService:
                         "creative_rejection_review_id": _creative_retry_context[1],
                     }
                     if _creative_retry_context
-                    else {"generation_intent": "INITIAL_OR_TECHNICAL_RETRY"}
+                    else (
+                        {
+                            "generation_intent": "PROVIDER_CONTENT_RETRY",
+                            "provider_rejected_execution_id": _provider_rejection_context,
+                        }
+                        if _provider_rejection_context
+                        else {"generation_intent": "INITIAL_OR_TECHNICAL_RETRY"}
+                    )
                 ),
             },
             created_at=now,
@@ -434,6 +449,135 @@ class ProductionExecutionService:
             runtime_plan_id=runtime_plan_id,
             generation_brief_id=generation_brief_id,
             _creative_retry_context=(execution.id, review.id),
+        )
+
+    def request_provider_content_retry(
+        self,
+        project_id: str,
+        production_job_id: str,
+        rejected_execution_id: str,
+        input_snapshot: ProductionInputSnapshot,
+        *,
+        worker_type: str = "mpt",
+        runtime_plan_id: str | None = None,
+        generation_brief_id: str | None = None,
+    ) -> tuple[ProductionExecution, ProductionAttempt]:
+        """Explicitly append a new attempt after provider content rejection.
+
+        This method only creates durable queued state.  It never rewrites the
+        user's creative input and never invokes an adapter; a separate worker
+        action remains required for any new paid submission.
+        """
+
+        rejected, job = self._get_execution(project_id, rejected_execution_id)
+        if job.id != production_job_id:
+            raise ProductionExecutionServiceError(
+                "CONTENT_REJECTED execution 不属于该 ProductionJob"
+            )
+        if rejected.status is not ProductionExecutionStatus.FAILED:
+            raise ProductionExecutionServiceError(
+                "只有失败的 CONTENT_REJECTED execution 可以显式重试"
+            )
+        rejected_task = next(
+            (
+                item
+                for item in reversed(self.repository.list_provider_tasks(project_id))
+                if item.execution_id == rejected.id
+                and item.state == "CONTENT_REJECTED"
+            ),
+            None,
+        )
+        if rejected_task is None:
+            raise ProductionExecutionServiceError(
+                "execution 没有明确的 provider CONTENT_REJECTED outcome"
+            )
+        if (
+            not rejected.runtime_plan_id
+            or not runtime_plan_id
+            or runtime_plan_id == rejected.runtime_plan_id
+        ):
+            raise ProductionExecutionServiceError(
+                "CONTENT_REJECTED retry 必须使用重新确认授权后的新 RuntimePlan"
+            )
+        previous_plan = self.repository.get_runtime_plan(rejected.runtime_plan_id)
+        retry_plan = self.repository.get_runtime_plan(runtime_plan_id)
+        if (
+            previous_plan is None
+            or retry_plan is None
+            or previous_plan.project_id != project_id
+            or retry_plan.project_id != project_id
+            or previous_plan.production_job_id != job.id
+            or retry_plan.production_job_id != job.id
+        ):
+            raise ProductionExecutionServiceError(
+                "CONTENT_REJECTED retry RuntimePlan provenance 无效"
+            )
+        previous_authorization = dict(previous_plan.authorization)
+        retry_authorization = dict(retry_plan.authorization)
+        retry_authorization_id = str(
+            retry_authorization.get("authorization_id") or ""
+        ).strip()
+        previous_authorization_id = str(
+            previous_authorization.get("authorization_id") or ""
+        ).strip()
+        fingerprint = str(
+            retry_authorization.get("authorization_fingerprint") or ""
+        ).strip()
+        if (
+            retry_authorization.get("approved") is not True
+            or not retry_authorization_id
+            or retry_authorization_id == previous_authorization_id
+            or not str(retry_authorization.get("authorized_at") or "").strip()
+            or str(retry_authorization.get("disclosure_version") or "")
+            != "regional-provider-v1"
+            or len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+        ):
+            raise ProductionExecutionServiceError(
+                "CONTENT_REJECTED retry 缺少新的付费授权/区域披露确认"
+            )
+        expected_authorization = {
+            "provider_id": retry_plan.provider_id,
+            "model_id": retry_plan.model_id,
+            "deployment_region": retry_plan.deployment_region,
+            "endpoint_profile_id": retry_plan.endpoint_profile_id,
+            "endpoint_class": retry_plan.endpoint_class,
+        }
+        if any(
+            retry_authorization.get(key) != expected
+            for key, expected in expected_authorization.items()
+        ) or tuple(retry_authorization.get("transmitted_content_types") or ()) != tuple(
+            retry_plan.transmitted_content_types
+        ):
+            raise ProductionExecutionServiceError(
+                "CONTENT_REJECTED retry 授权与冻结 Provider/region/content 不匹配"
+            )
+        rejected_shots = (
+            rejected.input_snapshot.shot_parameters
+            if rejected.input_snapshot is not None
+            else {}
+        )
+        if len(rejected_shots) != 1:
+            raise ProductionExecutionServiceError(
+                "CONTENT_REJECTED retry 必须引用单一 shot execution"
+            )
+        rejected_shot_id = next(iter(rejected_shots))
+        if (
+            input_snapshot.project_id != project_id
+            or input_snapshot.shot_plan_revision_id != job.shot_plan_revision_id
+            or tuple(input_snapshot.shot_parameters) != (rejected_shot_id,)
+        ):
+            raise ProductionExecutionServiceError(
+                "CONTENT_REJECTED retry snapshot provenance 不匹配"
+            )
+        return self.enqueue_shot_execution_with_attempt(
+            project_id,
+            job.id,
+            input_snapshot,
+            worker_type=worker_type,
+            runtime_plan_id=runtime_plan_id,
+            generation_brief_id=generation_brief_id,
+            _provider_rejection_context=rejected.id,
         )
 
     create_shot_execution = enqueue_shot_execution
@@ -580,6 +724,11 @@ class ProductionExecutionService:
             runtime_reference = self._submission_reference(submission)
             submission_metadata = self._submission_metadata(submission)
             task = self._update_provider_task(task, state="PROVIDER_ACCEPTED", provider_task_id=runtime_reference, metadata=submission_metadata, submitted_at=_now())
+        except RuntimeContentRejectedError as exc:
+            self.mark_provider_content_rejected(project_id, execution.id, exc)
+            raise ProductionExecutionServiceError(
+                "runtime provider 明确拒绝了内容；需要用户编辑后显式创建新 attempt"
+            ) from exc
         except ProductionExecutionServiceError:
             raise
         except Exception as exc:
@@ -895,8 +1044,76 @@ class ProductionExecutionService:
 
     def _sync_provider_task_terminal(self, project_id: str, execution_id: str, state: str) -> None:
         for task in self.repository.list_provider_tasks(project_id):
-            if task.execution_id == execution_id and task.state not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            if (
+                task.execution_id == execution_id
+                and task.state not in TERMINAL_PROVIDER_STATES
+            ):
                 self._update_provider_task(task, state=state)
+
+    def mark_provider_content_rejected(
+        self,
+        project_id: str,
+        execution_id: str,
+        error: RuntimeContentRejectedError,
+    ) -> ProductionExecution:
+        """Persist an explicit provider-policy outcome without raw response data."""
+
+        execution, _ = self._get_execution(project_id, execution_id)
+        if execution.status not in {
+            ProductionExecutionStatus.QUEUED,
+            ProductionExecutionStatus.RUNNING,
+        }:
+            raise ProductionExecutionServiceError(
+                "只有 QUEUED/RUNNING execution 可以记录 CONTENT_REJECTED"
+            )
+        task = next(
+            (
+                item
+                for item in reversed(self.repository.list_provider_tasks(project_id))
+                if item.execution_id == execution_id
+                and not (
+                    item.provider_id == "RUNTIME_BOUNDARY"
+                    and item.idempotency_key == f"production:{execution_id}"
+                )
+            ),
+            None,
+        )
+        if task is None:
+            raise ProductionExecutionServiceError(
+                "execution 缺少 provider task，不能记录 CONTENT_REJECTED"
+            )
+        outcome = {
+            "provider_outcome": "CONTENT_REJECTED",
+            "failure_category": error.failure_category,
+            "policy_stage": error.policy_stage,
+            "automatic_retry_allowed": False,
+        }
+        if error.provider_code:
+            outcome["provider_code"] = error.provider_code
+        now = _now()
+        updated_task = task.model_copy(
+            update={
+                "state": "CONTENT_REJECTED",
+                "metadata": sanitize_persistent_metadata(
+                    dict(task.metadata) | outcome
+                ),
+                "error_message": "provider content rejected",
+                "updated_at": now,
+            }
+        )
+        event = ProductionEvent(
+            id=uuid4().hex,
+            execution_id=execution.id,
+            event_type=ProductionEventType.FAILED,
+            payload_json={**outcome, "error": "provider content rejected"},
+            created_at=now,
+        )
+        return self.repository.mark_provider_content_rejected_atomic(
+            updated_task,
+            expected_status=execution.status,
+            event=event,
+            finished_at=now,
+        )
 
     def mark_provider_artifact_pending(
         self,

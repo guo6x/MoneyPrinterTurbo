@@ -118,6 +118,41 @@ def test_cleanup_skips_project_with_active_provider_task(tmp_path: Path):
     assert temporary.is_file()
 
 
+def test_content_rejected_provider_task_is_terminal_for_recovery_and_cleanup(
+    tmp_path: Path,
+):
+    repo = _repo(tmp_path)
+    project = ProjectService(repo).create("Rejected terminal")
+    root = repo.project_directory(project.id)
+    temporary = root / ".rejected.partial"
+    temporary.write_bytes(b"partial")
+    old = time.time() - 3600
+    os.utime(temporary, (old, old))
+    repo.create_provider_task(
+        ProviderTask(
+            id="provider-content-rejected",
+            project_id=project.id,
+            capability="VIDEO_GENERATIVE",
+            provider_id="provider",
+            model_id="model",
+            idempotency_key="content-rejected-key",
+            state="CONTENT_REJECTED",
+            metadata={"failure_category": "CONTENT_REJECTED"},
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    diagnostics = DiagnosticsService(repo, stale_after_seconds=60)
+
+    startup = diagnostics.reconcile_startup(project.id)
+    removed = diagnostics.cleanup_safe_temporary_files(project.id)
+
+    assert startup["provider_tasks_requiring_reconciliation"] == []
+    assert startup["provider_task_states"] == {"CONTENT_REJECTED": 1}
+    assert removed == [".rejected.partial"]
+    assert not temporary.exists()
+
+
 def test_cleanup_rechecks_active_work_under_write_lock(tmp_path: Path, monkeypatch):
     repo = _repo(tmp_path)
     project = ProjectService(repo).create("Cleanup race")

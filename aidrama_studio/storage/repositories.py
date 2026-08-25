@@ -3327,6 +3327,101 @@ class ProjectRepository:
             )
         return self.get_provider_task(task.id)
 
+    def mark_provider_content_rejected_atomic(
+        self,
+        task: ProviderTask,
+        *,
+        expected_status: ProductionExecutionStatus,
+        event: ProductionEvent,
+        finished_at: str,
+    ) -> ProductionExecution:
+        """Close an execution and its provider task as one durable outcome."""
+
+        if (
+            task.execution_id is None
+            or event.execution_id != task.execution_id
+            or task.state != "CONTENT_REJECTED"
+            or event.event_type is not ProductionEventType.FAILED
+        ):
+            raise ValueError("CONTENT_REJECTED task/event execution 不匹配")
+        with self.transaction() as connection:
+            execution = connection.execute(
+                "SELECT production_job_id,status FROM production_executions WHERE id=?",
+                (task.execution_id,),
+            ).fetchone()
+            if execution is None:
+                raise KeyError(f"ProductionExecution 不存在: {task.execution_id}")
+            if execution["status"] != expected_status.value:
+                raise ValueError(
+                    "ProductionExecution 状态已改变: "
+                    f"expected {expected_status.value}, got {execution['status']}"
+                )
+            provider = connection.execute(
+                "SELECT project_id,execution_id FROM provider_tasks WHERE id=?",
+                (task.id,),
+            ).fetchone()
+            if (
+                provider is None
+                or provider["project_id"] != task.project_id
+                or provider["execution_id"] != task.execution_id
+            ):
+                raise ValueError("CONTENT_REJECTED ProviderTask provenance 不匹配")
+            connection.execute(
+                "UPDATE provider_tasks SET provider_task_id=?,state=?,"
+                "request_summary_json=?,metadata_json=?,submitted_at=?,"
+                "last_polled_at=?,next_poll_at=?,error_message=?,updated_at=? "
+                "WHERE id=?",
+                (
+                    task.provider_task_id,
+                    task.state,
+                    json.dumps(task.request_summary, ensure_ascii=False, sort_keys=True),
+                    json.dumps(task.metadata, ensure_ascii=False, sort_keys=True),
+                    task.submitted_at,
+                    task.last_polled_at,
+                    task.next_poll_at,
+                    task.error_message,
+                    task.updated_at,
+                    task.id,
+                ),
+            )
+            connection.execute(
+                "UPDATE provider_tasks SET state='FAILED',updated_at=? "
+                "WHERE execution_id=? AND id<>? AND state NOT IN "
+                "('SUCCEEDED','FAILED','CANCELLED','CONTENT_REJECTED')",
+                (task.updated_at, task.execution_id, task.id),
+            )
+            connection.execute(
+                "UPDATE production_executions SET status=?,finished_at=? "
+                "WHERE id=? AND status=?",
+                (
+                    ProductionExecutionStatus.FAILED.value,
+                    finished_at,
+                    task.execution_id,
+                    expected_status.value,
+                ),
+            )
+            connection.execute(
+                "UPDATE production_jobs SET status=?,updated_at=? WHERE id=?",
+                (
+                    ProductionJobStatus.FAILED.value,
+                    event.created_at,
+                    execution["production_job_id"],
+                ),
+            )
+            connection.execute(
+                "INSERT INTO production_events"
+                "(id,execution_id,event_type,payload_json,created_at) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    event.id,
+                    event.execution_id,
+                    event.event_type.value,
+                    json.dumps(event.payload_json, ensure_ascii=False, sort_keys=True),
+                    event.created_at,
+                ),
+            )
+        return self.get_production_execution(task.execution_id)
+
     # Unified durable heavy work ---------------------------------------
     @staticmethod
     def _heavy_job_from_row(row) -> HeavyJob:

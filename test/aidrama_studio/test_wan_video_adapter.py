@@ -16,6 +16,7 @@ from aidrama_studio.domain import (
 )
 from aidrama_studio.services import ProductionExecutionService
 from aidrama_studio.services.adapters import (
+    RuntimeContentRejectedError,
     WanAdapterError,
     WanInputMapper,
     WanProductionAdapter,
@@ -339,3 +340,71 @@ def test_wan_retry_after_is_exposed_as_transient_poll_failure():
     with pytest.raises(WanTransientError) as error:
         client.get_task("wan-task-1")
     assert error.value.retry_after_seconds == 9
+
+
+def test_wan_explicit_content_policy_codes_are_safe_and_not_generic_failures():
+    class Response:
+        status_code = 400
+        headers = {}
+
+        def json(self):
+            return {
+                "code": "DataInspectionFailed",
+                "message": "must-not-be-persisted: user prompt",
+            }
+
+    class Session:
+        def request(self, *args, **kwargs):
+            return Response()
+
+    client = WanVideoClient(
+        WanProviderConfig(api_key="secret-key"), session=Session()
+    )
+    with pytest.raises(RuntimeContentRejectedError) as error:
+        client.get_task("wan-task-1")
+    assert error.value.failure_category == "CONTENT_REJECTED"
+    assert error.value.policy_stage == "UNSPECIFIED"
+    assert error.value.provider_code == "DataInspectionFailed"
+    assert "user prompt" not in str(error.value)
+
+    with pytest.raises(RuntimeContentRejectedError) as async_error:
+        WanProductionAdapter.map_status(
+            {
+                "output": {
+                    "task_status": "FAILED",
+                    "code": "DataInspectionFailed",
+                    "message": "must-not-leak",
+                }
+            }
+        )
+    assert async_error.value.failure_category == "CONTENT_REJECTED"
+    assert "must-not-leak" not in str(async_error.value)
+
+
+def test_wan_unknown_client_error_is_not_misclassified_as_content_rejection():
+    class Response:
+        status_code = 400
+        headers = {}
+
+        def json(self):
+            return {"code": "InvalidParameter"}
+
+    class Session:
+        def request(self, *args, **kwargs):
+            return Response()
+
+    client = WanVideoClient(
+        WanProviderConfig(api_key="secret-key"), session=Session()
+    )
+    with pytest.raises(WanAdapterError) as error:
+        client.get_task("wan-task-1")
+    assert not isinstance(error.value, RuntimeContentRejectedError)
+
+    assert WanProductionAdapter.map_status(
+        {
+            "output": {
+                "task_status": "FAILED",
+                "code": "InputDataInspectionFailed",
+            }
+        }
+    ) == "FAILED"

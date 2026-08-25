@@ -5,7 +5,9 @@ from __future__ import annotations
 import sqlite3
 
 
-TERMINAL_PROVIDER_STATES = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
+TERMINAL_PROVIDER_STATES = frozenset(
+    {"SUCCEEDED", "FAILED", "CANCELLED", "CONTENT_REJECTED"}
+)
 
 
 def project_has_active_work(
@@ -31,7 +33,7 @@ def project_has_active_work(
         (
             "provider_tasks",
             "project_id=? AND (state IS NULL OR state NOT IN "
-            "('SUCCEEDED','FAILED','CANCELLED'))",
+            "('SUCCEEDED','FAILED','CANCELLED','CONTENT_REJECTED'))",
         ),
         (
             "production_jobs",

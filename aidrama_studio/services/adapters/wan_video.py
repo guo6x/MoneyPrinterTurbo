@@ -31,6 +31,7 @@ from ..provider_result_download import (
 from ..streaming_artifact import StreamingArtifactSource
 from .production_adapter import (
     ProductionRuntimeAdapter,
+    RuntimeContentRejectedError,
     RuntimeSubmission,
     RuntimeTransientError,
     parse_retry_after,
@@ -55,6 +56,8 @@ DEFAULT_WAN_RESULT_HOSTS = (
     "dashscope-result-sg.oss-ap-southeast-1.aliyuncs.com",
 )
 
+_WAN_CONTENT_REJECTION_CODES = frozenset({"datainspectionfailed"})
+
 
 class WanAdapterError(RuntimeError):
     """Raised when Wan input, provider responses, or artifacts are invalid."""
@@ -76,6 +79,31 @@ class WanTransientError(WanAdapterError, RuntimeTransientError):
     def __init__(self, message: str, *, retry_after_seconds: float | None = None):
         WanAdapterError.__init__(self, message)
         self.retry_after_seconds = retry_after_seconds
+
+
+def _wan_provider_code(payload: object) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    containers = [payload]
+    for key in ("output", "error"):
+        nested = payload.get(key)
+        if isinstance(nested, Mapping):
+            containers.append(nested)
+    for container in containers:
+        for key in ("code", "error_code", "errorCode"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:80]
+    return ""
+
+
+def _raise_wan_content_rejection(payload: object) -> None:
+    code = _wan_provider_code(payload)
+    normalized = code.casefold()
+    if normalized in _WAN_CONTENT_REJECTION_CODES:
+        raise RuntimeContentRejectedError(
+            policy_stage="UNSPECIFIED", provider_code=code
+        )
 
 
 @dataclass(frozen=True)
@@ -472,11 +500,9 @@ class WanVideoClient:
                 f"Wan request failed: {type(exc).__name__}"
             ) from exc
         if response.status_code < 200 or response.status_code >= 300:
-            code = ""
+            body: object = {}
             try:
                 body = response.json()
-                if isinstance(body, Mapping):
-                    code = str(body.get("code") or body.get("error_code") or "")[:80]
             except (TypeError, ValueError):
                 pass
             status_code = int(response.status_code)
@@ -493,6 +519,8 @@ class WanVideoClient:
                     f"Wan provider HTTP {status_code}",
                     retry_after_seconds=retry_after,
                 )
+            _raise_wan_content_rejection(body)
+            code = _wan_provider_code(body)
             raise WanProviderHTTPError(status_code, code)
         try:
             body = response.json()
@@ -609,6 +637,8 @@ class WanProductionAdapter(ProductionRuntimeAdapter):
         if hasattr(value, "value"):
             value = value.value
         key = str(value or "").strip().upper()
+        if key in {"FAILED", "ERROR"}:
+            _raise_wan_content_rejection(response)
         try:
             return cls.STATUS_MAP[key]
         except KeyError as exc:

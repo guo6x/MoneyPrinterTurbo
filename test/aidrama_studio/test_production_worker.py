@@ -4,11 +4,16 @@ import pytest
 
 from aidrama_studio.domain import ProductionEventType, ProductionExecutionStatus
 from aidrama_studio.services import (
+    BackgroundProductionRunner,
+    GenerationBriefCompiler,
     ProductionExecutionService,
+    ProductionExecutionServiceError,
     ProductionRuntimeAdapter,
     ProductionWorker,
     RuntimeReconciliationRequired,
+    RuntimeContentRejectedError,
     RuntimeTransientError,
+    RuntimePlanService,
 )
 from aidrama_studio.services.adapters import MPTProductionAdapter, MockProductionAdapter, RuntimeSubmission
 from aidrama_studio.services.streaming_artifact import StreamingArtifactSource
@@ -160,6 +165,39 @@ class TransientPollingAdapter(ProductionRuntimeAdapter):
 
     def cancel(self, runtime_reference):
         return False
+
+
+class ContentRejectedPollingAdapter(ProductionRuntimeAdapter):
+    name = "content-rejected-polling"
+
+    def __init__(self):
+        self.submit_count = 0
+
+    def validate(self, snapshot):
+        return True
+
+    def submit(self, snapshot):
+        self.submit_count += 1
+        return RuntimeSubmission("rejected-provider-task-1")
+
+    def get_status(self, runtime_reference):
+        raise RuntimeContentRejectedError(
+            policy_stage="INPUT", provider_code="DataInspectionFailed"
+        )
+
+    def cancel(self, runtime_reference):
+        return False
+
+
+class ContentRejectedSubmitAdapter(ContentRejectedPollingAdapter):
+    name = "content-rejected-submit"
+    submission_uncertain_on_error = True
+
+    def submit(self, snapshot):
+        self.submit_count += 1
+        raise RuntimeContentRejectedError(
+            policy_stage="INPUT", provider_code="DataInspectionFailed"
+        )
 
 
 def test_desktop_shutdown_pauses_polling_and_cold_resume_does_not_resubmit(context):
@@ -431,3 +469,188 @@ def test_unknown_poll_state_requires_reconciliation_without_false_failure(contex
         event.event_type is not ProductionEventType.FAILED
         for event in service.list_events(project.id, execution.id)
     )
+
+
+def test_explicit_provider_content_rejection_is_terminal_and_safe(context):
+    repository, project = context
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    execution = service.enqueue_job(
+        project.id, job.id, worker_type="content-rejected-polling"
+    )
+    adapter = ContentRejectedPollingAdapter()
+
+    result = ProductionWorker(service, adapter).run(project.id, execution.id)
+
+    assert result.status is ProductionExecutionStatus.FAILED
+    assert adapter.submit_count == 1
+    task = next(
+        item
+        for item in repository.list_provider_tasks(project.id)
+        if item.execution_id == execution.id
+    )
+    assert task.state == "CONTENT_REJECTED"
+    assert task.metadata["provider_outcome"] == "CONTENT_REJECTED"
+    assert task.metadata["failure_category"] == "CONTENT_REJECTED"
+    assert task.metadata["policy_stage"] == "INPUT"
+    assert task.metadata["provider_code"] == "DataInspectionFailed"
+    assert task.metadata["automatic_retry_allowed"] is False
+    assert "prompt" not in repr(task.metadata).lower()
+    failed_event = service.list_events(project.id, execution.id)[-1]
+    assert failed_event.event_type is ProductionEventType.FAILED
+    assert failed_event.payload_json == {
+        "provider_outcome": "CONTENT_REJECTED",
+        "failure_category": "CONTENT_REJECTED",
+        "policy_stage": "INPUT",
+        "provider_code": "DataInspectionFailed",
+        "automatic_retry_allowed": False,
+        "error": "provider content rejected",
+    }
+    assert BackgroundProductionRunner(repository).reconcile(project.id) == []
+    assert repository.get_provider_task(task.id).state == "CONTENT_REJECTED"
+
+
+def test_content_rejected_submit_is_not_submission_uncertain(context):
+    repository, project = context
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    execution = service.enqueue_job(
+        project.id, job.id, worker_type="content-rejected-submit"
+    )
+    adapter = ContentRejectedSubmitAdapter()
+
+    result = ProductionWorker(service, adapter).run(project.id, execution.id)
+
+    assert result.status is ProductionExecutionStatus.FAILED
+    assert adapter.submit_count == 1
+    task = next(
+        item
+        for item in repository.list_provider_tasks(project.id)
+        if item.execution_id == execution.id
+    )
+    assert task.state == "CONTENT_REJECTED"
+
+
+def test_content_rejected_retry_requires_explicit_new_attempt(context):
+    repository, project = context
+    job = _ready_job(repository, project)
+    service = ProductionExecutionService(repository)
+    service.production_service.create_production_shots(project.id, job.id)
+    base_snapshot = service.create_input_snapshot(project.id, job.id)
+    brief = GenerationBriefCompiler(repository).compile(
+        project.id, job.id, "shot_001"
+    )
+    content_types = ("TEXT", "REFERENCE_IMAGE")
+
+    def create_plan(authorization_id: str, fingerprint: str):
+        return RuntimePlanService(repository).create(
+            project.id,
+            production_job_id=job.id,
+            brief=brief,
+            provider_capability="VIDEO_GENERATIVE",
+            provider_id="CONFIRMED_PROVIDER",
+            model_id="runtime",
+            endpoint_profile_id="confirmed-endpoint",
+            deployment_region="MAINLAND_CHINA",
+            endpoint_class="CONFIRMED_ENDPOINT",
+            selection_source="PROJECT",
+            transmitted_content_types=content_types,
+            generation_mode="image_to_video",
+            resolution="1280x720",
+            provider_generation_duration=2,
+            target_creative_duration=2,
+            reference_version_ids=tuple(base_snapshot.reference_asset_versions.values()),
+            authorization={
+                "approved": True,
+                "authorization_id": authorization_id,
+                "authorized_at": "2026-08-25T00:00:00+00:00",
+                "authorization_fingerprint": fingerprint,
+                "disclosure_version": "regional-provider-v1",
+                "provider_id": "CONFIRMED_PROVIDER",
+                "model_id": "runtime",
+                "deployment_region": "MAINLAND_CHINA",
+                "endpoint_profile_id": "confirmed-endpoint",
+                "endpoint_class": "CONFIRMED_ENDPOINT",
+                "transmitted_content_types": list(content_types),
+            },
+        )
+
+    first_plan = create_plan("authorization-1", "a" * 64)
+    first_snapshot = base_snapshot.model_copy(
+        update={
+            "runtime_plan_id": first_plan.id,
+            "runtime_plan_hash": first_plan.plan_hash,
+            "generation_brief_id": brief.id,
+        }
+    )
+    rejected, rejected_attempt = service.enqueue_shot_execution_with_attempt(
+        project.id,
+        job.id,
+        first_snapshot,
+        worker_type="content-rejected-polling",
+        runtime_plan_id=first_plan.id,
+        generation_brief_id=brief.id,
+    )
+    adapter = ContentRejectedPollingAdapter()
+    ProductionWorker(service, adapter).run(project.id, rejected.id)
+    service.production_service.fail_attempt(
+        project.id, rejected_attempt.id, "provider content rejected"
+    )
+
+    with pytest.raises(ProductionExecutionServiceError, match="新 RuntimePlan"):
+        service.request_provider_content_retry(
+            project.id,
+            job.id,
+            rejected.id,
+            first_snapshot,
+            worker_type="mock",
+            runtime_plan_id=first_plan.id,
+            generation_brief_id=brief.id,
+        )
+
+    stale_authorization_plan = create_plan("authorization-1", "c" * 64)
+    stale_authorization_snapshot = first_snapshot.model_copy(
+        update={
+            "runtime_plan_id": stale_authorization_plan.id,
+            "runtime_plan_hash": stale_authorization_plan.plan_hash,
+        }
+    )
+    with pytest.raises(ProductionExecutionServiceError, match="新的付费授权"):
+        service.request_provider_content_retry(
+            project.id,
+            job.id,
+            rejected.id,
+            stale_authorization_snapshot,
+            worker_type="mock",
+            runtime_plan_id=stale_authorization_plan.id,
+            generation_brief_id=brief.id,
+        )
+
+    retry_plan = create_plan("authorization-2", "b" * 64)
+    retry_snapshot = first_snapshot.model_copy(
+        update={
+            "runtime_plan_id": retry_plan.id,
+            "runtime_plan_hash": retry_plan.plan_hash,
+        }
+    )
+
+    retry, attempt = service.request_provider_content_retry(
+        project.id,
+        job.id,
+        rejected.id,
+        retry_snapshot,
+        worker_type="mock",
+        runtime_plan_id=retry_plan.id,
+        generation_brief_id=brief.id,
+    )
+
+    assert retry.status is ProductionExecutionStatus.QUEUED
+    assert retry.id != rejected.id
+    assert retry.creative_retry_of_execution_id is None
+    assert retry.creative_rejection_review_id is None
+    assert attempt.attempt_number == 2
+    assert adapter.submit_count == 1
+    retry_event = service.list_events(project.id, retry.id)[0]
+    assert retry_event.payload_json["generation_intent"] == "PROVIDER_CONTENT_RETRY"
+    assert retry_event.payload_json["provider_rejected_execution_id"] == rejected.id
+    assert repository.get_production_execution(rejected.id).status is ProductionExecutionStatus.FAILED
