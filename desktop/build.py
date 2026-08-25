@@ -51,6 +51,10 @@ def runtime_data_args() -> list[str]:
         *_add_data(package_root / "Main.py", "aidrama_studio"),
         *_add_data(package_root / "styles.css", "aidrama_studio"),
         *_add_data(package_root / "assets", "aidrama_studio/assets"),
+        # The frozen launcher copies this credential-free template into the
+        # canonical AppData config directory on first start.  Keeping the
+        # template in the bundle avoids writing user settings beside the EXE.
+        *_add_data(PROJECT_ROOT / "config.example.toml", "."),
         *_add_data(PROJECT_ROOT / "LICENSE", "."),
         *_add_data(PROJECT_ROOT / "NOTICE", "."),
         *_add_data(PROJECT_ROOT / "THIRD_PARTY_NOTICES.md", "."),
@@ -84,6 +88,11 @@ def build_command(*, output_dir: Path | None = None) -> list[str]:
         "app",
         "--collect-submodules",
         "moviepy",
+        # imageio asks importlib.metadata for its distribution version during
+        # media-engine checks.  PyInstaller bundles code but not dist-info by
+        # default, so preserve this tiny metadata record in the physical tree.
+        "--copy-metadata",
+        "imageio",
         "--hidden-import",
         "app.services.video",
         "--hidden-import",

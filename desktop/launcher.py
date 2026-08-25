@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -21,7 +22,13 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# In a PyInstaller onedir bundle, ``__file__`` points at the executable's
+# bootstrap location while bundled Python/data modules live under
+# ``sys._MEIPASS`` (``_internal``).  Use that root for the Streamlit script
+# and child working directory; source-mode launches retain the repository root.
+PROJECT_ROOT = Path(
+    getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)
+).resolve()
 DEFAULT_MAIN = PROJECT_ROOT / "aidrama_studio" / "Main.py"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
@@ -35,6 +42,38 @@ def validate_loopback_host(host: str) -> str:
     if normalized not in LOOPBACK_HOSTS:
         raise ValueError("AIDrama desktop launcher only permits loopback binding")
     return normalized
+
+
+def configure_packaged_runtime_environment() -> Path | None:
+    """Point frozen runtime configuration at the canonical user data root.
+
+    PyInstaller places bundled resources under ``sys._MEIPASS`` (the
+    ``_internal`` directory in an onedir build).  MPT's config loader is
+    intentionally imported lazily, so the launcher can set its root before
+    importing any service modules.  Only the no-secret example is copied on
+    first start; existing user configuration is never overwritten.
+    """
+
+    if not getattr(sys, "frozen", False):
+        return None
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        data_root = Path(local_app_data) / "AIDramaStudio"
+    else:
+        data_root = Path.home() / "AppData" / "Local" / "AIDramaStudio"
+    data_root = data_root.resolve()
+    data_root.mkdir(parents=True, exist_ok=True)
+    os.environ["MPT_CONFIG_DIR"] = str(data_root)
+    # Streamlit infers development mode from its frozen ``__file__`` path.
+    # Explicitly disable that inference so the packaged child may use the
+    # launcher-selected loopback port.
+    os.environ.setdefault("STREAMLIT_GLOBAL_DEVELOPMENTMODE", "false")
+    config_path = data_root / "config.toml"
+    if not config_path.exists():
+        bundled_template = Path(getattr(sys, "_MEIPASS")) / "config.example.toml"
+        if bundled_template.is_file():
+            shutil.copyfile(bundled_template, config_path)
+    return data_root
 
 
 @dataclass(frozen=True)
@@ -119,6 +158,7 @@ def build_streamlit_command(config: LauncherConfig, port: int) -> list[str]:
         str(int(port)),
         "--server.headless",
         "true",
+        "--global.developmentMode=false",
         "--browser.gatherUsageStats",
         "false",
     ]
@@ -331,6 +371,7 @@ def _run_streamlit_child(argv: Sequence[str]) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    configure_packaged_runtime_environment()
     if raw_argv and raw_argv[0] == "--streamlit-child":
         return _run_streamlit_child(raw_argv[1:])
     args = _parse_args(raw_argv)
