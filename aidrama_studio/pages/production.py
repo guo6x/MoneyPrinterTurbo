@@ -16,6 +16,8 @@ from aidrama_studio.pages._shared import current_project_or_stop
 from aidrama_studio.services import (
     ProductionExecutionService,
     ProductionExecutionServiceError,
+    FinalAssemblyService,
+    FinalAssemblyServiceError,
     ProductionOrchestrator,
     ProductionOrchestratorError,
     ProductionQueueError,
@@ -433,6 +435,245 @@ def _review_status(reviews: list[object]) -> str:
     return "PENDING"
 
 
+def _source_decisions(source_service, project, production_shot_id: str) -> list[object]:
+    """Read append-only source decisions through the assembly service boundary.
+
+    ``FinalAssemblyService`` historically exposed source selection but not a
+    list projection.  Newer facades may provide ``list_source_decisions``;
+    the compatibility fallback only calls the repository's typed read method
+    (never SQL from this page), so older installations continue to render the
+    board while still showing history when the projection is available.
+    """
+    if source_service is None:
+        return []
+    list_method = getattr(source_service, "list_source_decisions", None)
+    if callable(list_method):
+        try:
+            return list(list_method(project.id, production_shot_id))
+        except (FinalAssemblyServiceError, AttributeError, KeyError):
+            return []
+    repository = getattr(source_service, "repository", None)
+    list_method = getattr(repository, "list_production_shot_source_decisions", None)
+    if callable(list_method):
+        try:
+            return list(list_method(project.id, production_shot_id))
+        except (AttributeError, KeyError, TypeError):
+            return []
+    return []
+
+
+def _candidate_qc_review(qc_service, project, qc_result) -> tuple[list[object], str]:
+    if qc_result is None:
+        return [], "PENDING"
+    try:
+        reviews = list(qc_service.list_reviews(project.id, _value(qc_result, "id")))
+    except (ProductionQCServiceError, AttributeError):
+        reviews = []
+    return reviews, _review_status(reviews)
+
+
+def _shot_source_candidates(
+    execution_service: ProductionExecutionService,
+    qc_service: ProductionQCService,
+    project,
+    executions: list[object],
+    shot,
+) -> list[dict[str, object]]:
+    """Build a read-only source projection from execution service facades.
+
+    The page never opens files or constructs a runtime snapshot.  Artifact,
+    QC and review records remain owned by their respective services; this
+    projection only joins them for operator-facing source selection.
+    """
+    shot_id = str(_value(shot, "shot_id", ""))
+    production_shot_id = str(_value(shot, "id", shot_id))
+    candidates: list[dict[str, object]] = []
+    for execution in executions:
+        if _execution_shot_id(execution) not in {shot_id, production_shot_id}:
+            continue
+        execution_id = _value(execution, "id")
+        try:
+            artifacts = list(execution_service.list_artifacts(project.id, execution_id))
+        except (ProductionExecutionServiceError, AttributeError):
+            artifacts = []
+        try:
+            qc_results = list(qc_service.list_results(project.id, execution_id))
+        except (ProductionQCServiceError, AttributeError):
+            qc_results = []
+        for artifact in artifacts:
+            artifact_id = _value(artifact, "id")
+            matching = [item for item in qc_results if _value(item, "artifact_id") in {None, artifact_id}]
+            qc_result = matching[-1] if matching else None
+            reviews, review_status = _candidate_qc_review(qc_service, project, qc_result)
+            metadata = _value(artifact, "metadata_json", {}) or {}
+            role = str(metadata.get("artifact_role") or "FINAL") if isinstance(metadata, Mapping) else "FINAL"
+            candidates.append(
+                {
+                    "execution": execution,
+                    "artifact": artifact,
+                    "qc_result": qc_result,
+                    "reviews": reviews,
+                    "review_status": review_status,
+                    "is_preview": role.upper() == "PREVIEW",
+                    "technically_qualified": (
+                        _status_value(execution) == ProductionExecutionStatus.SUCCEEDED.value
+                        and _status_value(qc_result, "status", "QC_PENDING") == ProductionQCStatus.QC_PASS.value
+                    ),
+                    "qualified": (
+                        _status_value(execution) == ProductionExecutionStatus.SUCCEEDED.value
+                        and _status_value(qc_result, "status", "QC_PENDING") == ProductionQCStatus.QC_PASS.value
+                        and review_status != ProductionReviewDecision.REJECTED.value
+                    ),
+                }
+            )
+    return candidates
+
+
+def _render_source_history(source_service, project, shot) -> list[object]:
+    history = _source_decisions(source_service, project, str(_value(shot, "id", _value(shot, "shot_id", ""))))
+    if not history:
+        st.caption("Source decision history · 暂无显式选择（qualified source 仍可预览）。")
+        return history
+    st.markdown("**Source decision history（append-only）**")
+    for decision in history:
+        sequence = _value(decision, "sequence_number", "—")
+        decision_type = _status_value(decision, "decision_type", "UNKNOWN")
+        selection_kind = _status_value(decision, "selection_kind", "—")
+        st.caption(
+            f"#{sequence} · {decision_type} · {selection_kind} · "
+            f"execution={str(_value(decision, 'production_execution_id', '—'))[:12]} · "
+            f"artifact={str(_value(decision, 'production_artifact_id', '—'))[:12]}"
+        )
+        if _value(decision, "notes"):
+            st.caption(f"Note · {_value(decision, 'notes')}")
+    return history
+
+
+def _source_action(
+    source_service,
+    project,
+    job,
+    shot,
+    candidate: Mapping[str, object],
+    *,
+    promote_preview: bool,
+) -> None:
+    if source_service is None:
+        st.warning("Shot source selection service unavailable.")
+        return
+    select_method = getattr(source_service, "select_shot_source", None)
+    if not callable(select_method):
+        st.warning("Shot source selection service unavailable.")
+        return
+    execution = candidate["execution"]
+    artifact = candidate["artifact"]
+    try:
+        select_method(
+            project.id,
+            _value(job, "id"),
+            _value(shot, "id", _value(shot, "shot_id")),
+            production_execution_id=_value(execution, "id"),
+            production_artifact_id=_value(artifact, "id"),
+            selected_by="user",
+            promote_preview=promote_preview,
+        )
+    except (FinalAssemblyServiceError, AttributeError, TypeError) as exc:
+        st.error(f"Shot source selection unavailable: {str(exc)[:240]}")
+        return
+    st.success("Preview 已显式 Promote；新的 source decision 已追加，历史未被覆盖。" if promote_preview else "Shot source 已选择；历史未被覆盖。")
+    st.rerun()
+
+
+def _creative_regeneration_action(execution_service, project, job, shot, candidate: Mapping[str, object]) -> None:
+    """Append a creative attempt using the canonical execution service.
+
+    The existing immutable snapshot is passed through unchanged.  The page
+    does not compose a new snapshot and never invokes a provider directly.
+    """
+    execution = candidate["execution"]
+    reviews = list(candidate.get("reviews") or [])
+    rejected_review = next(
+        (item for item in reversed(reviews) if _status_value(item, "decision", "PENDING") == ProductionReviewDecision.REJECTED.value),
+        None,
+    )
+    snapshot = _value(execution, "input_snapshot")
+    request_method = getattr(execution_service, "request_creative_regeneration", None)
+    if rejected_review is None or snapshot is None or not callable(request_method):
+        st.warning("Creative regeneration requires a rejected review and an immutable execution snapshot.")
+        return
+    try:
+        request_method(
+            project.id,
+            _value(job, "id"),
+            _value(shot, "id", _value(shot, "shot_id")),
+            _value(rejected_review, "id"),
+            snapshot,
+            worker_type=str(_value(execution, "worker_type", "mpt")),
+            runtime_plan_id=_value(execution, "runtime_plan_id"),
+            generation_brief_id=_value(execution, "generation_brief_id"),
+        )
+    except (ProductionExecutionServiceError, AttributeError, TypeError) as exc:
+        st.error(f"Creative regeneration unavailable: {str(exc)[:240]}")
+        return
+    st.success("Creative regeneration attempt 已追加到队列；原 execution、artifact 与 review 保持不变。")
+    st.rerun()
+
+
+def _render_shot_sources(source_service, execution_service, qc_service, project, job, shot, executions) -> None:
+    """Render candidates, current decision and append-only controls for a Shot."""
+    st.markdown("**Shot sources**")
+    history = _render_source_history(source_service, project, shot)
+    current = history[-1] if history else None
+    candidates = _shot_source_candidates(execution_service, qc_service, project, executions, shot)
+    if not candidates:
+        st.caption("暂无可用 source candidate。")
+        return
+    for index, candidate in enumerate(candidates, start=1):
+        execution = candidate["execution"]
+        artifact = candidate["artifact"]
+        artifact_id = _value(artifact, "id", index)
+        is_current = bool(
+            current is not None
+            and _status_value(current, "decision_type") == "SELECTED"
+            and _value(current, "production_execution_id") == _value(execution, "id")
+            and _value(current, "production_artifact_id") == artifact_id
+        )
+        role_label = "PREVIEW" if candidate["is_preview"] else "FINAL"
+        status_label = "CURRENT" if is_current else ("QUALIFIED" if candidate["qualified"] else "NOT QUALIFIED")
+        with st.container(border=True):
+            st.markdown(f"**Candidate #{index} · {role_label} · {status_label}**")
+            st.caption(
+                f"Execution · {_value(execution, 'id', '—')} · "
+                f"Artifact · {artifact_id} · Path · {_relative_path(_value(artifact, 'path'))}"
+            )
+            st.caption(
+                f"QC · {_status_value(candidate.get('qc_result'), 'status', 'QC_PENDING')} · "
+                f"Review · {candidate['review_status']}"
+            )
+            if candidate["is_preview"]:
+                st.info("Preview source 不能自动进入最终成片，必须显式 Promote。")
+            action_cols = st.columns(2)
+            with action_cols[0]:
+                if candidate["qualified"] and not is_current:
+                    label = "Promote Preview" if candidate["is_preview"] else "Select source"
+                    if st.button(label, key=f"source-select-{_value(job, 'id')}-{_value(shot, 'id')}-{artifact_id}"):
+                        _source_action(
+                            source_service,
+                            project,
+                            job,
+                            shot,
+                            candidate,
+                            promote_preview=bool(candidate["is_preview"]),
+                        )
+            with action_cols[1]:
+                if (
+                    candidate["review_status"] == ProductionReviewDecision.REJECTED.value
+                    and candidate["technically_qualified"]
+                ):
+                    if st.button("Regenerate creative attempt", key=f"creative-regenerate-{_value(job, 'id')}-{_value(shot, 'id')}-{artifact_id}"):
+                        _creative_regeneration_action(execution_service, project, job, shot, candidate)
+
+
 def _render_shot_board(
     production_service: ProductionService,
     execution_service: ProductionExecutionService,
@@ -440,6 +681,7 @@ def _render_shot_board(
     project,
     job,
     progress: Mapping[str, object],
+    source_service=None,
 ) -> tuple[list[object], dict[str, object]]:
     entries = _board_entries(production_service, project, job)
     try:
@@ -527,6 +769,15 @@ def _render_shot_board(
                     st.session_state[f"production-advanced-{_value(job, 'id')}"] = True
             if review_status == "REJECTED":
                 st.warning("人审拒绝，后续镜头已阻塞；请修订后创建新的 attempt。")
+            _render_shot_sources(
+                source_service,
+                execution_service,
+                qc_service,
+                project,
+                job,
+                shot,
+                executions,
+            )
     return shown_executions, {"executions": executions, "by_shot": by_shot}
 
 
@@ -882,6 +1133,11 @@ def render() -> None:
     production_service = ProductionService()
     execution_service = ProductionExecutionService(production_service=production_service)
     qc_service = ProductionQCService()
+    source_service = (
+        FinalAssemblyService(production_service.repository)
+        if hasattr(production_service, "repository")
+        else None
+    )
 
     try:
         readiness = production_service.validate_job_readiness(project.id)
@@ -930,7 +1186,15 @@ def render() -> None:
     _render_primary_action(orchestrator, production_service, project, selected_job, job_readiness, progress, ensure_job=ensure_job)
     if selected_job is not None:
         try:
-            _render_shot_board(production_service, execution_service, qc_service, project, selected_job, progress)
+            _render_shot_board(
+                production_service,
+                execution_service,
+                qc_service,
+                project,
+                selected_job,
+                progress,
+                source_service,
+            )
         except (ProductionServiceError, ProductionExecutionServiceError) as exc:
             st.warning(f"镜头生产暂不可用：{exc}")
     else:
