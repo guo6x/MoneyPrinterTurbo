@@ -263,7 +263,9 @@ class MPTLLMProvider(LLMProvider):
     provider_name = "MPT_LLM"
 
     def __init__(self, config_snapshot: Mapping[str, object] | None = None):
-        self._config_snapshot = dict(config_snapshot or snapshot_llm_config())
+        self._config_snapshot = dict(
+            snapshot_llm_config() if config_snapshot is None else config_snapshot
+        )
 
     @property
     def status(self) -> CapabilityStatus:

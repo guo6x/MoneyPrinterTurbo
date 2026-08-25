@@ -116,7 +116,7 @@ def test_migration_026_records_canonical_columns_and_is_idempotent(tmp_path):
         }
 
     assert versions == [version for version, _ in MIGRATIONS]
-    assert versions[-1] == 26
+    assert versions[-1] == 27
     assert before == after
     assert {
         "version_number", "is_project_default", "delivery_width",

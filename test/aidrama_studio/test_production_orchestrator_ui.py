@@ -302,6 +302,19 @@ class Orchestrator:
         )
     def run_job(self, *args, **kwargs):
         pass
+    def prepare_generation_briefs(self, project_id, job_id):
+        return (SimpleNamespace(
+            id='brief-1', shot_id='shot_001', origin='AI_COMPILED',
+            sha256='b' * 64, parent_brief_id=None,
+            character_context=({'id': 'char_001', 'name': '女主'},),
+            action='走进房间', framing='MEDIUM', composition='三分法',
+            camera_movement='STATIC', lens_intent='NORMAL',
+            lighting={'quality': 'soft'}, mood='克制',
+            continuity_constraints=('服装一致',), negative_constraints=(),
+            dialogue_audio_intent='', target_duration_seconds=4.0,
+        ),)
+    def save_generation_brief_override(self, *args, **kwargs):
+        pass
 
 page._render_primary_action(
     Orchestrator(), None, project, job, {'ready': True}, {'completed_shots': 0}
@@ -318,6 +331,8 @@ page._render_primary_action(
     assert metrics["目标成片时长"] == "120s"
     assert metrics["Provider 原生生成"] == "1920x1080 · 24fps"
     assert metrics["最终交付"] == "3840x2160 · 30fps"
+    assert any(item.label == "生成简报 · 付费前可编辑" for item in app.expander)
+    assert any(item.label == "人物 / 动作" for item in app.text_area)
     info = "\n".join(str(item.value) for item in app.info)
     assert "不是原生 4K" in info
     warning = "\n".join(str(item.value) for item in app.warning)

@@ -1356,6 +1356,93 @@ def _migration_026_versioned_output_profiles(connection: sqlite3.Connection) -> 
         )
 
 
+def _migration_027_human_editability_provenance(connection: sqlite3.Connection) -> None:
+    """Version provider-neutral overrides and reusable manual creative locks."""
+    brief_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(generation_briefs)")
+    }
+    for name, definition in (
+        ("origin", "TEXT NOT NULL DEFAULT 'AI_COMPILED'"),
+        ("parent_brief_id", "TEXT"),
+        ("override_patch_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("changed_fields_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("manual_override_sha256", "TEXT"),
+    ):
+        if name not in brief_columns:
+            connection.execute(f"ALTER TABLE generation_briefs ADD COLUMN {name} {definition}")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_generation_briefs_parent "
+        "ON generation_briefs(project_id,parent_brief_id,created_at,id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS generation_brief_selections (
+            project_id TEXT NOT NULL,
+            production_job_id TEXT NOT NULL,
+            shot_id TEXT NOT NULL,
+            generation_brief_id TEXT NOT NULL,
+            selected_at TEXT NOT NULL,
+            PRIMARY KEY(project_id,production_job_id,shot_id),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(production_job_id) REFERENCES production_jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY(generation_brief_id) REFERENCES generation_briefs(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_generation_brief_selections_brief "
+        "ON generation_brief_selections(generation_brief_id)"
+    )
+
+    runtime_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(runtime_plans)")
+    }
+    if "generation_override_sha256" not in runtime_columns:
+        connection.execute(
+            "ALTER TABLE runtime_plans ADD COLUMN generation_override_sha256 TEXT"
+        )
+
+    for table in (
+        "story_bible_revisions",
+        "structured_script_revisions",
+        "shot_plan_revisions",
+    ):
+        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for name, definition in (
+            ("origin", "TEXT NOT NULL DEFAULT 'LEGACY'"),
+            ("parent_revision_id", "TEXT"),
+            ("changed_paths_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ):
+            if name not in columns:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS creative_locks (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            entity_kind TEXT NOT NULL,
+            stable_entity_id TEXT NOT NULL,
+            field_path TEXT NOT NULL,
+            source_revision_id TEXT,
+            reason TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            released_at TEXT,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_creative_locks_active "
+        "ON creative_locks(project_id,entity_kind,stable_entity_id,field_path) WHERE active=1"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_creative_locks_scope "
+        "ON creative_locks(project_id,entity_kind,stable_entity_id,created_at,id)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1383,6 +1470,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (24, _migration_024_vision_analysis_provenance),
     (25, _migration_025_regional_provider_selection),
     (26, _migration_026_versioned_output_profiles),
+    (27, _migration_027_human_editability_provenance),
 )
 
 

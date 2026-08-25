@@ -103,13 +103,24 @@ class GenerationBrief(BaseModel):
     style: dict[str, Any] = Field(default_factory=dict)
     action: str = ""
     framing: str = ""
+    composition: str = ""
     camera_movement: str = ""
     lens_intent: str = ""
     lighting: dict[str, Any] = Field(default_factory=dict)
+    mood: str = ""
     continuity_constraints: tuple[str, ...] = ()
+    negative_constraints: tuple[str, ...] = ()
     dialogue_audio_intent: str = ""
     target_duration_seconds: float = Field(gt=0)
     source_ids: tuple[str, ...] = ()
+    origin: str = Field(
+        default="AI_COMPILED",
+        pattern=r"^(AI_COMPILED|HUMAN_OVERRIDE|AI_REGENERATED)$",
+    )
+    parent_brief_id: str | None = Field(default=None, max_length=80)
+    override_patch: dict[str, Any] = Field(default_factory=dict)
+    changed_fields: tuple[str, ...] = ()
+    manual_override_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     created_at: str = Field(min_length=1, max_length=80)
 
@@ -158,6 +169,9 @@ class RuntimePlan(BaseModel):
     reference_roles: dict[str, str] = Field(default_factory=dict)
     continuity_strategy: str = Field(min_length=1, max_length=120)
     generation_brief_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    generation_override_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     output_profile_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     authorization: dict[str, Any] = Field(default_factory=dict)
     prompt_template_version: str = Field(min_length=1, max_length=120)

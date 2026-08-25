@@ -106,11 +106,11 @@ def test_export_uses_exact_allowlist_excludes_global_rows_and_includes_execution
     _insert_story(source, project.id, "story-graph")
     with source.transaction() as connection:
         connection.execute(
-            "INSERT INTO structured_script_revisions VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO structured_script_revisions(id,project_id,version,status,source_story_revision_id,content_json,generation_input_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
             ("script-graph", project.id, 1, "DRAFT", "story-graph", "{}", None, "now", "now"),
         )
         connection.execute(
-            "INSERT INTO shot_plan_revisions VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO shot_plan_revisions(id,project_id,version,status,source_script_revision_id,content_json,generation_input_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
             ("shot-plan-graph", project.id, 1, "DRAFT", "script-graph", "{}", None, "now", "now"),
         )
         connection.execute(
@@ -316,11 +316,11 @@ def test_delete_blocks_queued_production_job_without_provider_task(tmp_path: Pat
     _insert_story(repository, project.id, "story-queued")
     with repository.transaction() as connection:
         connection.execute(
-            "INSERT INTO structured_script_revisions VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO structured_script_revisions(id,project_id,version,status,source_story_revision_id,content_json,generation_input_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
             ("script-queued", project.id, 1, "DRAFT", "story-queued", "{}", None, "now", "now"),
         )
         connection.execute(
-            "INSERT INTO shot_plan_revisions VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO shot_plan_revisions(id,project_id,version,status,source_script_revision_id,content_json,generation_input_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
             ("shot-queued", project.id, 1, "DRAFT", "script-queued", "{}", None, "now", "now"),
         )
         connection.execute(

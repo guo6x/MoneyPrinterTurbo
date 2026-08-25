@@ -50,6 +50,7 @@ from aidrama_studio.domain.director import (
 )
 from aidrama_studio.domain.runtime_foundation import AIInvocation, GenerationBrief, OutputProfile, RuntimePlan
 from aidrama_studio.domain.creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourceKind, SourcePackItem
+from aidrama_studio.domain.creative_control import CreativeLock
 from aidrama_studio.domain.reference_profile import ReferenceProfile, ReferenceProfileItem
 from aidrama_studio.domain.runtime_operations import (
     CapabilityProfile,
@@ -2267,6 +2268,10 @@ class ProjectRepository:
         return GenerationBrief.model_validate(content | {
             "id": row["id"], "project_id": row["project_id"],
             "production_job_id": row["production_job_id"], "shot_id": row["shot_id"],
+            "origin": row["origin"], "parent_brief_id": row["parent_brief_id"],
+            "override_patch": json.loads(row["override_patch_json"]),
+            "changed_fields": tuple(json.loads(row["changed_fields_json"])),
+            "manual_override_sha256": row["manual_override_sha256"],
             "sha256": row["sha256"], "created_at": row["created_at"],
         })
 
@@ -2275,10 +2280,15 @@ class ProjectRepository:
             if not self._project_exists(connection, brief.project_id):
                 raise KeyError(f"项目不存在: {brief.project_id}")
             connection.execute(
-                "INSERT INTO generation_briefs(id,project_id,production_job_id,shot_id,content_json,sha256,created_at) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO generation_briefs(id,project_id,production_job_id,shot_id,content_json,sha256,created_at,"
+                "origin,parent_brief_id,override_patch_json,changed_fields_json,manual_override_sha256) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (brief.id, brief.project_id, brief.production_job_id, brief.shot_id,
-                 json.dumps(brief.model_dump(mode="json", exclude={"id","project_id","production_job_id","shot_id","sha256","created_at"}), ensure_ascii=False, sort_keys=True),
-                 brief.sha256, brief.created_at),
+                 json.dumps(brief.model_dump(mode="json", exclude={"id","project_id","production_job_id","shot_id","origin","parent_brief_id","override_patch","changed_fields","manual_override_sha256","sha256","created_at"}), ensure_ascii=False, sort_keys=True),
+                 brief.sha256, brief.created_at, brief.origin, brief.parent_brief_id,
+                 json.dumps(brief.override_patch, ensure_ascii=False, sort_keys=True),
+                 json.dumps(list(brief.changed_fields), ensure_ascii=False),
+                 brief.manual_override_sha256),
             )
         return self.get_generation_brief(brief.id)
 
@@ -2295,6 +2305,73 @@ class ProjectRepository:
         with connect(self.paths.database) as connection:
             rows = connection.execute(query, tuple(args)).fetchall()
         return [self._generation_brief_from_row(row) for row in rows]
+
+    def get_selected_generation_brief(self, project_id: str, production_job_id: str, shot_id: str) -> GenerationBrief | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT generation_brief_id FROM generation_brief_selections "
+                "WHERE project_id=? AND production_job_id=? AND shot_id=?",
+                (project_id, production_job_id, shot_id),
+            ).fetchone()
+        return self.get_generation_brief(row["generation_brief_id"]) if row else None
+
+    def select_generation_brief(self, project_id: str, production_job_id: str, shot_id: str, brief_id: str, *, selected_at: str) -> GenerationBrief:
+        brief = self.get_generation_brief(brief_id)
+        if brief is None or brief.project_id != project_id or brief.production_job_id != production_job_id or brief.shot_id != shot_id:
+            raise KeyError("GenerationBrief selection provenance 不匹配")
+        with connect(self.paths.database) as connection:
+            job = connection.execute("SELECT project_id FROM production_jobs WHERE id=?", (production_job_id,)).fetchone()
+            if job is None or job["project_id"] != project_id:
+                raise KeyError("ProductionJob 不属于该项目")
+            connection.execute(
+                "INSERT INTO generation_brief_selections(project_id,production_job_id,shot_id,generation_brief_id,selected_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(project_id,production_job_id,shot_id) DO UPDATE SET "
+                "generation_brief_id=excluded.generation_brief_id,selected_at=excluded.selected_at",
+                (project_id, production_job_id, shot_id, brief_id, selected_at),
+            )
+        return brief
+
+    @staticmethod
+    def _creative_lock_from_row(row) -> CreativeLock:
+        return CreativeLock(
+            id=row["id"], project_id=row["project_id"], entity_kind=row["entity_kind"],
+            stable_entity_id=row["stable_entity_id"], field_path=row["field_path"],
+            source_revision_id=row["source_revision_id"], reason=row["reason"],
+            active=bool(row["active"]), created_at=row["created_at"],
+            released_at=row["released_at"],
+        )
+
+    def create_creative_lock(self, lock: CreativeLock) -> CreativeLock:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, lock.project_id):
+                raise KeyError(f"项目不存在: {lock.project_id}")
+            connection.execute(
+                "INSERT INTO creative_locks(id,project_id,entity_kind,stable_entity_id,field_path,"
+                "source_revision_id,reason,active,created_at,released_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (lock.id,lock.project_id,lock.entity_kind,lock.stable_entity_id,lock.field_path,
+                 lock.source_revision_id,lock.reason,int(lock.active),lock.created_at,lock.released_at),
+            )
+            row=connection.execute("SELECT * FROM creative_locks WHERE id=?",(lock.id,)).fetchone()
+        return self._creative_lock_from_row(row)
+
+    def list_creative_locks(self, project_id: str, *, entity_kind: str | None = None, stable_entity_id: str | None = None, active_only: bool = False) -> list[CreativeLock]:
+        query="SELECT * FROM creative_locks WHERE project_id=?"; args:list[object]=[project_id]
+        if entity_kind is not None: query+=" AND entity_kind=?"; args.append(entity_kind)
+        if stable_entity_id is not None: query+=" AND stable_entity_id=?"; args.append(stable_entity_id)
+        if active_only: query+=" AND active=1"
+        query+=" ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows=connection.execute(query,tuple(args)).fetchall()
+        return [self._creative_lock_from_row(row) for row in rows]
+
+    def release_creative_lock(self, lock_id: str, *, released_at: str) -> CreativeLock:
+        with connect(self.paths.database) as connection:
+            row=connection.execute("SELECT * FROM creative_locks WHERE id=?",(lock_id,)).fetchone()
+            if row is None: raise KeyError("CreativeLock 不存在")
+            if row["active"]:
+                connection.execute("UPDATE creative_locks SET active=0,released_at=? WHERE id=?",(released_at,lock_id))
+            row=connection.execute("SELECT * FROM creative_locks WHERE id=?",(lock_id,)).fetchone()
+        return self._creative_lock_from_row(row)
 
     @staticmethod
     def _runtime_plan_from_row(row) -> RuntimePlan:
@@ -2319,6 +2396,7 @@ class ProjectRepository:
             reference_version_ids=tuple(json.loads(row["reference_version_ids_json"])),
             reference_roles=json.loads(row["reference_roles_json"]),
             continuity_strategy=row["continuity_strategy"], generation_brief_hash=row["generation_brief_hash"],
+            generation_override_sha256=row["generation_override_sha256"],
             output_profile_hash=row["output_profile_hash"], authorization=json.loads(row["authorization_json"]),
             prompt_template_version=row["prompt_template_version"], plan_hash=row["plan_hash"], created_at=row["created_at"],
         )
@@ -2332,10 +2410,10 @@ class ProjectRepository:
                 "provider_capability,provider_id,model_id,endpoint_profile_id,deployment_region,endpoint_class,credential_reference,selection_source,"
                 "transmitted_content_types_json,estimated_request_count,generation_mode,resolution,provider_generation_duration,target_creative_duration,"
                 "duration_strategy,audio_strategy,provider_parameters_json,reference_version_ids_json,reference_roles_json,continuity_strategy,"
-                "generation_brief_hash,output_profile_hash,authorization_json,prompt_template_version,plan_hash,"
+                "generation_brief_hash,generation_override_sha256,output_profile_hash,authorization_json,prompt_template_version,plan_hash,"
                 "native_generation_resolution,native_generation_fps,delivery_width,delivery_height,target_fps,"
                 "delivery_strategy,quality_mode,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (plan.id, plan.project_id, plan.production_job_id, plan.execution_id, plan.output_profile_id,
                  plan.generation_brief_id, plan.provider_capability, plan.provider_id, plan.model_id,
                  plan.endpoint_profile_id, plan.deployment_region, plan.endpoint_class, plan.credential_reference,
@@ -2344,7 +2422,8 @@ class ProjectRepository:
                  plan.generation_mode, plan.resolution, plan.provider_generation_duration, plan.target_creative_duration,
                  plan.duration_strategy, plan.audio_strategy, json.dumps(plan.provider_parameters, ensure_ascii=False, sort_keys=True),
                  json.dumps(list(plan.reference_version_ids), ensure_ascii=False), json.dumps(plan.reference_roles, ensure_ascii=False, sort_keys=True),
-                 plan.continuity_strategy, plan.generation_brief_hash, plan.output_profile_hash,
+                 plan.continuity_strategy, plan.generation_brief_hash,
+                 plan.generation_override_sha256, plan.output_profile_hash,
                  json.dumps(plan.authorization, ensure_ascii=False, sort_keys=True), plan.prompt_template_version,
                  plan.plan_hash, plan.native_generation_resolution, plan.native_generation_fps,
                  plan.delivery_width, plan.delivery_height, plan.target_fps, plan.delivery_strategy,

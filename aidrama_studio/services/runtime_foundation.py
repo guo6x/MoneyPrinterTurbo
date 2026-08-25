@@ -201,10 +201,13 @@ class GenerationBriefCompiler:
             "style": {"genre": story.genre, "tone": story.tone, "visual_style": location.visual_style, "world": story.world.model_dump(mode="json")},
             "action": shot.action,
             "framing": shot.shot_size.value,
+            "composition": shot.composition,
             "camera_movement": shot.camera_movement.value,
             "lens_intent": shot.lens.value,
             "lighting": shot.lighting.model_dump(mode="json"),
+            "mood": story.tone,
             "continuity_constraints": list(shot.risk_reasons) + ([shot.transition_hint] if shot.transition_hint else []),
+            "negative_constraints": [],
             "dialogue_audio_intent": shot.dialogue_or_narration,
             "target_duration_seconds": float(shot.duration_seconds),
             "source_ids": [story_revision["id"], script_revision["id"], plan["id"], shot.id, *shot.source_script_beat_ids],
@@ -215,7 +218,7 @@ class GenerationBriefCompiler:
         # brief; a changed upstream revision or shot produces a new hash and
         # therefore a new immutable record.
         for existing in reversed(self.repository.list_generation_briefs(project_id, production_job_id)):
-            if existing.shot_id == shot.id and existing.sha256 == brief_hash:
+            if existing.shot_id == shot.id and existing.sha256 == brief_hash and existing.origin == "AI_COMPILED":
                 return existing
         brief = GenerationBrief(
             id=brief_id or uuid4().hex,
@@ -227,6 +230,118 @@ class GenerationBriefCompiler:
             **raw,
         )
         return self.repository.create_generation_brief(brief)
+
+
+class GenerationBriefService:
+    """Durable provider-neutral brief editor and explicit current selection."""
+
+    EDITABLE_FIELDS = frozenset({
+        "character_context", "location_context", "key_props", "style", "action",
+        "framing", "composition", "camera_movement", "lens_intent", "lighting",
+        "mood", "continuity_constraints", "negative_constraints",
+        "dialogue_audio_intent", "target_duration_seconds",
+    })
+
+    def __init__(self, repository: ProjectRepository | None = None) -> None:
+        self.repository = repository or ProjectRepository()
+        self.compiler = GenerationBriefCompiler(self.repository)
+
+    def prepare_for_job(self, project_id: str, production_job_id: str) -> tuple[GenerationBrief, ...]:
+        job = self.repository.get_production_job(production_job_id)
+        if job is None or job.project_id != project_id:
+            raise RuntimeFoundationError("ProductionJob 不属于该项目")
+        revision = self.repository.get_shot_revision(job.shot_plan_revision_id)
+        if revision is None or revision["project_id"] != project_id:
+            raise RuntimeFoundationError("ProductionJob 缺少 Shot Plan revision")
+        selected: list[GenerationBrief] = []
+        for shot in sorted(revision["content"].shots, key=lambda item: (item.order, item.id)):
+            current = self.repository.get_selected_generation_brief(
+                project_id, production_job_id, shot.id
+            )
+            if current is None:
+                current = self.compiler.compile(project_id, production_job_id, shot.id)
+                self.repository.select_generation_brief(
+                    project_id, production_job_id, shot.id, current.id, selected_at=_now()
+                )
+            selected.append(current)
+        return tuple(selected)
+
+    def current(self, project_id: str, production_job_id: str, shot_id: str) -> GenerationBrief:
+        current = self.repository.get_selected_generation_brief(
+            project_id, production_job_id, shot_id
+        )
+        if current is None:
+            current = next(
+                (item for item in self.prepare_for_job(project_id, production_job_id) if item.shot_id == shot_id),
+                None,
+            )
+        if current is None:
+            raise RuntimeFoundationError("GenerationBrief 不存在")
+        return current
+
+    def list_versions(self, project_id: str, production_job_id: str, shot_id: str) -> tuple[GenerationBrief, ...]:
+        return tuple(
+            item for item in self.repository.list_generation_briefs(project_id, production_job_id)
+            if item.shot_id == shot_id
+        )
+
+    def create_override(
+        self,
+        project_id: str,
+        production_job_id: str,
+        shot_id: str,
+        patch: Mapping[str, Any],
+        *,
+        base_brief_id: str | None = None,
+    ) -> GenerationBrief:
+        base = (
+            self.repository.get_generation_brief(base_brief_id)
+            if base_brief_id else self.current(project_id, production_job_id, shot_id)
+        )
+        if base is None or base.project_id != project_id or base.production_job_id != production_job_id or base.shot_id != shot_id:
+            raise RuntimeFoundationError("GenerationBrief override provenance 不匹配")
+        raw_patch = dict(patch)
+        unknown = set(raw_patch) - self.EDITABLE_FIELDS
+        if unknown:
+            raise RuntimeFoundationError(
+                f"GenerationBrief 字段不可编辑: {', '.join(sorted(unknown))}"
+            )
+        content = {
+            key: value
+            for key, value in base.model_dump(mode="json").items()
+            if key in self.EDITABLE_FIELDS or key == "source_ids"
+        }
+        normalized_patch: dict[str, Any] = {}
+        for key, value in raw_patch.items():
+            if key in {"key_props", "continuity_constraints", "negative_constraints"}:
+                if isinstance(value, str):
+                    value = [item.strip() for item in value.replace("，", ",").split(",") if item.strip()]
+                value = list(value)
+            if content.get(key) != value:
+                normalized_patch[key] = value
+                content[key] = value
+        if not normalized_patch:
+            raise RuntimeFoundationError("GenerationBrief 没有实际变更")
+        override_sha = _hash({"parent_brief_id": base.id, "parent_sha256": base.sha256, "patch": normalized_patch})
+        content_hash = _hash(content)
+        brief = GenerationBrief(
+            id=uuid4().hex,
+            project_id=project_id,
+            production_job_id=production_job_id,
+            shot_id=shot_id,
+            origin="HUMAN_OVERRIDE",
+            parent_brief_id=base.id,
+            override_patch=normalized_patch,
+            changed_fields=tuple(sorted(normalized_patch)),
+            manual_override_sha256=override_sha,
+            sha256=content_hash,
+            created_at=_now(),
+            **content,
+        )
+        saved = self.repository.create_generation_brief(brief)
+        return self.repository.select_generation_brief(
+            project_id, production_job_id, shot_id, saved.id, selected_at=_now()
+        )
 
 
 class RuntimePlanService:
@@ -277,6 +392,7 @@ class RuntimePlanService:
             "audio_strategy": audio_strategy, "provider_parameters": _redact(dict(provider_parameters or {})),
             "reference_version_ids": list(reference_version_ids), "reference_roles": dict(reference_roles or {}),
             "continuity_strategy": continuity_strategy, "generation_brief_hash": brief.sha256,
+            "generation_override_sha256": brief.manual_override_sha256,
             "output_profile_hash": profile_hash, "authorization": _redact(dict(authorization or {})),
             "prompt_template_version": prompt_template_version,
         }
@@ -335,4 +451,4 @@ def _redact(value: Any) -> Any:
     return value
 
 
-__all__ = ["AIInvocationService", "GenerationBriefCompiler", "OutputProfileService", "RuntimeFoundationError", "RuntimePlanService"]
+__all__ = ["AIInvocationService", "GenerationBriefCompiler", "GenerationBriefService", "OutputProfileService", "RuntimeFoundationError", "RuntimePlanService"]

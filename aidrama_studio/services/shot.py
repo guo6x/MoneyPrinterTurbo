@@ -1,6 +1,7 @@
 from __future__ import annotations
 from datetime import datetime,timezone
 import ast
+import json
 from uuid import uuid4
 from aidrama_studio.domain import *
 from aidrama_studio.services.llm_runtime import LLMInvocationError,LLMInvocationGateway
@@ -90,6 +91,50 @@ class ShotService:
         plan.shots[index],plan.shots[target]=plan.shots[target],plan.shots[index]
         plan.shots[index].order,plan.shots[target].order=index+1,target+1
         return self.repository.update_shot_revision(revision_id,content=plan,updated_at=_now())
+    def update_shot_fields(self,project_id,revision_id,shot_id,changes):
+        rev=self.get_revision(revision_id)
+        if not rev or rev["project_id"]!=project_id: raise ShotServiceError("Shot Plan revision 不属于该项目")
+        if rev["status"] is not ShotRevisionStatus.DRAFT: raise ShotServiceError("只能编辑 DRAFT Shot Plan")
+        plan=rev["content"].model_copy(deep=True)
+        index=next((i for i,item in enumerate(plan.shots) if item.id==shot_id),None)
+        if index is None: raise ShotServiceError("Shot 不属于该 revision")
+        allowed={
+            "scene_id","shot_size","camera_angle","camera_movement","movement_notes","lens",
+            "focal_length_hint_mm","composition","subject","action","expression","eyeline",
+            "lighting","blocking","dialogue_or_narration","visual_intent","transition_hint",
+            "duration_seconds","risk_level","risk_reasons","risk_override","risk_override_note","status",
+        }
+        unknown=set(changes)-allowed
+        if unknown: raise ShotServiceError(f"不支持的 Shot 字段: {', '.join(sorted(unknown))}")
+        raw=plan.shots[index].model_dump(mode="json")
+        for key,value in dict(changes).items():
+            if key in {"subject","risk_reasons"} and isinstance(value,str):
+                text=value.replace("，",",").strip()
+                try: parsed=ast.literal_eval(text) if text.startswith("[") else None
+                except (ValueError,SyntaxError): parsed=None
+                value=[str(item).strip() for item in (parsed if isinstance(parsed,list) else text.split(",")) if str(item).strip()]
+            if key=="lighting" and isinstance(value,str): value={"quality":value,"direction":"","tone":"","notes":""}
+            if key=="blocking" and isinstance(value,str): value={"positions":{},"movement":value,"notes":""}
+            if key in {"shot_size","camera_angle","camera_movement","lens","eyeline","risk_level","status"} and isinstance(value,str) and "." in value:
+                value=value.split(".")[-1]
+            raw[key]=value
+        try:
+            plan.shots[index]=Shot.model_validate(raw)
+            script=self.repository.get_script_revision(rev["source_script_revision_id"])
+            story=next((item for item in self.repository.list_story_revisions(project_id) if item["status"] is StoryRevisionStatus.APPROVED),None)
+            if script is None: raise ShotServiceError("Shot Plan source script revision 不存在")
+            plan.validate_against(script["content"],story["content"] if story else None)
+            self.recalculate_risk_if_needed(plan)
+        except ShotServiceError: raise
+        except Exception as exc: raise ShotServiceError(f"Shot 编辑无效: {exc}") from exc
+        saved=self.repository.update_shot_revision(revision_id,content=plan,updated_at=_now())
+        from .creative_control import CreativeLockService
+        locks=CreativeLockService(self.repository)
+        if plan.shots[index].status is ShotStatus.LOCKED:
+            locks.lock(project_id,"SHOT",shot_id,"*",source_revision_id=revision_id,reason="用户在 Shot Director 手工锁定")
+        else:
+            locks.release_path(project_id,"SHOT",shot_id,"*")
+        return saved
     def save_draft(self,pid,content,*,revision_id=None,generation_input=None):
         rev=self.get_revision(revision_id) if revision_id else None; source=rev["source_script_revision_id"] if rev else None
         if isinstance(content,dict):
@@ -119,9 +164,8 @@ class ShotService:
             content["shots"]=normalized
             try:
                 content=ShotPlan.model_validate(content)
-            except Exception:
-                if rev is None: raise
-                content=rev["content"]
+            except Exception as exc:
+                raise ShotServiceError(f"Shot Plan Draft 无效: {exc}") from exc
         if source:
             script=self.repository.get_script_revision(source); story=next((x for x in self.repository.list_story_revisions(pid) if x["status"] is StoryRevisionStatus.APPROVED),None); content.validate_against(script["content"],story["content"] if story else None); self.recalculate_risk_if_needed(content)
         if rev and rev["status"] is ShotRevisionStatus.DRAFT: return self.repository.update_shot_revision(revision_id,content=content,updated_at=_now(),generation_input=generation_input)
@@ -149,4 +193,60 @@ class ShotService:
             plan=self._llm_gateway.generate_validated_json(project.id,prompt,operation="SHOT_PLAN_GENERATION",validator=validate,repair_prompt_builder=lambda raw,exc: build_shot_repair_prompt(raw,str(exc)),input_source_ids=input_source_ids)
         except LLMInvocationError as e: raise ShotServiceError(str(e)) from e
         except Exception as e: raise ShotServiceError("Shot Plan 生成失败，请稍后重试。") from e
+        latest=self.get_latest_revision(project.id)
+        if latest:
+            locked={item.id:item.model_copy(deep=True) for item in latest["content"].shots if item.status is ShotStatus.LOCKED}
+            generated={item.id:item for item in plan.shots}
+            missing=sorted(set(locked)-set(generated))
+            if missing: raise ShotServiceError(f"AI proposal 丢失锁定镜头: {', '.join(missing)}")
+            plan.shots=[locked.get(item.id,item) for item in plan.shots]
+            self.recalculate_risk_if_needed(plan)
         return self._create(project.id,script["id"],plan,{"target_duration_seconds":project.target_duration_seconds,"aspect_ratio":project.aspect_ratio.value})
+
+    def regenerate_shot(self,project,revision_id,shot_id):
+        """Regenerate exactly one unlocked shot into a new DRAFT revision."""
+        rev=self.get_revision(revision_id)
+        if not rev or rev["project_id"]!=project.id: raise ShotServiceError("Shot Plan revision 不属于该项目")
+        source_plan=rev["content"]
+        index=next((i for i,item in enumerate(source_plan.shots) if item.id==shot_id),None)
+        if index is None: raise ShotServiceError("Shot 不属于该 revision")
+        original=source_plan.shots[index]
+        if original.status is ShotStatus.LOCKED: raise ShotServiceError("锁定镜头不能被 AI 再生成；请先显式解锁")
+        script=self.repository.get_script_revision(rev["source_script_revision_id"])
+        story=next((item for item in self.repository.list_story_revisions(project.id) if item["status"] is StoryRevisionStatus.APPROVED),None)
+        if script is None or story is None: raise ShotServiceError("选择性再生成缺少 APPROVED Story/Script provenance")
+        prompt=(
+            "Regenerate ONLY the selected shot as one Shot JSON object. Preserve id, order, scene_id "
+            "and source_script_beat_ids exactly. Do not return Markdown. Selected shot="
+            +json.dumps(original.model_dump(mode="json"),ensure_ascii=False,sort_keys=True)
+            +" Script="+json.dumps(script["content"].model_dump(mode="json"),ensure_ascii=False,sort_keys=True)
+        )
+        def validate(raw):
+            try: payload=json.loads(raw) if isinstance(raw,str) else raw
+            except json.JSONDecodeError as exc: raise ValueError("selected shot JSON invalid") from exc
+            candidate=Shot.model_validate(payload)
+            if (candidate.id,candidate.order,candidate.scene_id,tuple(candidate.source_script_beat_ids)) != (original.id,original.order,original.scene_id,tuple(original.source_script_beat_ids)):
+                raise ValueError("selected shot identity/provenance changed")
+            proposal=source_plan.model_copy(deep=True)
+            proposal.shots[index]=candidate
+            proposal.validate_against(script["content"],story["content"])
+            self.recalculate_risk_if_needed(proposal)
+            # Deep equality outside the selected index is the selective-regeneration gate.
+            if any(proposal.shots[i] != source_plan.shots[i] for i in range(len(proposal.shots)) if i!=index):
+                raise ValueError("non-target shot changed")
+            return proposal
+        try:
+            proposal=self._llm_gateway.generate_validated_json(
+                project.id,prompt,operation="SHOT_SELECTIVE_REGENERATION",validator=validate,
+                repair_prompt_builder=lambda raw,exc: (
+                    "Repair ONLY the selected Shot JSON. Preserve exact identity/provenance. Error="
+                    +str(exc)+" Raw="+str(raw)
+                ),
+                input_source_ids=(rev["id"],script["id"],story["id"],shot_id),
+            )
+        except LLMInvocationError as exc: raise ShotServiceError(str(exc)) from exc
+        except Exception as exc: raise ShotServiceError(f"镜头选择性再生成失败: {exc}") from exc
+        return self._create(
+            project.id,rev["source_script_revision_id"],proposal,
+            {"operation":"SHOT_SELECTIVE_REGENERATION","parent_revision_id":rev["id"],"target_shot_id":shot_id},
+        )

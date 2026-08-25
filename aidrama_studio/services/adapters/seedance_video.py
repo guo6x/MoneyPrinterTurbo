@@ -320,6 +320,7 @@ class SeedanceInputMapper:
         for label, value in (
             ("Action", brief.action),
             ("Framing", brief.framing),
+            ("Composition", brief.composition),
             ("Camera movement", brief.camera_movement),
             ("Lens intent", brief.lens_intent),
             (
@@ -328,7 +329,9 @@ class SeedanceInputMapper:
                 if brief.lighting
                 else "",
             ),
+            ("Mood", brief.mood),
             ("Continuity", "; ".join(brief.continuity_constraints)),
+            ("Negative constraints", "; ".join(brief.negative_constraints)),
             ("Dialogue/audio intent", brief.dialogue_audio_intent),
         ):
             if str(value).strip():

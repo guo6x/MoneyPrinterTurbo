@@ -24,6 +24,7 @@ from .production_execution import ProductionExecutionService, ProductionExecutio
 from .provider_profiles import ProviderProfileError, ProviderProfileService
 from .runtime_foundation import (
     GenerationBriefCompiler,
+    GenerationBriefService,
     OutputProfileService,
     RuntimeFoundationError,
     RuntimePlanService,
@@ -57,6 +58,7 @@ class ProductionAuthorizationPreview:
     target_fps: float
     delivery_strategy: str
     quality_mode: str
+    generation_brief_hashes: dict[str, str]
     duration_requests_by_shot: dict[str, int]
     transmitted_content_types: tuple[str, ...]
     authorization_fingerprint: str
@@ -79,6 +81,7 @@ class ProductionQueueService:
         self.provider_profiles = provider_profiles or ProviderProfileService(self.repository, registry=self.registry)
         self.execution_service = ProductionExecutionService(self.repository, production_service=self.production_service)
         self.brief_compiler = GenerationBriefCompiler(self.repository)
+        self.generation_briefs = GenerationBriefService(self.repository)
         self.runtime_plans = RuntimePlanService(self.repository)
 
     def run_job(
@@ -198,6 +201,10 @@ class ProductionQueueService:
         content_types = ("TEXT", "REFERENCE_IMAGE") if reference_count else ("TEXT",)
         estimated_requests = sum(request_counts.values()) * int(max_paid_attempts)
         output_profile = self._output_profile(job)
+        generation_briefs = self.generation_briefs.prepare_for_job(project_id, job.id)
+        generation_brief_hashes = {
+            item.shot_id: item.sha256 for item in generation_briefs
+        }
         native_resolution = self._native_resolution(profile.profile, output_profile)
         native_fps = self._native_fps(profile.profile)
         delivery_resolution = output_profile.target_resolution
@@ -228,6 +235,7 @@ class ProductionQueueService:
             "target_fps": output_profile.target_fps,
             "delivery_strategy": delivery_strategy,
             "quality_mode": output_profile.quality_mode,
+            "generation_brief_hashes": generation_brief_hashes,
             "transmitted_content_types": list(content_types),
             "disclosure_version": "regional-provider-v1",
         }
@@ -249,6 +257,7 @@ class ProductionQueueService:
             target_fps=output_profile.target_fps,
             delivery_strategy=delivery_strategy,
             quality_mode=output_profile.quality_mode,
+            generation_brief_hashes=generation_brief_hashes,
             duration_requests_by_shot=request_counts,
             transmitted_content_types=content_types,
             authorization_fingerprint=hashlib.sha256(
@@ -343,6 +352,7 @@ class ProductionQueueService:
             "target_fps": preview.target_fps,
             "delivery_strategy": preview.delivery_strategy,
             "quality_mode": preview.quality_mode,
+            "generation_brief_hashes": preview.generation_brief_hashes,
             "transmitted_content_types": list(preview.transmitted_content_types),
             "disclosure_version": "regional-provider-v1",
             "authorization_fingerprint": preview.authorization_fingerprint,
@@ -366,7 +376,7 @@ class ProductionQueueService:
                 shot = shot_by_id.get(production_shot.shot_id)
                 if shot is None:
                     raise ProductionQueueError(f"ProductionShot 不属于冻结 Shot Plan: {production_shot.shot_id}")
-                brief = self.brief_compiler.compile(project_id, job.id, shot.id)
+                brief = self.generation_briefs.current(project_id, job.id, shot.id)
                 duration_plan = self.provider_profiles.plan_duration(
                     float(shot.duration_seconds), minimum=minimum, maximum=maximum,
                     allowed_durations=allowed_durations,
@@ -438,6 +448,26 @@ class ProductionQueueService:
         if job.status not in {ProductionJobStatus.QUEUED, ProductionJobStatus.RUNNING}:
             self.repository.update_production_job_status(job.id, ProductionJobStatus.QUEUED, updated_at=now)
         return task
+
+    def prepare_generation_briefs(self, project_id: str, production_job_id: str):
+        return self.generation_briefs.prepare_for_job(project_id, production_job_id)
+
+    def save_generation_brief_override(
+        self,
+        project_id: str,
+        production_job_id: str,
+        shot_id: str,
+        patch: Mapping[str, object],
+        *,
+        base_brief_id: str | None = None,
+    ):
+        return self.generation_briefs.create_override(
+            project_id,
+            production_job_id,
+            shot_id,
+            patch,
+            base_brief_id=base_brief_id,
+        )
 
     def _output_profile(self, job):
         profile = (

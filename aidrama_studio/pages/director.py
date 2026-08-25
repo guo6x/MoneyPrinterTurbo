@@ -1,6 +1,5 @@
 from __future__ import annotations
 import sys
-import ast
 from pathlib import Path
 
 # Streamlit may execute navigation pages with ``pages/`` as sys.path[0].
@@ -20,7 +19,7 @@ from aidrama_studio.services import (
     ProducerServiceError,
     ShotServiceError,
 )
-from aidrama_studio.domain import ShotStatus, DirectorGoalKind
+from aidrama_studio.domain import DirectorGoalKind
 
 def _shot_service():
     try:
@@ -70,36 +69,65 @@ def _editor(service, project, plan):
             for key, label in (("scene_id", "Scene ID"), ("shot_size", "景别"), ("camera_angle", "机位角度"), ("camera_movement", "运镜"), ("lens", "镜头焦段"), ("composition", "构图")):
                 shot[key] = st.text_input(label, str(_value(shot, key, "")), key=f"{pid}-{idx}-{key}")
             shot["duration_seconds"] = st.number_input("时长（秒）", min_value=0.1, value=float(_value(shot, "duration_seconds", 1) or 1), key=f"{pid}-{idx}-duration")
-            shot["risk_level"] = st.selectbox("风险等级", ["LOW", "MEDIUM", "HIGH"], key=f"{pid}-{idx}-risk")
+            risk_options = ["LOW", "MEDIUM", "HIGH"]
+            current_risk = getattr(_value(shot,"risk_level","LOW"),"value",_value(shot,"risk_level","LOW"))
+            shot["risk_level"] = st.selectbox(
+                "风险等级", risk_options,
+                index=risk_options.index(current_risk) if current_risk in risk_options else 0,
+                key=f"{pid}-{idx}-risk",
+            )
             shot["risk_reasons"] = st.text_area("风险原因", str(_value(shot, "risk_reasons", "")), key=f"{pid}-{idx}-risk-reasons", height=70)
         with right:
             for key, label in (("subject", "主体"), ("action", "动作"), ("expression", "表情"), ("eyeline", "视线"), ("lighting", "灯光"), ("blocking", "调度"), ("dialogue_or_narration", "对白 / 旁白"), ("visual_intent", "视觉意图"), ("transition_hint", "转场提示")):
-                shot[key] = st.text_area(label, str(_value(shot, key, "")), key=f"{pid}-{idx}-{key}", height=55)
+                value = _value(shot,key,"")
+                if key == "lighting": value = _value(value,"quality","")
+                if key == "blocking": value = _value(value,"movement","")
+                shot[key] = st.text_area(label, str(value), key=f"{pid}-{idx}-{key}", height=55)
         shot["status"] = "LOCKED" if st.checkbox("锁定镜头", value=_value(shot, "status", "PLANNED") == "LOCKED", key=f"{pid}-{idx}-locked") else "PLANNED"
-        a,b,c = st.columns(3)
+        shot["risk_override"] = st.checkbox(
+            "人工风险判定",
+            value=bool(_value(shot,"risk_override",False)),
+            key=f"{pid}-{idx}-risk-override",
+        )
+        if shot["risk_override"]:
+            shot["risk_override_note"] = st.text_input(
+                "人工风险判定说明",
+                str(_value(shot,"risk_override_note","")),
+                key=f"{pid}-{idx}-risk-override-note",
+            )
+        a,b,c,d = st.columns(4)
         if a.button("↑ 上移", key=f"up-{pid}-{idx}"): _call(service, "move_shot", pid, idx, -1); st.rerun()
         if b.button("↓ 下移", key=f"down-{pid}-{idx}"): _call(service, "move_shot", pid, idx, 1); st.rerun()
         if c.button("保存 Draft", type="primary", key=f"save-{pid}"):
             try:
-                canonical = service.get_revision(pid)["content"]
-                existing = canonical.shots[idx]
-                for field in ("scene_id", "composition", "action", "expression", "dialogue_or_narration", "visual_intent", "transition_hint"):
-                    if field in shot: setattr(existing, field, shot[field])
-                existing.duration_seconds = float(shot.get("duration_seconds", existing.duration_seconds))
-                existing.status = ShotStatus.LOCKED if shot.get("status") == "LOCKED" else ShotStatus.PLANNED
-                for field in ("subject", "risk_reasons"):
-                    if isinstance(shot.get(field), str):
-                        raw = shot[field].replace("，", ",").strip()
-                        try:
-                            parsed = ast.literal_eval(raw) if raw.startswith("[") else None
-                        except (ValueError, SyntaxError):
-                            parsed = None
-                        values = parsed if isinstance(parsed, list) else raw.split(",")
-                        setattr(existing, field, [str(x).strip() for x in values if str(x).strip()])
-                service.save_draft(project.id, canonical, revision_id=pid)
+                fields = (
+                    "scene_id","shot_size","camera_angle","camera_movement","lens",
+                    "composition","duration_seconds","risk_level","risk_reasons","subject",
+                    "action","expression","eyeline","lighting","blocking",
+                    "dialogue_or_narration","visual_intent","transition_hint","status",
+                    "risk_override","risk_override_note",
+                )
+                service.update_shot_fields(
+                    project.id,pid,_value(shot,"id"),
+                    {field:shot[field] for field in fields if field in shot},
+                )
                 st.toast("Shot Plan Draft 已保存")
             except (ShotServiceError, ValueError, KeyError) as exc:
                 st.error(f"保存失败：{exc}")
+        if d.button(
+            "选择性再生成",
+            key=f"regenerate-{pid}-{idx}",
+            disabled=shot.get("status") == "LOCKED",
+            help="只创建这个镜头的新 DRAFT 候选；不会覆盖其他镜头或历史批准版本。",
+        ):
+            try:
+                result = service.regenerate_shot(project, pid, _value(shot,"id"))
+            except (ShotServiceError, ValueError, KeyError) as exc:
+                st.error(f"选择性再生成失败：{exc}")
+            else:
+                st.session_state.director_plan_id = result["id"]
+                st.success("已创建新的 Shot Plan DRAFT；原 revision 与锁定镜头保持不变。")
+                st.rerun()
 
 
 def _render_shot_plan(project) -> None:

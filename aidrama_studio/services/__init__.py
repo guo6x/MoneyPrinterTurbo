@@ -17,7 +17,8 @@ from .final_assembly_runtime import FinalAssemblyRenderService, FinalAssemblyRun
 from .postproduction import FFmpegPostProductionAdapter, PostProductionMediaAdapter, PostProductionService, PostProductionServiceError, PostRenderRequest, PostRenderService
 from .director import DirectorService, DirectorServiceError
 from .producer import ProducerService, ProducerServiceError
-from .runtime_foundation import AIInvocationService, GenerationBriefCompiler, OutputProfileService, RuntimeFoundationError, RuntimePlanService
+from .runtime_foundation import AIInvocationService, GenerationBriefCompiler, GenerationBriefService, OutputProfileService, RuntimeFoundationError, RuntimePlanService
+from .creative_control import CreativeControlError, CreativeLockService
 from .llm_runtime import LLMInvocationError, LLMInvocationGateway
 from .creative_intake import CreativeIntakeError, CreativeIntakeService, DocumentIngestionService, IntakeAnalyzer, SourcePackService
 from .reference_profiles import ReferenceProfileService, ReferenceProfileServiceError
@@ -120,7 +121,8 @@ __all__ = [
     "PostProductionService", "PostRenderService", "PostProductionServiceError", "PostProductionMediaAdapter", "FFmpegPostProductionAdapter", "PostRenderRequest",
     "DirectorService", "DirectorServiceError", "ProducerService", "ProducerServiceError",
     "CurrentProductionState", "CurrentProductionStateService",
-    "OutputProfileService", "GenerationBriefCompiler", "RuntimePlanService", "AIInvocationService", "RuntimeFoundationError",
+    "OutputProfileService", "GenerationBriefCompiler", "GenerationBriefService", "RuntimePlanService", "AIInvocationService", "RuntimeFoundationError",
+    "CreativeControlError", "CreativeLockService",
     "LLMInvocationGateway", "LLMInvocationError",
     "CreativeIntakeService", "CreativeIntakeError", "SourcePackService", "DocumentIngestionService", "IntakeAnalyzer",
     "ReferenceProfileService", "ReferenceProfileServiceError",

@@ -704,6 +704,7 @@ def _render_primary_action(orchestrator, production_service, project, job, readi
                 f"交付 {preview.delivery_resolution} 确定性缩放。"
             )
         st.caption(f"生成质量：{preview.quality_mode} · 以上参数将冻结到实际 RuntimePlan。")
+        _render_generation_brief_editor(orchestrator, project, job)
         st.caption(
             f"最大付费尝试：每镜头 {preview.max_paid_attempts} 次 · "
             f"预计最多 {preview.estimated_provider_requests} 次 Provider 请求。"
@@ -766,6 +767,95 @@ def _render_primary_action(orchestrator, production_service, project, job, readi
             authorization=authorization,
             endpoint_profile_id=endpoint_profile_id,
         )
+
+
+def _render_generation_brief_editor(orchestrator, project, job) -> None:
+    prepare = getattr(orchestrator, "prepare_generation_briefs", None)
+    save_override = getattr(orchestrator, "save_generation_brief_override", None)
+    if not callable(prepare) or not callable(save_override):
+        return
+    try:
+        briefs = prepare(project.id, _value(job, "id"))
+    except Exception as exc:
+        st.warning(f"GenerationBrief 暂不可编辑：{str(exc)[:160]}")
+        return
+    with st.expander("生成简报 · 付费前可编辑", expanded=False):
+        st.caption(
+            "这里编辑的是 Provider-neutral 创作意图，不是 Provider JSON。"
+            "保存会创建新的不可变 HUMAN_OVERRIDE 版本；旧版本与已冻结 RuntimePlan 不会被改写。"
+        )
+        for brief in briefs:
+            characters = "、".join(
+                str(item.get("name") or item.get("id") or "")
+                for item in brief.character_context
+                if isinstance(item, Mapping)
+            ) or "—"
+            st.markdown(f"#### {brief.shot_id} · {characters}")
+            st.caption(
+                f"{brief.origin} · {brief.sha256[:12]}…"
+                + (f" · parent {brief.parent_brief_id[:12]}…" if brief.parent_brief_id else "")
+            )
+            with st.form(f"generation-brief-{brief.id}", clear_on_submit=False):
+                action = st.text_area("人物 / 动作", value=brief.action, key=f"brief-action-{brief.id}")
+                framing = st.text_input("镜头语言 / 景别", value=brief.framing, key=f"brief-framing-{brief.id}")
+                composition = st.text_input("构图", value=brief.composition, key=f"brief-composition-{brief.id}")
+                camera = st.text_input("运镜", value=brief.camera_movement, key=f"brief-camera-{brief.id}")
+                lens = st.text_input("镜头焦段意图", value=brief.lens_intent, key=f"brief-lens-{brief.id}")
+                lighting = st.text_area(
+                    "光线",
+                    value=str(brief.lighting.get("quality") or brief.lighting.get("notes") or ""),
+                    key=f"brief-lighting-{brief.id}",
+                )
+                mood = st.text_input("情绪", value=brief.mood, key=f"brief-mood-{brief.id}")
+                continuity = st.text_area(
+                    "视觉连续性（逗号分隔）",
+                    value="，".join(brief.continuity_constraints),
+                    key=f"brief-continuity-{brief.id}",
+                )
+                negative = st.text_area(
+                    "负向约束（逗号分隔）",
+                    value="，".join(brief.negative_constraints),
+                    key=f"brief-negative-{brief.id}",
+                )
+                dialogue = st.text_area(
+                    "对白 / 声音意图",
+                    value=brief.dialogue_audio_intent,
+                    key=f"brief-dialogue-{brief.id}",
+                )
+                duration = st.number_input(
+                    "镜头创作时长（秒）",
+                    min_value=0.1,
+                    max_value=3600.0,
+                    value=float(brief.target_duration_seconds),
+                    key=f"brief-duration-{brief.id}",
+                )
+                saved = st.form_submit_button("保存 GenerationBrief Draft", type="primary")
+            if saved:
+                try:
+                    save_override(
+                        project.id,
+                        _value(job, "id"),
+                        brief.shot_id,
+                        {
+                            "action": action,
+                            "framing": framing,
+                            "composition": composition,
+                            "camera_movement": camera,
+                            "lens_intent": lens,
+                            "lighting": dict(brief.lighting) | {"quality": lighting},
+                            "mood": mood,
+                            "continuity_constraints": continuity,
+                            "negative_constraints": negative,
+                            "dialogue_audio_intent": dialogue,
+                            "target_duration_seconds": float(duration),
+                        },
+                        base_brief_id=brief.id,
+                    )
+                except Exception as exc:
+                    st.error(f"GenerationBrief 保存失败：{str(exc)[:180]}")
+                else:
+                    st.success("GenerationBrief Draft 已持久保存；付费确认已失效并将重新计算。")
+                    st.rerun()
 
 
 def _select_default_job(project_id: str, jobs: list[object]):
