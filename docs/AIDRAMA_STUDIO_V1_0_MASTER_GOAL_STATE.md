@@ -9,8 +9,8 @@ with `git rev-parse HEAD` after checkout.
 - Target branch: `goal/aidrama-studio-v1-0-final-product-release`
 - Goal base: `3ce90aad6a70e6173a3826bd4e8eb6c039e0221b`
 - Current head: `HEAD`
-- Active checkpoint: final subtitle timing and current-chain post-production
-  correctness after canonical LLM integration closure.
+- Active checkpoint: portable project recovery, active-task deletion safety,
+  provenance-aware diagnostics cleanup and startup reconciliation.
 - No dependency was installed and no live provider request was made.
 
 ## Completed checkpoints with current local evidence
@@ -88,9 +88,31 @@ with `git rev-parse HEAD` after checkout.
   Moonshot China and Global endpoints have distinct identities and deployment
   classifications; custom/unknown endpoints remain UNSPECIFIED rather than
   being guessed.
+- FinalAssembly rendering now verifies every frozen source hash before invoking
+  its adapter and persists the actual probed source durations, hashes and
+  cumulative timeline in the immutable render attempt.
+- Final subtitles now derive from the exact successful FinalAssembly render
+  attempt pinned by the current PostProductionPlan. Project/assembly/job/shot
+  plan/script provenance is fail-closed; non-contiguous repeated beats become
+  separate cues; overlapping, incomplete or out-of-duration timelines are
+  rejected.
+- TTS requires a persisted SubtitleTrack from the current chain, preserves cue
+  gaps and absolute timing through a real FFmpeg timeline, and stores physical
+  output hash, size, duration and cue fingerprint. Post rendering rejects a
+  changed or mismatched source subtitle track.
+- Post render attempts freeze the FinalAssembly, subtitle, voice, music and
+  AudioMix fingerprints. Frozen input files and completed final/post outputs
+  are hash-checked before use; deleted or tampered outputs cannot satisfy
+  current workflow completion.
+- FFmpeg audio mixing pads/trims each input to the source-video duration and
+  verifies the rendered duration, so short voice/music no longer truncates the
+  final video. A real local media test covers this path.
+- The Post UI only selects a plan belonging to its visible immutable
+  FinalAssembly, preventing an older production chain from being reused.
 - Current validation: Python compile PASS, `git diff --check` PASS, focused
-  provider/runtime/security/LLM tests PASS, complete AIDrama suite
-  `273 passed, 10 warnings`. No live request was made.
+  FinalAssembly/Post/TTS tests `30 passed, 10 warnings`, complete AIDrama suite
+  `285 passed, 10 warnings`, and AIDrama/original-MPT HTTP startup smokes PASS.
+  No live request was made.
 
 ## Externally blocked gates
 
@@ -103,9 +125,8 @@ with `git rev-parse HEAD` after checkout.
 
 ## Known remaining work
 
-- Close final subtitle timing, cloud disclosure/input provenance, remote file
-  lifecycle, portable project restore/delete recovery and diagnostics repair
-  actions.
+- Close cloud disclosure/input provenance, remote file lifecycle, portable
+  project restore/delete recovery and diagnostics repair actions.
 - Complete upstream MPT security delta review, distribution license/SBOM and
   build/installer definitions without installing tools.
 - Run full non-live E2E, portable restore E2E, browser acceptance at both
@@ -115,8 +136,22 @@ with `git rev-parse HEAD` after checkout.
 
 ## Next safe implementation step
 
-Audit and close final subtitle timing plus current-chain post-production
-derivation without changing media engines or making a live provider call.
+Harden project archive/import isolation, complete recoverable deletion and
+active-task guards, then make diagnostics cleanup provenance-aware and startup
+reconciliation resubmit-safe.
+
+## Final media and post-production acceptance
+
+- `ARTIFACT_HASH_VERIFY_BEFORE_ASSEMBLY=PASS`
+- `FINAL_TIMELINE_MAP=PASS`
+- `FINAL_MEDIA_SUBTITLE_TIMING=PASS`
+- `TTS_TIMELINE_ALIGNMENT=PASS`
+- `BGM=PASS`
+- `AUDIO_MIX=PASS`
+- `REAL_POST_RENDER=PASS`
+- `POST_OUTPUT_PROBE=PASS`
+- `POST_OUTPUT_SHA256=PASS`
+- `POST_CURRENT_CHAIN_DERIVATION=PASS`
 
 ## Canonical LLM integration acceptance
 

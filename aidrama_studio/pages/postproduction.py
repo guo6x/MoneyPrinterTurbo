@@ -416,6 +416,16 @@ def _script_revision_id(repository: Any, job: Any) -> str | None:
         return None
 
 
+def _plan_for_assembly(plans: list[Any], assembly_id: str) -> Any | None:
+    """Select only a post plan belonging to the visible immutable assembly."""
+    matching = [
+        plan
+        for plan in plans
+        if str(_value(plan, "source_final_assembly_id", "")) == str(assembly_id)
+    ]
+    return matching[-1] if matching else None
+
+
 def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: Any) -> None:
     """Thin post-production workspace backed exclusively by PostProductionService."""
     st.subheader("最终后期")
@@ -425,7 +435,7 @@ def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: An
         return
     service = PostProductionService(repository=repository)
     plans = service.list_plans(project.id)
-    plan = plans[-1] if plans else None
+    plan = _plan_for_assembly(plans, assembly.id)
     if plan is None:
         if st.button("开始后期", type="primary", key=f"post-start-{project.id}-{assembly.id}"):
             try:

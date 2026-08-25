@@ -68,6 +68,12 @@ class FinalAssemblyRuntimeService:
         temporary_path: Path | None = None
         try:
             source_paths = tuple(self._resolve_source_path(project_id, item.source_path) for item in manifest.items)
+            source_hashes = tuple(self._sha256(path) for path in source_paths)
+            for item, source_sha256 in zip(manifest.items, source_hashes):
+                if item.source_sha256 and source_sha256 != item.source_sha256:
+                    raise FinalAssemblyRuntimeServiceError(
+                        "frozen FinalAssembly source SHA256 校验失败"
+                    )
             profile = self.repository.get_output_profile(self._assembly(project_id, assembly_id).output_profile_id) if self._assembly(project_id, assembly_id).output_profile_id else None
             profile_data = profile.model_dump(mode="json") if profile is not None else None
             request = FinalAssemblyRenderRequest.from_manifest(manifest, source_paths, output_profile=profile_data)
@@ -78,6 +84,11 @@ class FinalAssemblyRuntimeService:
                 raise FinalAssemblyRuntimeError("frozen source validation failed")
             source_metadata = [adapter.probe_output(path) for path in source_paths]
             expected_duration = sum(self._duration(meta) for meta in source_metadata)
+            source_trace = self._source_trace(
+                manifest,
+                source_metadata=source_metadata,
+                source_hashes=source_hashes,
+            )
             request = FinalAssemblyRenderRequest.from_manifest(
                 manifest, source_paths, expected_duration=expected_duration, output_profile=profile_data
             )
@@ -92,7 +103,7 @@ class FinalAssemblyRuntimeService:
                 metadata_json={
                     "assembly_id": assembly_id,
                     "project_id": project_id,
-                    "source_items": self._source_trace(manifest),
+                    "source_items": source_trace,
                     "expected_duration_seconds": expected_duration,
                 },
             )
@@ -105,7 +116,7 @@ class FinalAssemblyRuntimeService:
             probed["sha256"] = self._sha256(temporary_path)
             probed["assembly_id"] = assembly_id
             probed["render_attempt_id"] = attempt_id
-            probed["source_items"] = self._source_trace(manifest)
+            probed["source_items"] = source_trace
             self._atomic_finalize(temporary_path, output_path, project_id)
             temporary_path = None
             finished_at = _now()
@@ -291,9 +302,22 @@ class FinalAssemblyRuntimeService:
         return attempt_root / "episode.mp4", PurePosixPath("final", assembly_id, "attempts", attempt_id, "episode.mp4").as_posix()
 
     @staticmethod
-    def _source_trace(manifest) -> list[dict[str, object]]:
-        return [
-            {
+    def _source_trace(
+        manifest,
+        *,
+        source_metadata: list[dict[str, object]] | None = None,
+        source_hashes: tuple[str, ...] | None = None,
+    ) -> list[dict[str, object]]:
+        timeline = 0.0
+        trace: list[dict[str, object]] = []
+        metadata_items = source_metadata or [{} for _ in manifest.items]
+        hashes = source_hashes or tuple(item.source_sha256 or "" for item in manifest.items)
+        for item, metadata, source_sha256 in zip(manifest.items, metadata_items, hashes):
+            duration = FinalAssemblyRuntimeService._duration(metadata)
+            start = timeline
+            end = start + duration
+            timeline = end
+            trace.append({
                 "order_index": item.order_index,
                 "production_shot_id": item.production_shot_id,
                 "production_execution_id": item.production_execution_id,
@@ -301,9 +325,12 @@ class FinalAssemblyRuntimeService:
                 "qc_result_id": item.qc_result_id,
                 "review_id": item.review_id,
                 "source_relative_path": item.source_path.replace("\\", "/"),
-            }
-            for item in manifest.items
-        ]
+                "source_sha256": source_sha256 or None,
+                "source_duration_seconds": duration,
+                "timeline_start_seconds": round(start, 6),
+                "timeline_end_seconds": round(end, 6),
+            })
+        return trace
 
     @staticmethod
     def _duration(metadata: dict[str, object]) -> float:

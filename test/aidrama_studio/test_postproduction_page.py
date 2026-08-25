@@ -116,6 +116,18 @@ def test_safe_download_name_does_not_leak_path():
     assert page._safe_relative_path("final/assembly/episode.mp4") == "final/assembly/episode.mp4"
 
 
+def test_post_plan_selection_never_crosses_visible_assembly_chain():
+    plans = [
+        SimpleNamespace(id="old", source_final_assembly_id="assembly-old"),
+        SimpleNamespace(id="current-1", source_final_assembly_id="assembly-current"),
+        SimpleNamespace(id="other-newest", source_final_assembly_id="assembly-other"),
+        SimpleNamespace(id="current-2", source_final_assembly_id="assembly-current"),
+    ]
+
+    assert page._plan_for_assembly(plans, "assembly-current").id == "current-2"
+    assert page._plan_for_assembly(plans, "missing") is None
+
+
 def test_successful_assembly_renders_preview_metadata_and_export(tmp_path):
     output = tmp_path / "episode.mp4"
     output.write_bytes(b"fixture-mp4")

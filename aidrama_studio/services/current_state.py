@@ -8,6 +8,7 @@ aggregating append-only failures across every historical attempt.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -142,7 +143,8 @@ class CurrentProductionStateService:
         root = (self.repository.paths.projects / project_id).resolve()
         for source_attempt in reversed(successful_sources):
             source_path = self._safe_project_file(root, source_attempt.output_relative_path)
-            if source_path is None or not source_path.is_file() or source_path.stat().st_size <= 0:
+            source_sha256 = str(source_attempt.metadata_json.get("sha256") or "")
+            if source_path is None or not self._matches_sha256(source_path, source_sha256):
                 continue
             for plan in self.repository.list_post_plans(project_id):
                 if plan.source_final_assembly_id != assembly.id:
@@ -160,9 +162,29 @@ class CurrentProductionStateService:
                     ):
                         continue
                     output = self._safe_project_file(root, attempt.output_relative_path)
-                    if output is not None and output.is_file() and output.stat().st_size > 0:
+                    output_sha256 = str(attempt.metadata_json.get("sha256") or "")
+                    if output is not None and self._matches_sha256(output, output_sha256):
                         return True
         return False
+
+    @classmethod
+    def _matches_sha256(cls, path: Path, expected: str) -> bool:
+        if not expected:
+            return False
+        try:
+            return path.is_file() and path.stat().st_size > 0 and cls._sha256(path) == expected
+        except OSError:
+            # A renderer/cleanup race must fail readiness closed rather than
+            # crashing a dashboard read.
+            return False
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
 
     @staticmethod
     def _safe_project_file(root: Path, relative: str | None) -> Path | None:

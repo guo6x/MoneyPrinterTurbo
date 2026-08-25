@@ -107,6 +107,41 @@ def test_missing_source_records_failure_and_leaves_no_canonical_output(context):
     assert not (repository.paths.projects / project.id / "final" / assembly.id / "episode.mp4").exists()
 
 
+def test_frozen_source_hash_mismatch_blocks_adapter_before_render(context):
+    repository, project = context
+    job, shots = _shots(repository, project, 1)
+    _execution, artifact, _qc, _review = _source(
+        repository, project, job, shots[0], suffix="hash"
+    )
+    manifest_service = FinalAssemblyService(repository)
+    assembly = manifest_service.create_assembly(project.id, job.id, freeze=True)
+    source = repository.paths.projects / project.id / artifact.path
+    source.write_bytes(b"replaced-after-freeze")
+
+    class NeverRender:
+        name = "never-render"
+        called = False
+
+        def validate_sources(self, request):
+            self.called = True
+            return True
+
+        def probe_output(self, path):
+            self.called = True
+            return {}
+
+        def render(self, request, output_path):
+            self.called = True
+
+    adapter = NeverRender()
+    service = FinalAssemblyRuntimeService(repository, adapter=adapter)
+    with pytest.raises(FinalAssemblyRuntimeServiceError, match="SHA256"):
+        service.render(project.id, assembly.id)
+
+    assert adapter.called is False
+    assert service.list_attempts(project.id, assembly.id)[0].status.value == "FAILED"
+
+
 def test_manifest_path_traversal_is_rejected_before_adapter_render(context):
     repository, project = context
     job, shots = _shots(repository, project, 1)

@@ -8,6 +8,8 @@ new append-only attempt and a unique project-relative output path.
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 import os
 import shutil
 import subprocess
@@ -58,6 +60,9 @@ class PostProductionMediaAdapter:
     def render(self, request: PostRenderRequest) -> dict[str, object]:
         raise NotImplementedError
 
+    def probe_output(self, output_path: Path) -> dict[str, object]:
+        raise NotImplementedError
+
 
 class FFmpegPostProductionAdapter(PostProductionMediaAdapter):
     """Small FFmpeg adapter using the existing MPT binary resolver."""
@@ -71,6 +76,10 @@ class FFmpegPostProductionAdapter(PostProductionMediaAdapter):
     def render(self, request: PostRenderRequest) -> dict[str, object]:
         if not request.source_path.is_file() or request.source_path.stat().st_size <= 0:
             raise PostProductionServiceError("FinalAssembly source 文件不存在或为空")
+        source_probe = self.probe_output(request.source_path)
+        source_duration = float(source_probe.get("duration_seconds", 0) or 0)
+        if source_duration <= 0:
+            raise PostProductionServiceError("FinalAssembly source 缺少有效时长")
         request.output_path.parent.mkdir(parents=True, exist_ok=True)
         command = [self.ffmpeg_binary or self._resolve_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(request.source_path)]
         extra_inputs: list[Path] = []
@@ -98,17 +107,18 @@ class FFmpegPostProductionAdapter(PostProductionMediaAdapter):
         audio_map = "0:a:0?"
         if request.voice_path is not None or request.music_path is not None:
             audio_inputs = ["[src]"]
-            labels = [f"[{audio_source_index}:a:0]volume={request.audio_mix.source_gain}[src]"]
+            duration_filter = f"apad,atrim=duration={source_duration:.6f}"
+            labels = [f"[{audio_source_index}:a:0]volume={request.audio_mix.source_gain},{duration_filter}[src]"]
             next_index = audio_source_index + 1
             if request.voice_path is not None:
-                labels.append(f"[{next_index}:a:0]volume={request.audio_mix.voice_gain}[voice]")
+                labels.append(f"[{next_index}:a:0]volume={request.audio_mix.voice_gain},{duration_filter}[voice]")
                 audio_inputs.append("[voice]")
                 next_index += 1
             if request.music_path is not None:
                 gain = request.audio_mix.music_gain * (request.music_track.gain if request.music_track else 1.0)
-                labels.append(f"[{next_index}:a:0]volume={gain}[music]")
+                labels.append(f"[{next_index}:a:0]volume={gain},{duration_filter}[music]")
                 audio_inputs.append("[music]")
-            raw_mix = "".join(audio_inputs) + f"amix=inputs={len(audio_inputs)}:duration=first:dropout_transition=2[mix_raw]"
+            raw_mix = "".join(audio_inputs) + f"amix=inputs={len(audio_inputs)}:duration=longest:dropout_transition=2[mix_raw]"
             labels.append(raw_mix)
             if request.audio_mix.normalize:
                 # ``normalize`` is a real FFmpeg operation, not a persisted
@@ -122,7 +132,7 @@ class FFmpegPostProductionAdapter(PostProductionMediaAdapter):
         if filters:
             command += ["-filter_complex", ";".join(filters)]
             command += ["-map", video_map, "-map", audio_map]
-            command += ["-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-movflags", "+faststart", "-shortest"]
+            command += ["-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-movflags", "+faststart", "-t", f"{source_duration:.6f}"]
         else:
             command += ["-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy"]
         command.append(str(request.output_path))
@@ -217,6 +227,16 @@ class PostProductionService:
         if revision is None or revision["project_id"] != project_id:
             raise PostProductionServiceError("Structured Script revision 不属于该项目")
         script = revision["content"]
+        if plan_id is not None:
+            cues = self._build_final_subtitle_cues(
+                project_id,
+                plan_id,
+                script_revision_id,
+                script,
+                requested_shot_plan_revision_id=shot_plan_revision_id,
+            )
+            track = SubtitleTrack(id=track_id or uuid4().hex, project_id=project_id, plan_id=plan_id, source_script_revision_id=script_revision_id, enabled=enabled, cues=cues, created_at=_now(), updated_at=_now())
+            return self.repository.create_post_subtitle_track(track)
         beat_to_shot: dict[str, str] = {}
         if shot_plan_revision_id is not None:
             shot_revision = self.repository.get_shot_revision(shot_plan_revision_id)
@@ -239,6 +259,228 @@ class PostProductionService:
                 timeline = scene_start + float(scene.estimated_duration_seconds)
         track = SubtitleTrack(id=track_id or uuid4().hex, project_id=project_id, plan_id=plan_id, source_script_revision_id=script_revision_id, enabled=enabled, cues=cues, created_at=_now(), updated_at=_now())
         return self.repository.create_post_subtitle_track(track) if plan_id is not None else track
+
+    def _build_final_subtitle_cues(
+        self,
+        project_id: str,
+        plan_id: str,
+        script_revision_id: str,
+        script,
+        *,
+        requested_shot_plan_revision_id: str | None,
+    ) -> list[SubtitleCue]:
+        """Map script cues onto the exact frozen FinalAssembly timeline."""
+
+        plan = self.get_plan(project_id, plan_id)
+        assembly = self.repository.get_final_assembly(plan.source_final_assembly_id)
+        if assembly is None or assembly.project_id != project_id:
+            raise PostProductionServiceError("PostProductionPlan 的 FinalAssembly 不属于该项目")
+        job = self.repository.get_production_job(assembly.production_job_id)
+        if job is None or job.project_id != project_id:
+            raise PostProductionServiceError("FinalAssembly 的 ProductionJob 不属于该项目")
+        if (
+            requested_shot_plan_revision_id is not None
+            and requested_shot_plan_revision_id != job.shot_plan_revision_id
+        ):
+            raise PostProductionServiceError("Shot Plan revision 不属于当前 FinalAssembly chain")
+        shot_revision = self.repository.get_shot_revision(job.shot_plan_revision_id)
+        if shot_revision is None or shot_revision["project_id"] != project_id:
+            raise PostProductionServiceError("FinalAssembly 的 Shot Plan revision 不可用")
+        if shot_revision["source_script_revision_id"] != script_revision_id:
+            raise PostProductionServiceError("Structured Script revision 不属于当前 FinalAssembly chain")
+
+        script_beats: dict[str, tuple[Any, Any]] = {}
+        for scene in script.scenes:
+            for beat in scene.beats:
+                if beat.id in script_beats:
+                    raise PostProductionServiceError(
+                        f"Structured Script 包含跨 Scene 重复 Beat ID: {beat.id}"
+                    )
+                script_beats[beat.id] = (scene, beat)
+        shots = {shot.id: shot for shot in shot_revision["content"].shots}
+        beat_segments: dict[str, list[tuple[float, float, str]]] = {}
+        scene_segments: dict[str, list[tuple[float, float, str]]] = {}
+        manifest_items = sorted(
+            self.repository.list_final_assembly_items(assembly.id),
+            key=lambda item: (item.order_index, item.id),
+        )
+        if not manifest_items:
+            raise PostProductionServiceError("FinalAssembly timeline map 为空")
+        if not plan.source_final_assembly_render_attempt_id:
+            raise PostProductionServiceError("PostProductionPlan 尚未冻结实际 FinalAssembly render timeline")
+        render_attempt = self.repository.get_final_assembly_render_attempt(
+            plan.source_final_assembly_render_attempt_id
+        )
+        if (
+            render_attempt is None
+            or render_attempt.final_assembly_id != assembly.id
+            or render_attempt.status is not FinalAssemblyRenderAttemptStatus.SUCCEEDED
+        ):
+            raise PostProductionServiceError("PostProductionPlan 的 FinalAssembly render attempt 不可用")
+        source_trace = render_attempt.metadata_json.get("source_items")
+        if not isinstance(source_trace, list) or len(source_trace) != len(manifest_items):
+            raise PostProductionServiceError("FinalAssembly render attempt 缺少实际 source timeline")
+        final_duration = float(render_attempt.metadata_json.get("duration_seconds", 0) or 0)
+        if final_duration <= 0:
+            raise PostProductionServiceError("FinalAssembly render attempt 缺少实际成片时长")
+        try:
+            output = self.final_assembly_service.resolve_output_path(
+                project_id,
+                assembly.id,
+                render_attempt.id,
+            )
+        except TypeError as exc:
+            raise PostProductionServiceError("FinalAssembly resolver 不支持冻结的 render attempt") from exc
+        expected_output_sha = str(render_attempt.metadata_json.get("sha256") or "")
+        if (
+            output is None
+            or not Path(output).is_file()
+            or not expected_output_sha
+            or self._sha256(Path(output)) != expected_output_sha
+        ):
+            raise PostProductionServiceError("FinalAssembly render output SHA256 校验失败")
+        previous_end = 0.0
+        for item, trace in zip(manifest_items, source_trace):
+            if not isinstance(trace, Mapping):
+                raise PostProductionServiceError("FinalAssembly source timeline entry 无效")
+            if any(
+                str(trace.get(key) or "") != str(getattr(item, key))
+                for key in (
+                    "production_shot_id",
+                    "production_execution_id",
+                    "production_artifact_id",
+                )
+            ):
+                raise PostProductionServiceError("FinalAssembly source timeline provenance 不匹配")
+            try:
+                start = float(trace.get("timeline_start_seconds"))
+                end = float(trace.get("timeline_end_seconds"))
+            except (TypeError, ValueError):
+                raise PostProductionServiceError("FinalAssembly timeline map 无效")
+            if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+                raise PostProductionServiceError("FinalAssembly timeline map 无效")
+            if abs(start - previous_end) > 0.01 or end > final_duration + 0.35:
+                raise PostProductionServiceError("FinalAssembly source timeline 与实际成片时长不匹配")
+            previous_end = end
+            production_shot = self.repository.get_production_shot(item.production_shot_id)
+            if production_shot is None or production_shot.production_job_id != job.id:
+                raise PostProductionServiceError("FinalAssembly item 不属于当前 ProductionJob")
+            shot = shots.get(production_shot.shot_id)
+            if shot is None:
+                raise PostProductionServiceError("FinalAssembly item 无法映射到 Shot Plan")
+            interval = (start, end, shot.id)
+            scene_segments.setdefault(shot.scene_id, []).append(interval)
+            sourced = [
+                script_beats[beat_id][1]
+                for beat_id in shot.source_script_beat_ids
+                if beat_id in script_beats
+            ]
+            if not sourced:
+                continue
+            weights = [
+                float(beat.estimated_duration_seconds or self._text_duration(beat.text))
+                for beat in sourced
+            ]
+            total_weight = sum(weights) or float(len(weights))
+            cursor = start
+            duration = end - start
+            for index, (beat, weight) in enumerate(zip(sourced, weights)):
+                segment_end = (
+                    end
+                    if index == len(sourced) - 1
+                    else cursor + duration * weight / total_weight
+                )
+                beat_segments.setdefault(beat.id, []).append(
+                    (cursor, segment_end, shot.id)
+                )
+                cursor = segment_end
+
+        if abs(previous_end - final_duration) > max(0.05, final_duration * 0.01):
+            raise PostProductionServiceError("FinalAssembly source timeline 未覆盖实际成片时长")
+
+        cues: list[SubtitleCue] = []
+        for scene in sorted(script.scenes, key=lambda item: item.order):
+            ordered_beats = sorted(scene.beats, key=lambda item: item.order)
+            weights = [
+                float(beat.estimated_duration_seconds or self._text_duration(beat.text))
+                for beat in ordered_beats
+            ]
+            total_weight = sum(weights) or float(len(weights) or 1)
+            scene_intervals = sorted(scene_segments.get(scene.id, []))
+            scene_start = scene_intervals[0][0] if scene_intervals else None
+            scene_end = scene_intervals[-1][1] if scene_intervals else None
+            has_explicit_subtitle = any(
+                beat_segments.get(beat.id)
+                for beat in ordered_beats
+                if beat.type.value in {"DIALOGUE", "NARRATION", "INNER_MONOLOGUE"}
+            )
+            elapsed_weight = 0.0
+            for beat, weight in zip(ordered_beats, weights):
+                if beat.type.value not in {"DIALOGUE", "NARRATION", "INNER_MONOLOGUE"} or not beat.text.strip():
+                    elapsed_weight += weight
+                    continue
+                explicit = beat_segments.get(beat.id, [])
+                if explicit:
+                    ordered_segments = sorted(explicit)
+                    groups: list[list[tuple[float, float, str]]] = []
+                    for segment in ordered_segments:
+                        if not groups or segment[0] > groups[-1][-1][1] + 0.01:
+                            groups.append([segment])
+                        else:
+                            groups[-1].append(segment)
+                else:
+                    if has_explicit_subtitle:
+                        raise PostProductionServiceError(
+                            f"subtitle beat {beat.id} 缺少当前 Shot Plan source trace"
+                        )
+                    if scene_start is None or scene_end is None or scene_end <= scene_start:
+                        raise PostProductionServiceError(
+                            f"subtitle beat {beat.id} 无法映射到 FinalAssembly timeline"
+                        )
+                    scene_duration = scene_end - scene_start
+                    start = scene_start + scene_duration * elapsed_weight / total_weight
+                    end = scene_start + scene_duration * (elapsed_weight + weight) / total_weight
+                    midpoint = (start + end) / 2
+                    shot_id = next(
+                        (
+                            item[2]
+                            for item in scene_intervals
+                            if item[0] <= midpoint <= item[1]
+                        ),
+                        scene_intervals[0][2],
+                    )
+                    groups = [[(start, end, shot_id)]]
+                for group_index, group in enumerate(groups, start=1):
+                    start = group[0][0]
+                    end = group[-1][1]
+                    cues.append(
+                        SubtitleCue(
+                            id=self._subtitle_cue_id(beat.id, group_index, len(groups)),
+                            text=beat.text.strip(),
+                            start_seconds=round(start, 6),
+                            end_seconds=round(end, 6),
+                            scene_id=scene.id,
+                            shot_id=group[0][2],
+                            beat_id=beat.id,
+                        )
+                    )
+                elapsed_weight += weight
+        ordered_cues = sorted(cues, key=lambda item: (item.start_seconds, item.id))
+        for previous, current in zip(ordered_cues, ordered_cues[1:]):
+            if current.start_seconds < previous.end_seconds - 0.01:
+                raise PostProductionServiceError("Final subtitle timeline 包含重叠 cue")
+        if ordered_cues and ordered_cues[-1].end_seconds > final_duration + 0.01:
+            raise PostProductionServiceError("Final subtitle timeline 超出实际成片时长")
+        return ordered_cues
+
+    @staticmethod
+    def _subtitle_cue_id(beat_id: str, index: int, total: int) -> str:
+        suffix = f"-{index}" if total > 1 else ""
+        candidate = f"cue-{beat_id}{suffix}"
+        if len(candidate) <= 80:
+            return candidate
+        digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:16]
+        return f"cue-{beat_id[:55]}-{digest}{suffix}"[:80]
 
     extract_subtitle_timeline = build_subtitle_timeline
     generate_subtitles = build_subtitle_timeline
@@ -294,7 +536,11 @@ class PostProductionService:
     def add_voice_track(self, project_id: str, plan_id: str, *, path: str | None = None, voice_assignments: Mapping[str, str] | None = None, metadata: Mapping[str, Any] | None = None, track_id: str | None = None) -> VoiceTrack:
         self.get_plan(project_id, plan_id)
         relative = self._validate_optional_audio_path(project_id, path)
-        track = VoiceTrack(id=track_id or uuid4().hex, project_id=project_id, plan_id=plan_id, path=relative, voice_assignments=dict(voice_assignments or {}), metadata_json=dict(metadata or {}), created_at=_now())
+        safe_metadata = dict(metadata or {})
+        if relative:
+            physical = self._resolve_project_relative(project_id, relative, must_exist=True)
+            safe_metadata.update({"sha256": self._sha256(physical), "size_bytes": physical.stat().st_size})
+        track = VoiceTrack(id=track_id or uuid4().hex, project_id=project_id, plan_id=plan_id, path=relative, voice_assignments=dict(voice_assignments or {}), metadata_json=safe_metadata, created_at=_now())
         return self.repository.create_post_voice_track(track)
 
     def list_voice_tracks(self, project_id: str, plan_id: str) -> list[VoiceTrack]:
@@ -341,7 +587,10 @@ class PostProductionService:
     def add_music_track(self, project_id: str, plan_id: str, path: str, *, start_seconds: float = 0, end_seconds: float | None = None, gain: float = 1.0, loop: bool = False, fade_in_seconds: float = 0, fade_out_seconds: float = 0, metadata: Mapping[str, Any] | None = None, track_id: str | None = None) -> MusicTrack:
         self.get_plan(project_id, plan_id)
         relative = self._validate_audio_path(project_id, path)
-        track = MusicTrack(id=track_id or uuid4().hex, project_id=project_id, plan_id=plan_id, path=relative, start_seconds=start_seconds, end_seconds=end_seconds, gain=gain, loop=loop, fade_in_seconds=fade_in_seconds, fade_out_seconds=fade_out_seconds, metadata_json=dict(metadata or {}), created_at=_now())
+        physical = self._resolve_project_relative(project_id, relative, must_exist=True)
+        safe_metadata = dict(metadata or {})
+        safe_metadata.update({"sha256": self._sha256(physical), "size_bytes": physical.stat().st_size})
+        track = MusicTrack(id=track_id or uuid4().hex, project_id=project_id, plan_id=plan_id, path=relative, start_seconds=start_seconds, end_seconds=end_seconds, gain=gain, loop=loop, fade_in_seconds=fade_in_seconds, fade_out_seconds=fade_out_seconds, metadata_json=safe_metadata, created_at=_now())
         return self.repository.create_post_music_track(track)
 
     def list_music_tracks(self, project_id: str, plan_id: str) -> list[MusicTrack]:
@@ -373,27 +622,111 @@ class PostProductionService:
             project_root = self._project_root(project_id)
             if project_root not in source.parents:
                 raise PostProductionServiceError("FinalAssembly source 不属于该项目")
+            source_sha256 = self._sha256(source)
+            source_attempt = (
+                self.repository.get_final_assembly_render_attempt(
+                    plan.source_final_assembly_render_attempt_id
+                )
+                if plan.source_final_assembly_render_attempt_id
+                else None
+            )
+            expected_source_sha = str(
+                (source_attempt.metadata_json.get("sha256") if source_attempt else "")
+                or ""
+            )
+            if plan.source_final_assembly_render_attempt_id and not expected_source_sha:
+                raise PostProductionServiceError("FinalAssembly source 缺少 SHA256 provenance")
+            if expected_source_sha and source_sha256 != expected_source_sha:
+                raise PostProductionServiceError("FinalAssembly source SHA256 校验失败")
+            try:
+                source_probe = dict(self.media_adapter.probe_output(source))
+            except Exception as exc:
+                raise PostProductionServiceError(f"FinalAssembly source probe 失败: {exc}") from exc
+            source_duration = float(source_probe.get("duration_seconds", 0) or 0)
+            if not source_probe.get("video_stream") or source_duration <= 0:
+                raise PostProductionServiceError("FinalAssembly source 缺少有效 video stream/duration")
             output, relative = self._choose_output(project_id, plan_id, attempt.id)
             temporary = output.with_name(f".{attempt.id}.in-progress.mp4")
-            subtitle_path = self._subtitle_path(project_id, plan, subtitle_track_id)
+            subtitle_track = self._subtitle_track(project_id, plan, subtitle_track_id)
+            subtitle_path = (
+                self._resolve_project_relative(
+                    project_id,
+                    self.export_srt(project_id, subtitle_track.id, plan_id=plan.id),
+                    suffix=".srt",
+                    must_exist=True,
+                )
+                if subtitle_track is not None
+                else None
+            )
             music = self._music_track(project_id, plan_id, music_track_id)
             voice = self._voice_track(project_id, plan_id, voice_track_id)
+            voice_path = self._resolve_optional_path(project_id, voice.path if voice else None)
+            music_path = self._resolve_optional_path(project_id, music.path if music else None)
+            if voice_path is not None:
+                expected_voice_sha = str(voice.metadata_json.get("sha256") or "")
+                if not expected_voice_sha or self._sha256(voice_path) != expected_voice_sha:
+                    raise PostProductionServiceError("VoiceTrack SHA256 校验失败")
+                if voice.metadata_json.get("kind") == "TTS_TIMELINE":
+                    source_track_id = str(
+                        voice.metadata_json.get("source_subtitle_track_id") or ""
+                    )
+                    source_track = self.repository.get_post_subtitle_track(source_track_id)
+                    if (
+                        source_track is None
+                        or source_track.project_id != project_id
+                        or source_track.plan_id != plan_id
+                    ):
+                        raise PostProductionServiceError("VoiceTrack 的 SubtitleTrack provenance 无效")
+                    expected_cues_sha = str(
+                        voice.metadata_json.get("source_subtitle_cues_sha256") or ""
+                    )
+                    if (
+                        not expected_cues_sha
+                        or self._subtitle_cues_sha256(source_track) != expected_cues_sha
+                    ):
+                        raise PostProductionServiceError("VoiceTrack 的 SubtitleTrack 已发生变化")
+                    if subtitle_track is not None and source_track.id != subtitle_track.id:
+                        raise PostProductionServiceError("VoiceTrack 与本次 SubtitleTrack 不匹配")
+            if music_path is not None:
+                expected_music_sha = str(music.metadata_json.get("sha256") or "")
+                if not expected_music_sha or self._sha256(music_path) != expected_music_sha:
+                    raise PostProductionServiceError("MusicTrack SHA256 校验失败")
+            input_fingerprints = {
+                "source_final_assembly_render_attempt_id": plan.source_final_assembly_render_attempt_id,
+                "source_sha256": source_sha256,
+                "source_duration_seconds": source_duration,
+                "subtitle_track_id": subtitle_track.id if subtitle_track else None,
+                "subtitle_sha256": self._sha256(subtitle_path) if subtitle_path else None,
+                "voice_track_id": voice.id if voice else None,
+                "voice_sha256": self._sha256(voice_path) if voice_path else None,
+                "voice_source_subtitle_track_id": (
+                    voice.metadata_json.get("source_subtitle_track_id") if voice else None
+                ),
+                "music_track_id": music.id if music else None,
+                "music_sha256": self._sha256(music_path) if music_path else None,
+                "audio_mix": plan.audio_mix.model_dump(mode="json"),
+            }
             self._validate_supported_music_parameters(music)
-            self.repository.update_post_render_attempt(attempt.id, status=PostRenderAttemptStatus.RUNNING, started_at=_now(), metadata_json={"project_id": project_id, "plan_id": plan_id, "source_final_assembly_id": plan.source_final_assembly_id})
+            self.repository.update_post_render_attempt(attempt.id, status=PostRenderAttemptStatus.RUNNING, started_at=_now(), metadata_json={"project_id": project_id, "plan_id": plan_id, "source_final_assembly_id": plan.source_final_assembly_id, "input_fingerprints": input_fingerprints})
             render_result = self.media_adapter.render(
                 PostRenderRequest(
                     source_path=source,
                     output_path=temporary,
                     subtitle_path=subtitle_path,
-                    voice_path=self._resolve_optional_path(project_id, voice.path if voice else None),
-                    music_path=self._resolve_optional_path(project_id, music.path if music else None),
+                    voice_path=voice_path,
+                    music_path=music_path,
                     music_track=music,
                     audio_mix=plan.audio_mix,
                 )
             )
             metadata = self._sanitize_metadata(dict(render_result), project_id)
-            probe = self._validate_output(temporary, require_audio=bool(music or voice))
+            probe = self._validate_output(
+                temporary,
+                require_audio=bool(music or voice),
+                expected_duration=source_duration,
+            )
             metadata.update({"size_bytes": temporary.stat().st_size, "sha256": self._sha256(temporary), "source_final_assembly_id": plan.source_final_assembly_id})
+            metadata["input_fingerprints"] = input_fingerprints
             if plan.source_final_assembly_render_attempt_id:
                 metadata["source_final_assembly_render_attempt_id"] = plan.source_final_assembly_render_attempt_id
             if probe:
@@ -432,7 +765,13 @@ class PostProductionService:
             raise PostProductionServiceError("PostRenderAttempt 不属于该项目或计划")
         if attempt is None or attempt.status is not PostRenderAttemptStatus.SUCCEEDED or not attempt.output_relative_path:
             return None
-        return self._resolve_project_relative(project_id, attempt.output_relative_path, suffix=".mp4", must_exist=True)
+        output = self._resolve_project_relative(project_id, attempt.output_relative_path, suffix=".mp4", must_exist=True)
+        if output is None:
+            return None
+        expected_sha256 = str(attempt.metadata_json.get("sha256") or "")
+        if not expected_sha256 or self._sha256(output) != expected_sha256:
+            return None
+        return output
 
     def _ensure_source_attempt_pinned(self, project_id: str, plan: PostProductionPlan) -> PostProductionPlan:
         if plan.source_final_assembly_render_attempt_id:
@@ -504,14 +843,33 @@ class PostProductionService:
     def _resolve_optional_path(self, project_id: str, path: str | None) -> Path | None:
         return self._resolve_project_relative(project_id, path) if path else None
 
-    def _subtitle_path(self, project_id: str, plan: PostProductionPlan, track_id: str | None) -> Path | None:
+    def _subtitle_track(self, project_id: str, plan: PostProductionPlan, track_id: str | None) -> SubtitleTrack | None:
         if not plan.subtitle_enabled:
             return None
         track = self.repository.get_post_subtitle_track(track_id) if track_id else next(iter(reversed(self.repository.list_post_subtitle_tracks(project_id, plan.id))), None)
-        if track is None or not track.enabled:
+        if track is None:
+            return None
+        if track.project_id != project_id or track.plan_id != plan.id:
+            raise PostProductionServiceError("SubtitleTrack 不属于该项目或计划")
+        return track if track.enabled else None
+
+    def _subtitle_path(self, project_id: str, plan: PostProductionPlan, track_id: str | None) -> Path | None:
+        track = self._subtitle_track(project_id, plan, track_id)
+        if track is None:
             return None
         relative = self.export_srt(project_id, track.id, plan_id=plan.id)
         return self._resolve_project_relative(project_id, relative, suffix=".srt", must_exist=True)
+
+    @staticmethod
+    def _subtitle_cues_sha256(track: SubtitleTrack) -> str:
+        payload = [item.model_dump(mode="json") for item in track.cues]
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
 
     def _music_track(self, project_id: str, plan_id: str, track_id: str | None) -> MusicTrack | None:
         track = self.repository.get_post_music_track(track_id) if track_id else next(iter(reversed(self.repository.list_post_music_tracks(project_id, plan_id))), None)
@@ -533,7 +891,7 @@ class PostProductionService:
         output.parent.mkdir(parents=True, exist_ok=True)
         return output, PurePosixPath("post", plan_id, "attempts", attempt_id, "final.mp4").as_posix()
 
-    def _validate_output(self, path: Path, *, require_audio: bool = False) -> dict[str, object]:
+    def _validate_output(self, path: Path, *, require_audio: bool = False, expected_duration: float | None = None) -> dict[str, object]:
         if not path.is_file() or path.stat().st_size <= 0:
             raise PostProductionServiceError("post output 为空")
         with path.open("rb") as handle:
@@ -541,19 +899,24 @@ class PostProductionService:
         if b"ftyp" not in header:
             raise PostProductionServiceError("post output 不是有效 MP4")
         probe_fn = getattr(self.media_adapter, "probe_output", None)
-        if callable(probe_fn):
-            try:
-                probed = dict(probe_fn(path))
-            except Exception as exc:
-                raise PostProductionServiceError(f"post output probe 失败: {exc}") from exc
-            if not probed.get("video_stream") or float(probed.get("duration_seconds", 0) or 0) <= 0:
-                raise PostProductionServiceError("post output 缺少有效 video stream/duration")
-            if not isinstance(probed.get("width"), int) or not isinstance(probed.get("height"), int) or probed["width"] <= 0 or probed["height"] <= 0:
-                raise PostProductionServiceError("post output dimensions 无效")
-            if require_audio and not probed.get("audio_stream"):
-                raise PostProductionServiceError("post output 缺少预期 audio stream")
-            return probed
-        return {}
+        if not callable(probe_fn):
+            raise PostProductionServiceError("post media adapter 未提供真实输出 probe")
+        try:
+            probed = dict(probe_fn(path))
+        except Exception as exc:
+            raise PostProductionServiceError(f"post output probe 失败: {exc}") from exc
+        if not probed.get("video_stream") or float(probed.get("duration_seconds", 0) or 0) <= 0:
+            raise PostProductionServiceError("post output 缺少有效 video stream/duration")
+        if not isinstance(probed.get("width"), int) or not isinstance(probed.get("height"), int) or probed["width"] <= 0 or probed["height"] <= 0:
+            raise PostProductionServiceError("post output dimensions 无效")
+        if require_audio and not probed.get("audio_stream"):
+            raise PostProductionServiceError("post output 缺少预期 audio stream")
+        actual_duration = float(probed.get("duration_seconds", 0) or 0)
+        if expected_duration and abs(actual_duration - expected_duration) > max(0.35, expected_duration * 0.12):
+            raise PostProductionServiceError(
+                f"post output duration 不匹配（expected={expected_duration:.3f}, actual={actual_duration:.3f}）"
+            )
+        return probed
 
     @staticmethod
     def _validate_supported_music_parameters(music: MusicTrack | None) -> None:
