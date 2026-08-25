@@ -1,10 +1,10 @@
 from __future__ import annotations
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping
+from typing import Any
 from uuid import uuid4
 from aidrama_studio.domain import Project, ScriptRevisionStatus, Scene, ScriptBeat, ScriptBeatType, StructuredScript, InteriorExterior, TimeOfDay, StoryRevisionStatus
-from aidrama_studio.services import ai
-from aidrama_studio.services.script_parser import parse_structured_script, StructuredScriptParseError
+from aidrama_studio.services.llm_runtime import LLMInvocationError, LLMInvocationGateway
+from aidrama_studio.services.script_parser import parse_structured_script
 from aidrama_studio.services.script_prompt import build_script_prompt, build_script_repair_prompt
 from aidrama_studio.storage import ProjectRepository
 
@@ -13,8 +13,10 @@ def _now(): return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 class ScriptServiceError(RuntimeError): pass
 
 class ScriptService:
-    def __init__(self, repository=None, *, text_generator: Callable[[str, Mapping[str, Any]], str] | None = None, config_snapshot_provider=None):
-        self.repository = repository or ProjectRepository(); self._text_generator = text_generator or ai.generate_text; self._snapshot_provider = config_snapshot_provider or ai.snapshot_llm_config
+    def __init__(self, repository=None, *, llm_gateway: LLMInvocationGateway | None = None):
+        self.repository = repository or ProjectRepository(); self._llm_gateway = llm_gateway or LLMInvocationGateway(self.repository)
+    def llm_readiness(self, project_id):
+        return self._llm_gateway.readiness(project_id)
     def get_revision(self, revision_id): return self.repository.get_script_revision(revision_id)
     def list_revisions(self, project_id): return self.repository.list_script_revisions(project_id)
     def get_latest_revision(self, project_id):
@@ -72,15 +74,12 @@ class ScriptService:
     def generate_script(self, project: Project, *, dialogue_density="standard", narration="少量", pacing="standard"):
         story = next((x for x in self.repository.list_story_revisions(project.id) if x["status"] is StoryRevisionStatus.APPROVED), None)
         if not story: raise ScriptServiceError("请先确认 Story Bible")
-        prompt = build_script_prompt(project, story["content"], dialogue_density=dialogue_density, narration=narration, pacing=pacing); snapshot = self._snapshot_provider()
+        prompt = build_script_prompt(project, story["content"], dialogue_density=dialogue_density, narration=narration, pacing=pacing)
+        def validate(raw):
+            content = parse_structured_script(raw); content.validate_against(story["content"]); return content
         try:
-            raw = self._text_generator(prompt, snapshot)
-            try:
-                content = parse_structured_script(raw); content.validate_against(story["content"])
-            except (StructuredScriptParseError, ValueError) as first:
-                repaired = self._text_generator(build_script_repair_prompt(getattr(first, "raw", raw), str(first)), snapshot)
-                content = parse_structured_script(repaired); content.validate_against(story["content"])
-        except ai.AIDramaAIError as exc:
+            content = self._llm_gateway.generate_validated_json(project.id, prompt, operation="STRUCTURED_SCRIPT_GENERATION", validator=validate, repair_prompt_builder=lambda raw, exc: build_script_repair_prompt(raw, str(exc)), input_source_ids=(story["id"],))
+        except LLMInvocationError as exc:
             raise ScriptServiceError(str(exc)) from exc
         except Exception as exc:
             raise ScriptServiceError("结构化剧本生成失败，请稍后重试。") from exc

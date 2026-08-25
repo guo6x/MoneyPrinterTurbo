@@ -70,6 +70,14 @@ class LLMProvider(ABC):
     @abstractmethod
     def generate_structured(self, prompt: str, *, schema: Mapping[str, object] | None = None) -> dict[str, object]: ...
 
+    def generate_json_text(self, prompt: str) -> str:
+        """Return JSON text while keeping product calls on this capability seam."""
+        return json.dumps(
+            self.generate_structured(prompt),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
     def repair_structured(self, value: Mapping[str, object], *, schema: Mapping[str, object] | None = None) -> dict[str, object]:
         return dict(value)
 
@@ -262,34 +270,70 @@ class MPTLLMProvider(LLMProvider):
         from .ai import llm_configuration_status
         from app.models.llm_provider import get_llm_provider
 
-        ready, reason = llm_configuration_status()
+        ready, reason = llm_configuration_status(self._config_snapshot)
         provider_id = str(self._config_snapshot.get("llm_provider", "")).strip().lower()
         provider = get_llm_provider(provider_id)
         model = "runtime"
         credential_reference = None
+        endpoint_id = "unspecified"
+        endpoint_class = "MPT_LLM_UNSPECIFIED"
+        region = "UNSPECIFIED"
         if provider is not None:
-            model = str(
-                self._config_snapshot.get(
-                    provider.config_key("model_name"), provider.default_model
-                )
-                or provider.default_model
-                or "runtime"
+            model = provider.resolve_model_name(
+                str(self._config_snapshot.get(provider.config_key("model_name"), ""))
+            ) or "runtime"
+            resolved_base_url = provider.resolve_base_url(
+                str(self._config_snapshot.get(provider.config_key("base_url"), ""))
             )
-            credential_reference = provider.config_key("api_key").upper()
-        if provider_id == "ollama":
-            region = "LOCAL"
-        elif provider_id in {"moonshot", "qwen", "deepseek", "siliconflow", "hunyuan", "baidu"}:
-            region = "MAINLAND_CHINA"
-        elif provider_id:
-            region = "INTERNATIONAL"
-        else:
-            region = "UNSPECIFIED"
+            credential_reference = (
+                provider.config_key("api_key").upper()
+                if provider.requires_api_key
+                else None
+            )
+            service_endpoint = provider.find_service_endpoint(resolved_base_url)
+            if provider_id == "moonshot" and service_endpoint is not None:
+                endpoint_id = service_endpoint.endpoint_id
+                region = (
+                    "MAINLAND_CHINA"
+                    if endpoint_id == "china"
+                    else "INTERNATIONAL" if endpoint_id == "global" else "UNSPECIFIED"
+                )
+            else:
+                standard_base_url = provider.effective_default_base_url.rstrip("/")
+                resolved_standard = (
+                    not provider.requires_base_url
+                    or bool(standard_base_url)
+                    and resolved_base_url.rstrip("/") == standard_base_url
+                )
+                if provider_id == "ollama":
+                    endpoint_id, region = "local", "LOCAL"
+                elif resolved_standard:
+                    endpoint_id = "default"
+                    if provider_id in {
+                        "baidu", "deepseek", "hunyuan", "modelscope", "qwen",
+                        "shengsuanyun", "siliconflow", "volcengine",
+                    }:
+                        region = "MAINLAND_CHINA"
+                    elif provider_id in {
+                        "azure", "cloudflare", "evolink", "gemini", "grok",
+                        "groq", "minimax", "mimo", "openai", "pollinations",
+                    }:
+                        region = "INTERNATIONAL"
+            endpoint_class = (
+                f"MPT_LLM_{provider_id.upper()}_{endpoint_id.upper()}"
+                if provider_id
+                else "MPT_LLM_UNSPECIFIED"
+            )
         metadata = {
             "model": model,
             "deployment_region": region,
-            "endpoint_class": f"MPT_LLM_{provider_id.upper() or 'UNSPECIFIED'}",
-            "endpoint_profile_id": f"runtime:LLM:MPT_LLM:{provider_id or 'unspecified'}",
+            "endpoint_class": endpoint_class,
+            "endpoint_profile_id": (
+                f"runtime:LLM:MPT_LLM:{provider_id or 'unspecified'}:{endpoint_id}"
+            ),
             "credential_reference": credential_reference,
+            "upstream_provider_id": provider_id or "unspecified",
+            "boundary_provider_id": self.provider_name,
             "configured": ready,
             "verification_state": "NOT_VERIFIED",
         }
@@ -312,6 +356,14 @@ class MPTLLMProvider(LLMProvider):
         if not isinstance(value, dict):
             raise CapabilityUnavailable("LLM structured response must be an object")
         return value
+
+    def generate_json_text(self, prompt: str) -> str:
+        if not self.status.available:
+            raise CapabilityUnavailable(self.status.reason)
+        try:
+            return generate_text(prompt, self._config_snapshot)
+        except AIDramaAIError as exc:
+            raise CapabilityUnavailable(str(exc)) from exc
 
     def repair_structured(self, value: Mapping[str, object], *, schema: Mapping[str, object] | None = None) -> dict[str, object]:
         return self.generate_structured("Repair this structured JSON without changing its intent:\n" + json.dumps(dict(value), ensure_ascii=False), schema=schema)

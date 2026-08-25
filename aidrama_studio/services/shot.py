@@ -3,14 +3,15 @@ from datetime import datetime,timezone
 import ast
 from uuid import uuid4
 from aidrama_studio.domain import *
-from aidrama_studio.services import ai
-from aidrama_studio.services.shot_parser import parse_shot_plan,ShotPlanParseError
+from aidrama_studio.services.llm_runtime import LLMInvocationError,LLMInvocationGateway
+from aidrama_studio.services.shot_parser import parse_shot_plan
 from aidrama_studio.services.shot_prompt import build_shot_prompt,build_shot_repair_prompt
 from aidrama_studio.storage import ProjectRepository
 def _now(): return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 class ShotServiceError(RuntimeError): pass
 class ShotService:
-    def __init__(self,repository=None,*,text_generator=None,config_snapshot_provider=None): self.repository=repository or ProjectRepository(); self._text_generator=text_generator or ai.generate_text; self._snapshot_provider=config_snapshot_provider or ai.snapshot_llm_config
+    def __init__(self,repository=None,*,llm_gateway: LLMInvocationGateway | None = None): self.repository=repository or ProjectRepository(); self._llm_gateway=llm_gateway or LLMInvocationGateway(self.repository)
+    def llm_readiness(self,project_id): return self._llm_gateway.readiness(project_id)
     def list_revisions(self,pid): return self.repository.list_shot_revisions(pid)
     def list_plans(self,pid):
         out=[]
@@ -117,12 +118,11 @@ class ShotService:
     def generate_shot_plan(self,project):
         script,story=self._story_script(project.id)
         if not script: raise ShotServiceError("请先完成并确认结构化剧本。")
-        snap=self._snapshot_provider(); prompt=build_shot_prompt(project,script["content"],story["content"])
+        prompt=build_shot_prompt(project,script["content"],story["content"]); input_source_ids=(script["id"],story["id"])
+        def validate(raw):
+            plan=parse_shot_plan(raw); plan.validate_against(script["content"],story["content"]); self.recalculate_risk_if_needed(plan); return plan
         try:
-            raw=self._text_generator(prompt,snap)
-            try: plan=parse_shot_plan(raw); plan.validate_against(script["content"],story["content"]); self.recalculate_risk_if_needed(plan)
-            except (ShotPlanParseError,ValueError) as e:
-                plan=parse_shot_plan(self._text_generator(build_shot_repair_prompt(getattr(e,"raw",raw),str(e)),snap)); plan.validate_against(script["content"],story["content"]); self.recalculate_risk_if_needed(plan)
-        except ai.AIDramaAIError as e: raise ShotServiceError(str(e)) from e
+            plan=self._llm_gateway.generate_validated_json(project.id,prompt,operation="SHOT_PLAN_GENERATION",validator=validate,repair_prompt_builder=lambda raw,exc: build_shot_repair_prompt(raw,str(exc)),input_source_ids=input_source_ids)
+        except LLMInvocationError as e: raise ShotServiceError(str(e)) from e
         except Exception as e: raise ShotServiceError("Shot Plan 生成失败，请稍后重试。") from e
         return self._create(project.id,script["id"],plan,{"target_duration_seconds":project.target_duration_seconds,"aspect_ratio":project.aspect_ratio.value})

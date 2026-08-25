@@ -21,13 +21,17 @@ _WINDOWS_PATH = re.compile(r"(?i)\b[A-Z]:[\\/](?:[^\s:'\"<>|]+[\\/])*[^\s:'\"<>|
 _POSIX_PRIVATE = re.compile(r"(?<!\w)/(?:home|Users|var|tmp)/[^\s:'\"<>|]+(?:/[^\s:'\"<>|]+)*")
 _URL_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _SENSITIVE_METADATA_KEYS = {
+    "access_token",
     "api_key",
     "apikey",
     "authorization",
+    "client_secret",
     "token",
     "secret",
     "password",
     "cookie",
+    "private_key",
+    "refresh_token",
     "set_cookie",
 }
 
@@ -79,8 +83,21 @@ def sanitize_persistent_metadata(value: object) -> object:
         for key, child in value.items():
             text_key = str(key)
             lowered = text_key.casefold()
+            normalized_key = re.sub(r"[^a-z0-9]", "", lowered)
             if (
                 lowered in _SENSITIVE_METADATA_KEYS
+                or normalized_key in {
+                    "accesstoken",
+                    "apikey",
+                    "authorization",
+                    "clientsecret",
+                    "password",
+                    "privatekey",
+                    "refreshtoken",
+                    "secret",
+                    "token",
+                }
+                or lowered.endswith(("_password", "_secret", "_token"))
                 or "signed_url" in lowered
                 or lowered == "url"
                 or lowered.endswith("_url")

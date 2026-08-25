@@ -12,7 +12,6 @@ from aidrama_studio.domain import (
 )
 from aidrama_studio.pages._shared import current_project_or_stop
 from aidrama_studio.services import StoryService, StoryServiceError, ScriptService, ScriptServiceError
-from aidrama_studio.services.ai import llm_configuration_status
 
 
 BEAT_TYPES = ["OPENING", "DEVELOPMENT", "TURNING_POINT", "CLIMAX", "ENDING"]
@@ -86,7 +85,7 @@ def _render_brief(project, service: StoryService) -> None:
         placeholder="例如：不出现大型群像；结尾保留一个视觉钩子。",
     )
 
-    ready, detail = llm_configuration_status()
+    ready, detail = service.llm_readiness(project.id)
     if not ready:
         st.info(f"AI 服务尚未配置：{detail}")
         if st.button("前往设置", key=f"story-settings-{project.id}"):
@@ -319,7 +318,7 @@ def _script_working_key(revision_id: str) -> str:
 
 
 def _render_script_editor(project, story_revision: dict, script_service: ScriptService) -> None:
-    ready, detail = llm_configuration_status()
+    ready, detail = script_service.llm_readiness(project.id)
     if ready and st.button("AI 生成 Structured Script", key=f"generate-script-{project.id}"):
         try:
             generated = script_service.generate_script(project)

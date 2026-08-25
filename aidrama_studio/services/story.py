@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -16,8 +15,8 @@ from aidrama_studio.domain import (
     StoryRevisionStatus,
     World,
 )
-from aidrama_studio.services import ai
-from aidrama_studio.services.story_parser import StoryBibleParseError, parse_story_bible
+from aidrama_studio.services.llm_runtime import LLMInvocationError, LLMInvocationGateway
+from aidrama_studio.services.story_parser import parse_story_bible
 from aidrama_studio.services.story_prompt import (
     build_repair_prompt,
     build_story_bible_prompt,
@@ -103,12 +102,13 @@ class StoryService:
         self,
         repository: ProjectRepository | None = None,
         *,
-        text_generator: Callable[[str, Mapping[str, Any]], str] | None = None,
-        config_snapshot_provider: Callable[[], Mapping[str, Any]] | None = None,
+        llm_gateway: LLMInvocationGateway | None = None,
     ):
         self.repository = repository or ProjectRepository()
-        self._text_generator = text_generator or ai.generate_text
-        self._snapshot_provider = config_snapshot_provider or ai.snapshot_llm_config
+        self._llm_gateway = llm_gateway or LLMInvocationGateway(self.repository)
+
+    def llm_readiness(self, project_id: str) -> tuple[bool, str]:
+        return self._llm_gateway.readiness(project_id)
 
     def get_latest_revision(self, project_id: str) -> dict[str, Any] | None:
         return self.repository.get_latest_story_revision(project_id)
@@ -235,23 +235,17 @@ class StoryService:
             target_audience=target_audience,
             creative_constraints=creative_constraints,
         )
-        snapshot = self._snapshot_provider()
         try:
-            raw = self._text_generator(prompt, snapshot)
-            try:
-                content = parse_story_bible(raw)
-            except StoryBibleParseError as first_error:
-                repair_prompt = build_repair_prompt(
-                    first_error.raw or raw, str(first_error)
-                )
-                repaired = self._text_generator(repair_prompt, snapshot)
-                content = parse_story_bible(repaired)
-        except StoryBibleParseError as exc:
-            logger.warning(f"Story Bible parse/repair failed: {exc}")
-            raise StoryServiceError(
-                "AI 返回无法整理为有效 Story Bible，请修改 Brief 后重试。"
-            ) from exc
-        except ai.AIDramaAIError as exc:
+            content = self._llm_gateway.generate_validated_json(
+                project.id,
+                prompt,
+                operation="STORY_BIBLE_GENERATION",
+                validator=parse_story_bible,
+                repair_prompt_builder=lambda raw, exc: build_repair_prompt(
+                    raw, str(exc)
+                ),
+            )
+        except LLMInvocationError as exc:
             logger.warning(f"Story Bible generation failed: {exc}")
             raise StoryServiceError(str(exc)) from exc
         except Exception as exc:

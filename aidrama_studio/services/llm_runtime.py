@@ -1,0 +1,372 @@
+"""Canonical LLM resolution, bounded structured generation and safe audit."""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Callable, Mapping, TypeVar
+from uuid import uuid4
+
+from aidrama_studio.storage.repositories import ProjectRepository
+
+from .ai import AIDramaAIError
+from .ai_capabilities import (
+    CapabilityKind,
+    CapabilityRegistry,
+    LLMProvider,
+    default_capability_registry,
+)
+from .provider_profiles import ProviderProfileService
+from .runtime_foundation import AIInvocationService
+from .security import sanitize_error, sanitize_persistent_metadata
+
+
+ValidatedValue = TypeVar("ValidatedValue")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+class LLMInvocationError(AIDramaAIError):
+    """Safe canonical LLM error suitable for product services."""
+
+
+class _OutputInvalid(Exception):
+    """Carry invalid output in memory only so one repair can be attempted."""
+
+    def __init__(self, raw: str, cause: Exception):
+        super().__init__("OUTPUT_INVALID")
+        self.raw = raw
+        self.cause = cause
+
+
+@dataclass(frozen=True)
+class _FrozenLLMContext:
+    provider: LLMProvider
+    actual_provider_id: str
+    boundary_provider_id: str
+    model_id: str
+    endpoint_profile_id: str
+    deployment_region: str
+    endpoint_class: str
+    credential_reference: str | None
+    selection_source: str
+    correlation_id: str
+    input_source_ids: tuple[str, ...]
+
+
+class LLMInvocationGateway:
+    """Resolve one exact LLM endpoint and audit every remote attempt.
+
+    A complete structured operation resolves the selection exactly once. Its
+    primary request and optional single repair therefore cannot drift after a
+    Settings change. Validation happens before terminal success is recorded.
+    Prompts, responses, credentials and provider request dumps are never
+    persisted.
+    """
+
+    def __init__(
+        self,
+        repository: ProjectRepository | None = None,
+        *,
+        registry: CapabilityRegistry | None = None,
+        provider_profiles: ProviderProfileService | None = None,
+    ) -> None:
+        self.repository = repository or ProjectRepository()
+        self.registry = registry or default_capability_registry()
+        self.provider_profiles = provider_profiles or ProviderProfileService(
+            self.repository,
+            registry=self.registry,
+        )
+        self.invocations = AIInvocationService(self.repository)
+
+    def readiness(self, project_id: str) -> tuple[bool, str]:
+        try:
+            resolved = self.provider_profiles.resolve(
+                project_id,
+                CapabilityKind.LLM,
+                require_available=True,
+            )
+        except Exception as exc:
+            return False, sanitize_error(exc)
+        if resolved.profile is None or not resolved.available:
+            return False, resolved.detail
+        profile = resolved.profile
+        return (
+            True,
+            f"{profile.provider_id} / {profile.model_id} · "
+            f"{profile.deployment_region.value} / {profile.endpoint_class}",
+        )
+
+    def generate_json_text(
+        self,
+        project_id: str,
+        prompt: str,
+        *,
+        operation: str,
+        input_source_ids: tuple[str, ...] | list[str] = (),
+        attempt_kind: str = "PRIMARY",
+        correlation_id: str | None = None,
+    ) -> str:
+        """Run one audited call whose only validation is non-empty text."""
+
+        context = self._freeze_context(
+            project_id,
+            input_source_ids=input_source_ids,
+            correlation_id=correlation_id,
+        )
+
+        def validate(raw: str) -> str:
+            if not raw.strip():
+                raise ValueError("empty structured output")
+            return raw.strip()
+
+        try:
+            return self._invoke_validated(
+                project_id,
+                context,
+                prompt,
+                operation=operation,
+                attempt_kind=attempt_kind,
+                validator=validate,
+            )
+        except _OutputInvalid as exc:
+            raise LLMInvocationError(
+                "LLM structured generation returned invalid output"
+            ) from exc.cause
+
+    def generate_validated_json(
+        self,
+        project_id: str,
+        prompt: str,
+        *,
+        operation: str,
+        validator: Callable[[str], ValidatedValue],
+        repair_prompt_builder: Callable[[str, Exception], str] | None = None,
+        input_source_ids: tuple[str, ...] | list[str] = (),
+        correlation_id: str | None = None,
+    ) -> ValidatedValue:
+        """Return domain-validated structured output with at most one repair."""
+
+        if not callable(validator):
+            raise LLMInvocationError("LLM validator 无效")
+        context = self._freeze_context(
+            project_id,
+            input_source_ids=input_source_ids,
+            correlation_id=correlation_id,
+        )
+        try:
+            return self._invoke_validated(
+                project_id,
+                context,
+                prompt,
+                operation=operation,
+                attempt_kind="PRIMARY",
+                validator=validator,
+            )
+        except _OutputInvalid as primary_invalid:
+            if repair_prompt_builder is None:
+                raise LLMInvocationError(
+                    "LLM 输出不符合结构要求"
+                ) from primary_invalid.cause
+            try:
+                repair_prompt = repair_prompt_builder(
+                    primary_invalid.raw,
+                    primary_invalid.cause,
+                )
+            except Exception as exc:
+                raise LLMInvocationError("LLM 修复提示构建失败") from exc
+            if not isinstance(repair_prompt, str) or not repair_prompt.strip():
+                raise LLMInvocationError("LLM 修复提示不能为空")
+            try:
+                return self._invoke_validated(
+                    project_id,
+                    context,
+                    repair_prompt,
+                    operation=operation,
+                    attempt_kind="REPAIR",
+                    validator=validator,
+                )
+            except _OutputInvalid as repair_invalid:
+                raise LLMInvocationError(
+                    "LLM 输出在一次修复后仍不符合结构要求"
+                ) from repair_invalid.cause
+
+    def _freeze_context(
+        self,
+        project_id: str,
+        *,
+        input_source_ids: tuple[str, ...] | list[str],
+        correlation_id: str | None,
+    ) -> _FrozenLLMContext:
+        if self.repository.get_project(project_id) is None:
+            raise LLMInvocationError(f"项目不存在: {project_id}")
+        resolved = self.provider_profiles.resolve(
+            project_id,
+            CapabilityKind.LLM,
+            require_available=True,
+        )
+        profile = resolved.profile
+        if profile is None or not resolved.available:
+            raise LLMInvocationError(resolved.detail)
+        provider, metadata = self._resolve_provider(profile)
+        actual_provider_id = str(
+            metadata.get("upstream_provider_id") or profile.provider_id
+        ).strip()
+        if not actual_provider_id:
+            raise LLMInvocationError("LLM Provider 身份无效")
+        return _FrozenLLMContext(
+            provider=provider,
+            actual_provider_id=actual_provider_id,
+            boundary_provider_id=profile.provider_id,
+            model_id=profile.model_id,
+            endpoint_profile_id=profile.endpoint_profile_id,
+            deployment_region=profile.deployment_region.value,
+            endpoint_class=profile.endpoint_class,
+            credential_reference=profile.credential_reference,
+            selection_source=resolved.source,
+            correlation_id=correlation_id or uuid4().hex,
+            input_source_ids=tuple(str(item) for item in input_source_ids),
+        )
+
+    def _invoke_validated(
+        self,
+        project_id: str,
+        context: _FrozenLLMContext,
+        prompt: str,
+        *,
+        operation: str,
+        attempt_kind: str,
+        validator: Callable[[str], ValidatedValue],
+    ) -> ValidatedValue:
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise LLMInvocationError("LLM prompt 不能为空")
+        attempt = str(attempt_kind or "PRIMARY").strip().upper()
+        if attempt not in {"PRIMARY", "REPAIR"}:
+            raise LLMInvocationError("LLM attempt kind 无效")
+        base_id = f"{context.correlation_id[:48]}-{attempt.lower()}"
+        started_at = _now()
+        safe_summary = sanitize_persistent_metadata(
+            {
+                "correlation_id": context.correlation_id,
+                "operation": str(operation),
+                "attempt_kind": attempt,
+                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "prompt_length": len(prompt),
+                "selection_source": context.selection_source,
+                "boundary_provider_id": context.boundary_provider_id,
+                "endpoint_profile_id": context.endpoint_profile_id,
+                "deployment_region": context.deployment_region,
+                "endpoint_class": context.endpoint_class,
+                "credential_reference": context.credential_reference,
+            }
+        )
+        summary = dict(safe_summary) if isinstance(safe_summary, Mapping) else {}
+        self._record(
+            project_id,
+            context,
+            status="STARTED",
+            request_summary=summary,
+            started_at=started_at,
+            invocation_id=f"{base_id}-started",
+        )
+        try:
+            raw = context.provider.generate_json_text(prompt)
+            if not isinstance(raw, str) or not raw.strip():
+                raise LLMInvocationError("LLM structured generation returned empty text")
+        except Exception as exc:
+            reason = sanitize_error(exc) or "LLM generation failed"
+            self._record(
+                project_id,
+                context,
+                status="FAILED",
+                request_summary=summary
+                | {"error_code": "PROVIDER_ERROR", "error": reason},
+                started_at=started_at,
+                finished_at=_now(),
+                invocation_id=f"{base_id}-failed",
+            )
+            if isinstance(exc, LLMInvocationError):
+                raise
+            raise LLMInvocationError(reason) from exc
+        raw = raw.strip()
+        try:
+            value = validator(raw)
+        except Exception as exc:
+            self._record(
+                project_id,
+                context,
+                status="FAILED",
+                request_summary=summary | {"error_code": "OUTPUT_INVALID"},
+                started_at=started_at,
+                finished_at=_now(),
+                invocation_id=f"{base_id}-failed",
+            )
+            raise _OutputInvalid(raw, exc) from exc
+        self._record(
+            project_id,
+            context,
+            status="SUCCEEDED",
+            request_summary=summary,
+            started_at=started_at,
+            finished_at=_now(),
+            invocation_id=f"{base_id}-succeeded",
+        )
+        return value
+
+    def _record(
+        self,
+        project_id: str,
+        context: _FrozenLLMContext,
+        *,
+        status: str,
+        request_summary: Mapping[str, Any],
+        started_at: str,
+        invocation_id: str,
+        finished_at: str | None = None,
+    ) -> None:
+        self.invocations.record(
+            project_id,
+            capability=CapabilityKind.LLM.value,
+            provider_id=context.actual_provider_id,
+            model_id=context.model_id,
+            status=status,
+            input_source_ids=context.input_source_ids,
+            request_summary=request_summary,
+            started_at=started_at,
+            finished_at=finished_at,
+            invocation_id=invocation_id,
+        )
+
+    def _resolve_provider(self, profile) -> tuple[LLMProvider, Mapping[str, object]]:
+        for provider in self.registry.list(CapabilityKind.LLM):
+            if str(getattr(provider, "provider_name", "")).casefold() != profile.provider_id.casefold():
+                continue
+            status = provider.status
+            metadata = dict(status.metadata)
+            if str(metadata.get("model") or "runtime") != profile.model_id:
+                continue
+            endpoint_id = str(metadata.get("endpoint_profile_id") or "")
+            if profile.endpoint_profile_id not in {"", "LEGACY"} and endpoint_id != profile.endpoint_profile_id:
+                continue
+            endpoint_class = str(metadata.get("endpoint_class") or "UNSPECIFIED")
+            if profile.endpoint_class not in {"", "UNSPECIFIED"} and endpoint_class != profile.endpoint_class:
+                continue
+            region = str(metadata.get("deployment_region") or "UNSPECIFIED")
+            if profile.deployment_region.value != "UNSPECIFIED" and region != profile.deployment_region.value:
+                continue
+            credential = str(metadata.get("credential_reference") or "") or None
+            if profile.credential_reference is not None and credential != profile.credential_reference:
+                continue
+            if not isinstance(provider, LLMProvider):
+                if not callable(getattr(provider, "generate_json_text", None)):
+                    continue
+            return provider, metadata
+        raise LLMInvocationError(
+            "冻结 LLM Provider/model/endpoint 不在当前 capability inventory；不会自动 fallback"
+        )
+
+
+__all__ = ["LLMInvocationError", "LLMInvocationGateway"]

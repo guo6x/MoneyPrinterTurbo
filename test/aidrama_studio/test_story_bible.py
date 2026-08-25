@@ -18,6 +18,12 @@ from aidrama_studio.domain import (
     World,
 )
 from aidrama_studio.services.story import StoryService, StoryServiceError, blank_story_bible
+from aidrama_studio.services.ai_capabilities import (
+    CapabilityKind,
+    CapabilityRegistry,
+    CapabilityStatus,
+)
+from aidrama_studio.services.llm_runtime import LLMInvocationGateway
 from aidrama_studio.services.story_parser import StoryBibleParseError, parse_story_bible
 from aidrama_studio.storage.database import DatabasePaths, initialize_database
 from aidrama_studio.storage.repositories import ProjectRepository
@@ -47,6 +53,36 @@ def valid_bible(title: str = "测试故事") -> StoryBible:
             StoryBeat(id="beat_003", order=3, type="ENDING", summary="终点站留下唯一答案", characters=["char_001"], location_id="loc_002", emotional_goal="余韵"),
         ],
     )
+
+
+class _StoryLLMProvider:
+    provider_name = "STORY_TEST_LLM"
+    capability = CapabilityKind.LLM
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.prompts = []
+
+    @property
+    def status(self):
+        return CapabilityStatus(
+            CapabilityKind.LLM,
+            self.provider_name,
+            True,
+            "configured",
+            {
+                "model": "story-test-v1",
+                "deployment_region": "LOCAL",
+                "endpoint_class": "STORY_TEST_LOCAL",
+                "endpoint_profile_id": "runtime:LLM:STORY_TEST_LLM:local",
+                "verification_state": "NOT_VERIFIED",
+            },
+            configured=True,
+        )
+
+    def generate_json_text(self, prompt):
+        self.prompts.append(prompt)
+        return self.responses.pop(0)
 
 
 @pytest.fixture
@@ -130,27 +166,28 @@ def test_manual_blank_draft_and_revision_persistence(project_service: ProjectSer
     assert story_service.get_latest_revision(project.id)["id"] == revision["id"]
 
 
-def test_generation_repair_uses_same_snapshot_and_persists_only_valid_content(project_service: ProjectService, paths: DatabasePaths):
+def test_generation_repair_uses_frozen_gateway_and_persists_only_valid_content(project_service: ProjectService, paths: DatabasePaths):
     project = project_service.create(title="Generated Bible", description="Brief")
-    responses = ["not json", json.dumps(valid_bible().model_dump(mode="json"), ensure_ascii=False)]
-    snapshots = []
-
-    def generate(_prompt, snapshot):
-        snapshots.append(snapshot)
-        return responses.pop(0)
-
+    provider = _StoryLLMProvider(
+        ["not json", json.dumps(valid_bible().model_dump(mode="json"), ensure_ascii=False)]
+    )
+    repository = ProjectRepository(paths)
     service = StoryService(
-        ProjectRepository(paths),
-        text_generator=generate,
-        config_snapshot_provider=lambda: {"llm_provider": "mock", "api_key": "secret"},
+        repository,
+        llm_gateway=LLMInvocationGateway(
+            repository, registry=CapabilityRegistry([provider])
+        ),
     )
     revision = service.generate_story_bible(project, brief="一个关于选择的故事", genre="悬疑", tone="克制")
 
     assert revision["version"] == 1
-    assert len(snapshots) == 2
-    assert snapshots[0] is snapshots[1]
+    assert len(provider.prompts) == 2
+    invocations = repository.list_ai_invocations(project.id)
+    assert [item.status for item in invocations] == [
+        "STARTED", "FAILED", "STARTED", "SUCCEEDED"
+    ]
+    assert len({item.request_summary["correlation_id"] for item in invocations}) == 1
     stored = service.get_latest_revision(project.id)
-    assert "secret" not in json.dumps(stored, default=str)
     assert stored["generation_input"]["brief"] == "一个关于选择的故事"
 
 
@@ -158,20 +195,17 @@ def test_repair_failure_preserves_previous_revision(project_service: ProjectServ
     project = project_service.create(title="Preserve Bible")
     service = StoryService(ProjectRepository(paths))
     previous = service.create_blank_draft(project)
-    calls = []
-
-    def always_bad(prompt, snapshot):
-        calls.append(prompt)
-        return "still not json"
-
+    provider = _StoryLLMProvider(["still not json", "still not json"])
+    repository = ProjectRepository(paths)
     failing = StoryService(
-        ProjectRepository(paths),
-        text_generator=always_bad,
-        config_snapshot_provider=lambda: {},
+        repository,
+        llm_gateway=LLMInvocationGateway(
+            repository, registry=CapabilityRegistry([provider])
+        ),
     )
     with pytest.raises(StoryServiceError):
         failing.generate_story_bible(project, brief="bad", genre="悬疑", tone="紧张")
-    assert len(calls) == 2
+    assert len(provider.prompts) == 2
     assert service.get_latest_revision(project.id)["id"] == previous["id"]
 
 

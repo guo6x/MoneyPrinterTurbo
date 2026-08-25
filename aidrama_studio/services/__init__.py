@@ -18,6 +18,7 @@ from .postproduction import FFmpegPostProductionAdapter, PostProductionMediaAdap
 from .director import DirectorService, DirectorServiceError
 from .producer import ProducerService, ProducerServiceError
 from .runtime_foundation import AIInvocationService, GenerationBriefCompiler, OutputProfileService, RuntimeFoundationError, RuntimePlanService
+from .llm_runtime import LLMInvocationError, LLMInvocationGateway
 from .creative_intake import CreativeIntakeError, CreativeIntakeService, DocumentIngestionService, IntakeAnalyzer, SourcePackService
 from .reference_profiles import ReferenceProfileService, ReferenceProfileServiceError
 from .provider_profiles import (
@@ -120,6 +121,7 @@ __all__ = [
     "DirectorService", "DirectorServiceError", "ProducerService", "ProducerServiceError",
     "CurrentProductionState", "CurrentProductionStateService",
     "OutputProfileService", "GenerationBriefCompiler", "RuntimePlanService", "AIInvocationService", "RuntimeFoundationError",
+    "LLMInvocationGateway", "LLMInvocationError",
     "CreativeIntakeService", "CreativeIntakeError", "SourcePackService", "DocumentIngestionService", "IntakeAnalyzer",
     "ReferenceProfileService", "ReferenceProfileServiceError",
     "ProviderProfileService", "ProviderProfileError", "ProviderSelectionState",

@@ -9,8 +9,8 @@ with `git rev-parse HEAD` after checkout.
 - Target branch: `goal/aidrama-studio-v1-0-final-product-release`
 - Goal base: `3ce90aad6a70e6173a3826bd4e8eb6c039e0221b`
 - Current head: `HEAD`
-- Active checkpoint: canonical LLM invocation-ledger integration after
-  regional provider switching closure.
+- Active checkpoint: final subtitle timing and current-chain post-production
+  correctness after canonical LLM integration closure.
 - No dependency was installed and no live provider request was made.
 
 ## Completed checkpoints with current local evidence
@@ -74,9 +74,23 @@ with `git rev-parse HEAD` after checkout.
 - Existing RuntimePlans remain immutable after Settings changes. New plans pin
   the newly resolved endpoint and selection source, and the background resolver
   requires the exact frozen provider/endpoint/model identity.
+- Story Bible, Structured Script and Shot Plan generation now resolve through
+  one canonical LLM capability gateway. Each structured operation freezes the
+  exact provider/model/endpoint once, performs domain validation before a
+  terminal success is recorded, and permits at most one repair on that same
+  frozen provider.
+- The LLM invocation ledger records the actual upstream provider, exact
+  effective model, endpoint/region, operation, prompt hash/length and source
+  revision IDs without persisting raw prompts, responses, secrets, signed URLs
+  or local absolute paths. Invalid structured output is truthfully recorded as
+  FAILED/OUTPUT_INVALID before repair.
+- MPT LLM readiness and execution now use the same frozen configuration.
+  Moonshot China and Global endpoints have distinct identities and deployment
+  classifications; custom/unknown endpoints remain UNSPECIFIED rather than
+  being guessed.
 - Current validation: Python compile PASS, `git diff --check` PASS, focused
-  provider/runtime/security tests PASS, complete AIDrama suite
-  `262 passed, 10 warnings`. No live request was made.
+  provider/runtime/security/LLM tests PASS, complete AIDrama suite
+  `273 passed, 10 warnings`. No live request was made.
 
 ## Externally blocked gates
 
@@ -89,7 +103,6 @@ with `git rev-parse HEAD` after checkout.
 
 ## Known remaining work
 
-- Finish canonical LLM invocation-ledger integration.
 - Close final subtitle timing, cloud disclosure/input provenance, remote file
   lifecycle, portable project restore/delete recovery and diagnostics repair
   actions.
@@ -102,10 +115,20 @@ with `git rev-parse HEAD` after checkout.
 
 ## Next safe implementation step
 
-Integrate the existing LLM generation seam with the append-only AI invocation
-ledger without changing provider behavior or making a live call. Pin the
-non-secret provider/model/input provenance and truthful terminal state for each
-LLM attempt.
+Audit and close final subtitle timing plus current-chain post-production
+derivation without changing media engines or making a live provider call.
+
+## Canonical LLM integration acceptance
+
+- `LLM_CAPABILITY=PASS`
+- `LLM_CANONICAL_CAPABILITY_INTEGRATION=PASS`
+- `AI_INVOCATION_LEDGER=PASS`
+- Structured PRIMARY/REPAIR provider freeze: PASS
+- Structured validation before ledger success: PASS
+- Story/Script/Shot source provenance: PASS
+- Missing selected LLM fail-closed: PASS
+- Moonshot China/Global endpoint identity: PASS
+- Secret/raw prompt/raw response persistence: NONE FOUND
 
 ## Regional provider switching acceptance
 

@@ -19,20 +19,30 @@ def snapshot_llm_config() -> dict[str, Any]:
     return config.snapshot_config_with_pending(config.app)
 
 
-def llm_configuration_status() -> tuple[bool, str]:
-    snapshot = snapshot_llm_config()
+def llm_configuration_status(
+    snapshot: Mapping[str, Any] | None = None,
+) -> tuple[bool, str]:
+    """Report readiness for the exact configuration used by a caller.
+
+    A frozen capability provider passes its own snapshot here so Settings
+    changes cannot make readiness describe a different request configuration.
+    """
+    snapshot = dict(snapshot) if snapshot is not None else snapshot_llm_config()
     provider_id = str(snapshot.get("llm_provider", "")).lower()
     provider = get_llm_provider(provider_id)
     if provider is None:
         return False, "当前 Provider 不受支持"
     if provider.requires_api_key and not snapshot.get(provider.config_key("api_key"), ""):
         return False, "API Key 尚未配置"
-    if provider.requires_model_name and not snapshot.get(
-        provider.config_key("model_name"), provider.default_model
-    ):
+    model_name = provider.resolve_model_name(
+        str(snapshot.get(provider.config_key("model_name"), ""))
+    )
+    if provider.requires_model_name and not model_name:
         return False, "模型名称尚未配置"
-    base_url = snapshot.get(provider.config_key("base_url"), "")
-    if provider.requires_base_url and not (base_url or provider.effective_default_base_url):
+    base_url = provider.resolve_base_url(
+        str(snapshot.get(provider.config_key("base_url"), ""))
+    )
+    if provider.requires_base_url and not base_url:
         return False, "Base URL 尚未配置"
     return True, f"{provider.default_label} 已配置"
 

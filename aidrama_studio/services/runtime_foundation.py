@@ -182,15 +182,19 @@ class AIInvocationService:
         self.repository = repository or ProjectRepository()
 
     def record(self, project_id: str, *, capability: str, provider_id: str, model_id: str, status: str, production_job_id: str | None = None, execution_id: str | None = None, input_source_ids: list[str] | tuple[str, ...] = (), reference_version_ids: list[str] | tuple[str, ...] = (), generation_brief_hash: str | None = None, runtime_plan: RuntimePlan | None = None, request_summary: Mapping[str, Any] | None = None, provider_task_id: str | None = None, started_at: str | None = None, finished_at: str | None = None, usage: Mapping[str, Any] | None = None, estimated_cost: float | None = None, actual_cost: float | None = None, output_artifact_ids: list[str] | tuple[str, ...] = (), invocation_id: str | None = None) -> AIInvocation:
+        from .security import sanitize_persistent_metadata
+
         if runtime_plan is not None and runtime_plan.project_id != project_id:
             raise RuntimeFoundationError("RuntimePlan 不属于该项目")
+        safe_summary = sanitize_persistent_metadata(dict(request_summary or {}))
+        safe_usage = sanitize_persistent_metadata(dict(usage or {}))
         invocation = AIInvocation(
             id=invocation_id or uuid4().hex, project_id=project_id, production_job_id=production_job_id, execution_id=execution_id,
             capability=capability, provider_id=provider_id, model_id=model_id, input_source_ids=tuple(input_source_ids),
             reference_version_ids=tuple(reference_version_ids), generation_brief_hash=generation_brief_hash,
             runtime_plan_id=runtime_plan.id if runtime_plan else None, runtime_plan_hash=runtime_plan.plan_hash if runtime_plan else None,
-            request_summary=_redact(dict(request_summary or {})), provider_task_id=provider_task_id, status=status,
-            started_at=started_at, finished_at=finished_at, usage=_redact(dict(usage or {})), estimated_cost=estimated_cost,
+            request_summary=safe_summary if isinstance(safe_summary, dict) else {}, provider_task_id=provider_task_id, status=status,
+            started_at=started_at, finished_at=finished_at, usage=safe_usage if isinstance(safe_usage, dict) else {}, estimated_cost=estimated_cost,
             actual_cost=actual_cost, output_artifact_ids=tuple(output_artifact_ids), created_at=_now(),
         )
         return self.repository.create_ai_invocation(invocation)
