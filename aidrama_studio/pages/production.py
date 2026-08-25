@@ -534,6 +534,13 @@ def _render_source_history(source_service, project, shot) -> list[object]:
     if not history:
         st.caption("Source decision history · 暂无显式选择（qualified source 仍可预览）。")
         return history
+    latest = history[-1]
+    st.caption(
+        f"Current decision · {_status_value(latest, 'decision_type', 'UNKNOWN')} · "
+        f"{_status_value(latest, 'selection_kind', '—')} · "
+        f"execution={str(_value(latest, 'production_execution_id', '—'))[:12]} · "
+        f"artifact={str(_value(latest, 'production_artifact_id', '—'))[:12]}"
+    )
     st.markdown("**Source decision history（append-only）**")
     for decision in history:
         sequence = _value(decision, "sequence_number", "—")
