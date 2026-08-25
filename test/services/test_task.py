@@ -953,7 +953,6 @@ class TestTaskService(unittest.TestCase):
         params = VideoParams(video_subject="CLI custom audio")
 
         with (
-            patch.object(tm.utils, "check_ffmpeg_ready", return_value=True),
             patch.object(tm, "generate_script", return_value="generated script"),
             patch.object(tm, "generate_terms", return_value=["audio"]),
             patch.object(tm, "save_script_data"),
