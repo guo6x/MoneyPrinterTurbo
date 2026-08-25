@@ -9,7 +9,7 @@ returned artifacts, and closes the durable execution through
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from aidrama_studio.domain import (
     ProductionEventType,
@@ -44,11 +44,13 @@ class ProductionWorker:
         artifact_root=None,
         poll_interval: float = 0.0,
         max_polls: int = 100,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         self.execution_service = execution_service or ProductionExecutionService()
         self.adapter = adapter or runtime_adapter
         self.poll_interval = max(0.0, float(poll_interval))
         self.max_polls = max(1, int(max_polls))
+        self.should_stop = should_stop or (lambda: False)
         self.artifact_storage = artifact_storage or ProductionArtifactStorageService(
             self.execution_service.repository,
             projects_root=artifact_root,
@@ -153,6 +155,12 @@ class ProductionWorker:
         runtime_reference: str,
     ) -> ProductionExecution:
         for _ in range(self.max_polls):
+            if self.should_stop():
+                # Desktop shutdown pauses local polling only. The durable
+                # RUNNING execution/provider identity is intentionally left
+                # intact for startup reconciliation; no fake cancellation and
+                # no duplicate provider submission occurs.
+                return self.execution_service.get_execution(project_id, execution.id)
             try:
                 self._drain_events(project_id, execution.id, adapter, runtime_reference)
                 execution = self.execution_service.get_execution(project_id, execution.id)
@@ -179,7 +187,11 @@ class ProductionWorker:
                     return execution
                 return self._fail(project_id, execution, f"worker execution failed: {exc}")
             if self.poll_interval:
-                time.sleep(self.poll_interval)
+                deadline = time.monotonic() + self.poll_interval
+                while time.monotonic() < deadline:
+                    if self.should_stop():
+                        return self.execution_service.get_execution(project_id, execution.id)
+                    time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
 
         execution = self.execution_service.get_execution(project_id, execution.id)
         if execution.status in self._terminal_statuses():

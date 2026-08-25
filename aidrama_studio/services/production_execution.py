@@ -193,6 +193,8 @@ class ProductionExecutionService:
         input_snapshot: ProductionInputSnapshot,
         *,
         worker_type: str = "mpt",
+        runtime_plan_id: str | None = None,
+        generation_brief_id: str | None = None,
     ) -> tuple[ProductionExecution, object]:
         """Create the immutable execution and its first/retry attempt atomically."""
         self._require_project(project_id)
@@ -210,6 +212,44 @@ class ProductionExecutionService:
         shot = next((item for item in shots if item.shot_id == shot_id), None)
         if shot is None:
             raise ProductionExecutionServiceError("input snapshot 的 shot 不属于该 ProductionJob")
+        runtime_plan = None
+        generation_brief = None
+        if runtime_plan_id is not None:
+            runtime_plan = self.repository.get_runtime_plan(runtime_plan_id)
+            if (
+                runtime_plan is None
+                or runtime_plan.project_id != project_id
+                or runtime_plan.production_job_id != job.id
+            ):
+                raise ProductionExecutionServiceError("RuntimePlan 不属于该 ProductionJob")
+            generation_brief_id = generation_brief_id or runtime_plan.generation_brief_id
+        if generation_brief_id is not None:
+            generation_brief = next(
+                (
+                    item
+                    for item in self.repository.list_generation_briefs(project_id, job.id)
+                    if item.id == generation_brief_id
+                ),
+                None,
+            )
+            if generation_brief is None or generation_brief.shot_id != shot_id:
+                raise ProductionExecutionServiceError("GenerationBrief 不属于该 shot")
+        if runtime_plan is not None:
+            if runtime_plan.generation_brief_id != generation_brief_id:
+                raise ProductionExecutionServiceError("RuntimePlan 与 GenerationBrief provenance 不匹配")
+            if generation_brief is None or runtime_plan.generation_brief_hash != generation_brief.sha256:
+                raise ProductionExecutionServiceError("RuntimePlan 的 GenerationBrief hash 无效")
+            if tuple(runtime_plan.reference_version_ids) != tuple(
+                version_id
+                for version_id in input_snapshot.reference_asset_versions.values()
+                if version_id in set(runtime_plan.reference_version_ids)
+            ):
+                # Every frozen plan reference must be present in the execution
+                # snapshot. Extra snapshot references are allowed because the
+                # plan records the exact provider subset actually selected.
+                missing = set(runtime_plan.reference_version_ids) - set(input_snapshot.reference_asset_versions.values())
+                if missing:
+                    raise ProductionExecutionServiceError("RuntimePlan 引用了 snapshot 之外的 reference version")
         for existing in self.repository.list_production_executions(job.id):
             existing_shots = existing.input_snapshot.shot_parameters if existing.input_snapshot else {}
             if shot_id in existing_shots and existing.status in (
@@ -227,6 +267,8 @@ class ProductionExecutionService:
             worker_type=worker_type.strip(),
             created_at=now,
             input_snapshot=input_snapshot,
+            runtime_plan_id=runtime_plan_id,
+            generation_brief_id=generation_brief_id,
         )
         attempt = ProductionAttempt(
             id=uuid4().hex,
@@ -420,7 +462,15 @@ class ProductionExecutionService:
         plan_hash = ""
         if execution.runtime_plan_id:
             plan = self.repository.get_runtime_plan(execution.runtime_plan_id)
-            plan_hash = plan.plan_hash if plan is not None else ""
+            if plan is None or plan.project_id != project_id or plan.production_job_id != execution.production_job_id:
+                raise ProductionExecutionServiceError("execution 的 RuntimePlan provenance 无效")
+            if execution.generation_brief_id != plan.generation_brief_id:
+                raise ProductionExecutionServiceError("execution 的 RuntimePlan/GenerationBrief 不匹配")
+            if model_id != plan.model_id:
+                raise ProductionExecutionServiceError("runtime adapter model 与冻结 RuntimePlan 不匹配")
+            provider_id = plan.provider_id
+            model_id = plan.model_id
+            plan_hash = plan.plan_hash
         key_payload = {"project_id": project_id, "execution_id": execution.id, "provider_id": provider_id, "model_id": model_id, "plan_id": plan_id, "plan_hash": plan_hash, "snapshot": snapshot.to_json_dict()}
         key = hashlib.sha256(json.dumps(key_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         existing = self.repository.get_provider_task_by_idempotency(project_id, key)
@@ -431,7 +481,12 @@ class ProductionExecutionService:
             id=uuid4().hex, project_id=project_id, execution_id=execution.id,
             capability="VIDEO_GENERATIVE", provider_id=provider_id, model_id=model_id,
             idempotency_key=key, state="PENDING_SUBMISSION",
-            request_summary={"execution_id": execution.id, "snapshot_hash": hashlib.sha256(json.dumps(snapshot.to_json_dict(), ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()},
+            request_summary={
+                "execution_id": execution.id,
+                "snapshot_hash": hashlib.sha256(json.dumps(snapshot.to_json_dict(), ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
+                "runtime_plan_id": execution.runtime_plan_id,
+                "runtime_plan_hash": plan_hash or None,
+            },
             created_at=now, updated_at=now,
         ))
 

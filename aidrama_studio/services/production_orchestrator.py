@@ -10,7 +10,7 @@ persisted ProductionShot/Attempt/Execution/QC facts.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 
 from aidrama_studio.domain import (
@@ -24,6 +24,7 @@ from aidrama_studio.domain import (
     ProductionShot,
     ProductionShotStatus,
     ProductionInputSnapshot,
+    RuntimePlan,
 )
 from aidrama_studio.services.adapters import ProductionRuntimeAdapter
 from aidrama_studio.storage.repositories import ProjectRepository
@@ -55,6 +56,8 @@ class ProductionOrchestrator:
         worker: ProductionWorker | None = None,
         adapter: ProductionRuntimeAdapter | None = None,
         runtime_adapter: ProductionRuntimeAdapter | None = None,
+        adapter_resolver: Callable[[RuntimePlan], ProductionRuntimeAdapter] | None = None,
+        runtime_plan_ids_by_shot: Mapping[str, str] | None = None,
     ) -> None:
         if production_service is not None:
             self.production_service = production_service
@@ -70,6 +73,8 @@ class ProductionOrchestrator:
         self.qc_service = qc_service or ProductionQCService(self.repository)
         self.worker = worker
         self.adapter = adapter or runtime_adapter
+        self.adapter_resolver = adapter_resolver
+        self.runtime_plan_ids_by_shot = dict(runtime_plan_ids_by_shot or {})
 
     def run_job(
         self,
@@ -77,6 +82,8 @@ class ProductionOrchestrator:
         production_job_id: str,
         *,
         adapter: ProductionRuntimeAdapter | None = None,
+        adapter_resolver: Callable[[RuntimePlan], ProductionRuntimeAdapter] | None = None,
+        runtime_plan_ids_by_shot: Mapping[str, str] | None = None,
     ) -> ProductionJob:
         """Run/resume a job until a shot fails, is cancelled, or all pass."""
         job = self._get_job(project_id, production_job_id)
@@ -95,9 +102,12 @@ class ProductionOrchestrator:
             raise ProductionOrchestratorError(str(exc)) from exc
 
         runtime_adapter = adapter or self.adapter
+        runtime_resolver = adapter_resolver or self.adapter_resolver
+        plan_ids = dict(self.runtime_plan_ids_by_shot)
+        plan_ids.update(dict(runtime_plan_ids_by_shot or {}))
         if runtime_adapter is None and self.worker is not None:
             runtime_adapter = getattr(self.worker, "adapter", None)
-        if runtime_adapter is None:
+        if runtime_adapter is None and runtime_resolver is None:
             raise ProductionOrchestratorError("ProductionOrchestrator 需要一个 ProductionRuntimeAdapter")
 
         while True:
@@ -116,7 +126,14 @@ class ProductionOrchestrator:
                 if shot.status not in (ProductionShotStatus.SUCCEEDED, ProductionShotStatus.SKIPPED)
             )
             try:
-                passed = self._run_shot(project_id, job, shot, runtime_adapter)
+                passed = self._run_shot(
+                    project_id,
+                    job,
+                    shot,
+                    runtime_adapter,
+                    adapter_resolver=runtime_resolver,
+                    runtime_plan_ids_by_shot=plan_ids,
+                )
             except ProductionOrchestratorError:
                 raise
             if not passed:
@@ -211,11 +228,30 @@ class ProductionOrchestrator:
         project_id: str,
         job: ProductionJob,
         shot: ProductionShot,
-        adapter: ProductionRuntimeAdapter,
+        adapter: ProductionRuntimeAdapter | None,
+        *,
+        adapter_resolver: Callable[[RuntimePlan], ProductionRuntimeAdapter] | None = None,
+        runtime_plan_ids_by_shot: Mapping[str, str] | None = None,
     ) -> bool:
         executions = self.execution_service.list_executions(project_id, job.id)
         execution = self._latest_execution_for_shot(executions, shot.shot_id)
         attempt = self._attempt_for_shot(project_id, shot)
+        plan_id = (
+            (runtime_plan_ids_by_shot or {}).get(shot.shot_id)
+            or (execution.runtime_plan_id if execution is not None else None)
+        )
+        runtime_plan = self.repository.get_runtime_plan(plan_id) if plan_id else None
+        if plan_id and (
+            runtime_plan is None
+            or runtime_plan.project_id != project_id
+            or runtime_plan.production_job_id != job.id
+        ):
+            raise ProductionOrchestratorError("冻结 RuntimePlan 不属于当前 ProductionJob")
+        shot_adapter = adapter_resolver(runtime_plan) if adapter_resolver is not None and runtime_plan is not None else adapter
+        if shot_adapter is None:
+            if adapter_resolver is not None:
+                raise ProductionOrchestratorError(f"镜头 {shot.shot_id} 缺少冻结 RuntimePlan")
+            raise ProductionOrchestratorError("ProductionOrchestrator 需要一个 ProductionRuntimeAdapter")
 
         # A terminal execution is immutable history.  If its shot is not
         # complete (runtime failure or QC rejection), the next run must create
@@ -235,15 +271,17 @@ class ProductionOrchestrator:
                     project_id,
                     job.id,
                     snapshot,
-                    worker_type=getattr(adapter, "name", "runtime"),
+                    worker_type=getattr(shot_adapter, "name", "runtime"),
+                    runtime_plan_id=runtime_plan.id if runtime_plan is not None else None,
+                    generation_brief_id=runtime_plan.generation_brief_id if runtime_plan is not None else None,
                 )
             except (ProductionExecutionServiceError, ProductionServiceError) as exc:
                 raise ProductionOrchestratorError(str(exc)) from exc
 
         if execution.status is ProductionExecutionStatus.QUEUED:
-            result = self._worker_run(project_id, execution.id, adapter)
+            result = self._worker_run(project_id, execution.id, shot_adapter)
         elif execution.status is ProductionExecutionStatus.RUNNING:
-            result = self._worker_resume(project_id, execution.id, adapter)
+            result = self._worker_resume(project_id, execution.id, shot_adapter)
         else:
             result = execution
 

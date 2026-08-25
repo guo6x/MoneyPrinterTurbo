@@ -89,7 +89,28 @@ class ProviderProfileService:
         if provider_id:
             profiles = [profile for profile in profiles if profile.provider_id == provider_id]
         if profiles:
-            return profiles[0]
+            selected = profiles[0]
+            if self.registry is not None:
+                providers = self.registry.list(value)
+                runtime = next(
+                    (
+                        item
+                        for item in providers
+                        if str(getattr(item, "provider_name", "")).casefold()
+                        == selected.provider_id.casefold()
+                    ),
+                    None,
+                )
+                if runtime is None:
+                    raise CapabilityUnavailable(
+                        f"Provider {selected.provider_id} 不在当前 runtime inventory"
+                    )
+                if not bool(getattr(runtime.status, "available", False)):
+                    reason = str(getattr(runtime.status, "reason", "provider unavailable"))
+                    raise CapabilityUnavailable(
+                        f"Provider {selected.provider_id} 尚未就绪: {reason}"
+                    )
+            return selected
         if self.registry is not None:
             provider = self.registry.get(value)
             if provider is not None:

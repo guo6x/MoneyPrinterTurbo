@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import threading
 
 import pytest
 
@@ -21,6 +22,9 @@ from desktop.launcher import (
     wait_for_health,
 )
 from desktop.build import DESKTOP_ENTRYPOINT, build_command, runtime_data_args
+from desktop.background import DesktopBackgroundError, DesktopBackgroundRunnerHost
+from aidrama_studio.storage.database import DatabasePaths
+from aidrama_studio.storage.repositories import ProjectRepository
 
 
 def test_brand_config_has_replaceable_mark_without_upstream_ui_name(monkeypatch):
@@ -280,3 +284,73 @@ def test_build_entrypoint_exists_and_is_loopback_launcher():
     source = DESKTOP_ENTRYPOINT.read_text(encoding="utf-8")
     assert "DesktopLauncher" in source
     assert "validate_loopback_host" in source
+
+
+def test_desktop_background_runner_survives_ui_reruns_and_stops_cleanly(tmp_path):
+    repository = ProjectRepository(
+        DatabasePaths(
+            tmp_path / "data" / "aidrama.db",
+            tmp_path / "data" / "projects",
+            tmp_path / "data" / "archived",
+        )
+    )
+    cycle = threading.Event()
+    instances = []
+
+    class FakeRunner:
+        def __init__(self, repo, **kwargs):
+            self.repository = repo
+            self.worker_factory = kwargs["worker_factory"]
+            self.reconciled = []
+            instances.append(self)
+
+        def reconcile(self, project_id):
+            self.reconciled.append(project_id)
+
+        def run_once(self):
+            cycle.set()
+            return []
+
+    host = DesktopBackgroundRunnerHost(
+        repository,
+        interval_seconds=0.01,
+        runner_factory=FakeRunner,
+    )
+    host.start()
+    assert cycle.wait(1)
+    assert host.running
+    # Calling start again models a Streamlit rerun; no duplicate runner is
+    # created for the same desktop owner.
+    host.start()
+    assert len(instances) == 1
+    host.stop(timeout_seconds=1)
+    assert not host.running
+
+
+def test_desktop_data_directory_has_one_writable_owner(tmp_path):
+    repository = ProjectRepository(
+        DatabasePaths(
+            tmp_path / "data" / "aidrama.db",
+            tmp_path / "data" / "projects",
+            tmp_path / "data" / "archived",
+        )
+    )
+
+    class IdleRunner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def reconcile(self, _project_id):
+            return []
+
+        def run_once(self):
+            return []
+
+    first = DesktopBackgroundRunnerHost(repository, interval_seconds=0.1, runner_factory=IdleRunner)
+    second = DesktopBackgroundRunnerHost(repository, interval_seconds=0.1, runner_factory=IdleRunner)
+    first.start()
+    try:
+        with pytest.raises(DesktopBackgroundError, match="另一个桌面实例"):
+            second.start()
+    finally:
+        first.stop(timeout_seconds=1)

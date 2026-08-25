@@ -88,6 +88,31 @@ class MPTResultRuntime:
         return True
 
 
+def test_desktop_shutdown_pauses_polling_and_cold_resume_does_not_resubmit(context):
+    repository, project = context
+    job = _ready_job(repository, project)
+    execution_service = ProductionExecutionService(repository)
+    execution = execution_service.enqueue_job(project.id, job.id, worker_type="mock")
+    adapter = MockProductionAdapter()
+
+    interrupted = ProductionWorker(
+        execution_service,
+        adapter,
+        should_stop=lambda: True,
+    ).run(project.id, execution.id)
+
+    assert interrupted.status is ProductionExecutionStatus.RUNNING
+    assert len(adapter.submitted_snapshots) == 1
+    runtime_reference = next(iter(adapter.submitted_snapshots))
+    adapter.succeed(runtime_reference)
+    resumed = ProductionWorker(execution_service, adapter).resume(project.id, execution.id)
+    assert resumed.status is ProductionExecutionStatus.SUCCEEDED
+    assert len(adapter.submitted_snapshots) == 1
+    assert len(
+        [item for item in repository.list_provider_tasks(project.id) if item.execution_id == execution.id]
+    ) == 1
+
+
 def test_worker_success_polls_mpt_adapter_and_persists_one_shot_artifact(context):
     repository, project = context
     job = _ready_job(repository, project)

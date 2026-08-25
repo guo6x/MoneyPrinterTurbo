@@ -549,18 +549,34 @@ class _UnavailableOrchestrator:
     cancel_job = run_job
 
 
-def _orchestrator_action(orchestrator, action: str, project, job=None, *, ensure_job=None) -> None:
+def _orchestrator_action(
+    orchestrator,
+    action: str,
+    project,
+    job=None,
+    *,
+    ensure_job=None,
+    authorization: Mapping[str, object] | None = None,
+) -> None:
     try:
         if action == "start":
             if job is None:
                 job = ensure_job() if callable(ensure_job) else None
             if job is None:
                 raise ProductionOrchestratorError("无法创建 ProductionJob")
-            orchestrator.run_job(project.id, _value(job, "id"))
+            orchestrator.run_job(
+                project.id,
+                _value(job, "id"),
+                authorization=authorization,
+            )
         elif action == "resume":
             if job is None:
                 raise ProductionOrchestratorError("继续制作需要一个已存在的 ProductionJob")
-            orchestrator.resume_job(project.id, _value(job, "id"))
+            orchestrator.resume_job(
+                project.id,
+                _value(job, "id"),
+                authorization=authorization,
+            )
         elif action == "cancel":
             if job is None:
                 raise ProductionOrchestratorError("停止制作需要一个正在运行的 ProductionJob")
@@ -595,13 +611,61 @@ def _render_primary_action(orchestrator, production_service, project, job, readi
         st.error("制作失败，当前不会自动重新生成或重试。请查看失败镜头与高级信息。")
         return
     label = "继续制作" if status == "CANCELLED" or int(progress.get("completed_shots", 0) or 0) > 0 else "开始整剧制作"
-    if st.button(label, type="primary", key=f"primary-production-{_value(job, 'id', project.id)}"):
+    preview_method = getattr(orchestrator, "preview_authorization", None)
+    if callable(preview_method) and job is None:
+        st.info("先冻结 Production Job 与输出配置；下一步会显示本次 Provider、模型及最大请求数供你确认。")
+        if st.button("准备制作计划", type="primary", key=f"prepare-production-{project.id}"):
+            if not callable(ensure_job):
+                st.error("无法创建 ProductionJob")
+                return
+            ensure_job()
+            st.rerun()
+        return
+
+    authorization = None
+    disabled = False
+    if callable(preview_method) and job is not None:
+        try:
+            preview = preview_method(project.id, _value(job, "id"), max_paid_attempts=1)
+        except ProductionQueueError as exc:
+            st.warning(f"生成 Provider 尚未就绪：{exc}")
+            st.button(label, type="primary", disabled=True, key=f"primary-production-{_value(job, 'id', project.id)}")
+            return
+        st.markdown("### 本次生成授权")
+        cols = st.columns(2)
+        cols[0].metric("Provider / Model", f"{preview.provider_id} / {preview.model_id}")
+        cols[1].metric("镜头数", preview.shot_count)
+        st.caption(
+            f"最大付费尝试：每镜头 {preview.max_paid_attempts} 次 · "
+            f"预计最多 {preview.estimated_provider_requests} 次 Provider 请求。"
+        )
+        st.caption("未获得可靠的当前价格数据，因此不展示或猜测货币金额。")
+        approved = st.checkbox(
+            "我确认使用上述 Provider / 模型，并批准本次有界生成请求",
+            key=f"paid-authorization-{_value(job, 'id')}",
+        )
+        disabled = not approved
+        if approved:
+            authorization = {
+                "approved": True,
+                "provider_id": preview.provider_id,
+                "model_id": preview.model_id,
+                "max_paid_attempts": preview.max_paid_attempts,
+                "estimated_provider_requests": preview.estimated_provider_requests,
+            }
+    if st.button(
+        label,
+        type="primary",
+        disabled=disabled,
+        key=f"primary-production-{_value(job, 'id', project.id)}",
+    ):
         _orchestrator_action(
             orchestrator,
             "resume" if label == "继续制作" else "start",
             project,
             job,
             ensure_job=ensure_job,
+            authorization=authorization,
         )
 
 

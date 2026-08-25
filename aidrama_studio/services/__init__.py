@@ -28,7 +28,8 @@ from .current_state import CurrentProductionState, CurrentProductionStateService
 from .vision_qc import VisionQCResult, VisionQCService
 from .diagnostics import DiagnosticsError, DiagnosticsService, DiskSpaceService
 from .tts_runtime import TTSRuntimeError, TTSRuntimeService
-from .production_queue import ProductionQueueError, ProductionQueueService
+from .production_queue import ProductionAuthorizationPreview, ProductionQueueError, ProductionQueueService
+from .production_runtime_resolver import ProductionRuntimeResolutionError, ProductionRuntimeResolver
 from .security import configure_runtime_logging, sanitize_error
 from .provider_readiness import ProviderReadinessService, CapabilityReadiness, ReadinessState
 from .ai_capabilities import (
@@ -105,7 +106,8 @@ __all__ = [
     "VisionQCResult", "VisionQCService",
     "DiagnosticsError", "DiagnosticsService", "DiskSpaceService",
     "TTSRuntimeError", "TTSRuntimeService",
-    "ProductionQueueError", "ProductionQueueService",
+    "ProductionAuthorizationPreview", "ProductionQueueError", "ProductionQueueService",
+    "ProductionRuntimeResolutionError", "ProductionRuntimeResolver",
     "configure_runtime_logging", "sanitize_error",
     "ProviderReadinessService", "CapabilityReadiness", "ReadinessState",
     "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",

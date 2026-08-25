@@ -18,6 +18,8 @@ from aidrama_studio.services.adapters.production_adapter import ProductionRuntim
 from aidrama_studio.services.production_worker import ProductionWorker, ProductionWorkerError
 from aidrama_studio.services.production_orchestrator import ProductionOrchestrator
 from aidrama_studio.services.production import ProductionService
+from aidrama_studio.services.production_execution import ProductionExecutionService
+from aidrama_studio.services.production_runtime_resolver import ProductionRuntimeResolver
 from aidrama_studio.services.security import sanitize_error
 from aidrama_studio.storage.repositories import ProjectRepository
 
@@ -33,8 +35,10 @@ class BackgroundRunnerError(RuntimeError):
 class SingleInstanceGuard:
     """Per-data-root lock. It is deliberately process-local and recoverable."""
 
-    def __init__(self, root: Path) -> None:
-        self.path = Path(root) / "runner.lock"
+    def __init__(self, root: Path, lock_name: str = "runner.lock") -> None:
+        if not lock_name or Path(lock_name).name != lock_name:
+            raise ValueError("lock_name 必须是安全文件名")
+        self.path = Path(root) / lock_name
         self.handle = None
 
     def acquire(self) -> None:
@@ -92,11 +96,19 @@ class BackgroundProductionRunner:
         repository: ProjectRepository | None = None,
         *,
         worker_factory: Callable[[], ProductionWorker] | None = None,
-        adapter_factory: Callable[[ProviderTask], ProductionRuntimeAdapter] | None = None,
+        adapter_factory: Callable[..., ProductionRuntimeAdapter] | None = None,
+        runtime_resolver: ProductionRuntimeResolver | None = None,
     ) -> None:
         self.repository = repository or ProjectRepository()
-        self.worker_factory = worker_factory or (lambda: ProductionWorker())
+        self.worker_factory = worker_factory or (
+            lambda: ProductionWorker(
+                ProductionExecutionService(self.repository),
+                poll_interval=5.0,
+                max_polls=360,
+            )
+        )
         self.adapter_factory = adapter_factory
+        self.runtime_resolver = runtime_resolver or ProductionRuntimeResolver()
         self.guard = SingleInstanceGuard(self.repository.paths.root)
 
     def enqueue(self, project_id: str, execution_id: str) -> ProviderTask:
@@ -136,19 +148,41 @@ class BackgroundProductionRunner:
                 self.repository.update_provider_task(running)
                 try:
                     worker = self.worker_factory()
-                    adapter = self.adapter_factory(task) if self.adapter_factory is not None else None
                     if task.execution_id is None:
                         job_id = str(task.request_summary.get("production_job_id") or "")
                         if not job_id:
                             raise BackgroundRunnerError("后台 job task 缺少 ProductionJob identity")
-                        if adapter is None:
-                            raise BackgroundRunnerError("后台 job task 没有 configured runtime adapter")
+                        raw_plan_ids = task.request_summary.get("runtime_plan_ids_by_shot")
+                        if not isinstance(raw_plan_ids, dict) or not raw_plan_ids:
+                            raise BackgroundRunnerError("后台 job task 缺少冻结 RuntimePlan map")
+                        plan_ids = {
+                            str(shot_id): str(plan_id)
+                            for shot_id, plan_id in raw_plan_ids.items()
+                            if str(shot_id) and str(plan_id)
+                        }
+                        if not plan_ids:
+                            raise BackgroundRunnerError("后台 job task 的 RuntimePlan map 无效")
                         production = ProductionService(self.repository)
-                        orchestrator = ProductionOrchestrator(production_service=production, worker=worker, adapter=adapter)
-                        result = orchestrator.run_job(task.project_id, job_id, adapter=adapter)
+                        orchestrator = ProductionOrchestrator(
+                            production_service=production,
+                            worker=worker,
+                            adapter_resolver=lambda plan: self._resolve_adapter(task, plan),
+                            runtime_plan_ids_by_shot=plan_ids,
+                        )
+                        result = orchestrator.run_job(
+                            task.project_id,
+                            job_id,
+                            adapter_resolver=lambda plan: self._resolve_adapter(task, plan),
+                            runtime_plan_ids_by_shot=plan_ids,
+                        )
                         state = {"SUCCEEDED": "SUCCEEDED", "FAILED": "FAILED", "CANCELLED": "CANCELLED"}.get(result.status.value, "RUNNING")
                     else:
-                        result = worker.run(task.project_id, task.execution_id, adapter=adapter) if adapter is not None else worker.run(task.project_id, task.execution_id)
+                        execution = self.repository.get_production_execution(task.execution_id)
+                        if execution is None:
+                            raise BackgroundRunnerError("后台 execution task 不存在")
+                        plan = self.repository.get_runtime_plan(execution.runtime_plan_id) if execution.runtime_plan_id else None
+                        adapter = self._resolve_adapter(task, plan)
+                        result = worker.run(task.project_id, task.execution_id, adapter=adapter)
                         state = {
                             ProductionExecutionStatus.SUCCEEDED: "SUCCEEDED",
                             ProductionExecutionStatus.FAILED: "FAILED",
@@ -164,7 +198,49 @@ class BackgroundProductionRunner:
         """Mark durable tasks from already-terminal executions without rerun."""
         changed: list[ProviderTask] = []
         for task in self.repository.list_provider_tasks(project_id):
-            if task.execution_id is None or task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            if task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                continue
+            if task.execution_id is None:
+                job_id = str(task.request_summary.get("production_job_id") or "")
+                job = self.repository.get_production_job(job_id) if job_id else None
+                if job is None or job.project_id != project_id:
+                    continue
+                terminal = {
+                    "SUCCEEDED": "SUCCEEDED",
+                    "FAILED": "FAILED",
+                    "CANCELLED": "CANCELLED",
+                }.get(job.status.value)
+                if terminal:
+                    changed.append(
+                        self.repository.update_provider_task(
+                            task.model_copy(update={"state": terminal, "updated_at": _now()})
+                        )
+                    )
+                    continue
+                executions = self.repository.list_production_executions(job.id)
+                child_tasks = [
+                    child
+                    for child in self.repository.list_provider_tasks(project_id)
+                    if child.execution_id in {item.id for item in executions}
+                ]
+                if any(
+                    child.state in {"SUBMISSION_UNCERTAIN", "RECONCILIATION_REQUIRED"}
+                    for child in child_tasks
+                ):
+                    state = "RECONCILIATION_REQUIRED"
+                elif task.state == "RUNNING":
+                    # The previous desktop process stopped while local work
+                    # was active. Requeue the local owner; the orchestrator
+                    # resumes an existing RUNNING execution/provider task and
+                    # does not issue another paid submission.
+                    state = "QUEUED"
+                else:
+                    continue
+                changed.append(
+                    self.repository.update_provider_task(
+                        task.model_copy(update={"state": state, "updated_at": _now()})
+                    )
+                )
                 continue
             execution = self.repository.get_production_execution(task.execution_id)
             if execution is None:
@@ -201,6 +277,22 @@ class BackgroundProductionRunner:
         for project in self.repository.list_projects():
             result.extend(self.repository.list_provider_tasks(project.id, state="QUEUED"))
         return result
+
+    def _resolve_adapter(self, task: ProviderTask, runtime_plan=None) -> ProductionRuntimeAdapter:
+        if self.adapter_factory is None:
+            return self.runtime_resolver.resolve(task, runtime_plan)
+        # The original one-argument injection seam remains supported for
+        # deterministic tests.  New factories receive the frozen RuntimePlan
+        # as a second argument and can prove exact model/config restoration.
+        try:
+            import inspect
+
+            parameters = inspect.signature(self.adapter_factory).parameters
+            if len(parameters) >= 2:
+                return self.adapter_factory(task, runtime_plan)
+        except (TypeError, ValueError):
+            pass
+        return self.adapter_factory(task)
 
     @staticmethod
     def _safe_error(exc: Exception) -> str:

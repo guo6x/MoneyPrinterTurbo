@@ -158,7 +158,9 @@ class DesktopLauncher:
 
     config: LauncherConfig = field(default_factory=LauncherConfig)
     process_factory: Callable[..., subprocess.Popen] = subprocess.Popen
+    runner_host_factory: Callable[[], Any] | None = None
     _process: subprocess.Popen | None = field(default=None, init=False, repr=False)
+    _runner_host: Any | None = field(default=None, init=False, repr=False)
     port: int | None = field(default=None, init=False)
     url: str | None = field(default=None, init=False)
 
@@ -172,6 +174,13 @@ class DesktopLauncher:
         main_path = Path(self.config.main_path).resolve()
         if not main_path.is_file():
             raise DesktopLaunchError(f"AIDrama entrypoint not found: {main_path}")
+        if self.runner_host_factory is not None and self._runner_host is None:
+            try:
+                self._runner_host = self.runner_host_factory()
+                self._runner_host.start()
+            except Exception as exc:
+                self._runner_host = None
+                raise DesktopLaunchError(f"无法启动 AIDrama 后台制作服务：{exc}") from exc
         port = select_safe_port(self.config.host, self.config.preferred_port, self.config.port_attempts)
         command = build_streamlit_command(self.config, port)
         try:
@@ -183,6 +192,7 @@ class DesktopLauncher:
                 stderr=None,
             )
         except OSError as exc:
+            self._stop_runner_host()
             raise DesktopLaunchError(f"无法启动 AIDrama 本地服务：{exc}") from exc
         self.port = port
         display_host = "[::1]" if self.config.host == "::1" else self.config.host
@@ -225,6 +235,7 @@ class DesktopLauncher:
             time.sleep(max(0.05, float(self.config.health_interval)))
 
     def stop(self) -> None:
+        self._stop_runner_host()
         process, self._process = self._process, None
         if process is None or process.poll() is not None:
             return
@@ -237,6 +248,15 @@ class DesktopLauncher:
                 process.wait(timeout=2)
             except (OSError, subprocess.TimeoutExpired):
                 pass
+
+    def _stop_runner_host(self) -> None:
+        host, self._runner_host = self._runner_host, None
+        if host is None:
+            return
+        try:
+            host.stop()
+        except Exception as exc:
+            print(f"AIDrama background runner shutdown warning: {exc}", file=sys.stderr)
 
     def open_window(self, *, prefer_webview: bool = True) -> str:
         if not self.url:
@@ -314,8 +334,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if raw_argv and raw_argv[0] == "--streamlit-child":
         return _run_streamlit_child(raw_argv[1:])
     args = _parse_args(raw_argv)
+    from desktop.background import DesktopBackgroundRunnerHost
+
     launcher = DesktopLauncher(
-        LauncherConfig(host=args.host, preferred_port=args.port, startup_timeout=args.startup_timeout)
+        LauncherConfig(host=args.host, preferred_port=args.port, startup_timeout=args.startup_timeout),
+        runner_host_factory=DesktopBackgroundRunnerHost,
     )
     if args.smoke:
         try:

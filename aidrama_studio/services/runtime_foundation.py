@@ -116,12 +116,20 @@ class GenerationBriefCompiler:
             "target_duration_seconds": float(shot.duration_seconds),
             "source_ids": [story_revision["id"], script_revision["id"], plan["id"], shot.id, *shot.source_script_beat_ids],
         }
+        brief_hash = _hash(raw)
+        # Queue retries and Streamlit reruns must not create competing copies
+        # of the same frozen creative truth.  Reuse an identical persisted
+        # brief; a changed upstream revision or shot produces a new hash and
+        # therefore a new immutable record.
+        for existing in reversed(self.repository.list_generation_briefs(project_id, production_job_id)):
+            if existing.shot_id == shot.id and existing.sha256 == brief_hash:
+                return existing
         brief = GenerationBrief(
             id=brief_id or uuid4().hex,
             project_id=project_id,
             production_job_id=production_job_id,
             shot_id=shot.id,
-            sha256=_hash(raw),
+            sha256=brief_hash,
             created_at=_now(),
             **raw,
         )
@@ -150,10 +158,14 @@ class RuntimePlanService:
             "output_profile_hash": profile_hash, "authorization": _redact(dict(authorization or {})),
             "prompt_template_version": prompt_template_version,
         }
+        plan_hash = _hash(payload)
+        for existing in reversed(self.repository.list_runtime_plans(project_id)):
+            if existing.plan_hash == plan_hash:
+                return existing
         plan = RuntimePlan(
             id=plan_id or uuid4().hex, project_id=project_id, production_job_id=production_job_id,
             output_profile_id=profile.id if profile else None, generation_brief_id=brief.id,
-            plan_hash=_hash(payload), created_at=_now(), **payload,
+            plan_hash=plan_hash, created_at=_now(), **payload,
         )
         return self.repository.create_runtime_plan(plan)
 

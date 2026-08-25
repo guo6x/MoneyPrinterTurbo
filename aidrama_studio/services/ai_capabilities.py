@@ -211,7 +211,11 @@ class RuntimeVideoProvider(VideoGenerationProvider):
         if config is not None and hasattr(config, "api_key"):
             configured = bool(str(config.api_key).strip())
             reason = "configured" if configured else "provider credential unavailable"
-        return CapabilityStatus(self.capability, self.provider_name, configured, reason, {"mode": self.capability.value})
+        metadata = {
+            "mode": self.capability.value,
+            "model": str(getattr(config, "model", getattr(self.adapter, "model_id", "runtime"))),
+        }
+        return CapabilityStatus(self.capability, self.provider_name, configured, reason, metadata)
 
     def validate(self, snapshot: ProductionInputSnapshot) -> bool:
         return self.adapter.validate(snapshot)
