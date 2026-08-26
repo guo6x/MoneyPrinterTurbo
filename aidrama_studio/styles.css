@@ -38,7 +38,14 @@
 }
 
 .stButton > button[kind="primary"] {
+  background: var(--aidrama-accent) !important;
+  border-color: var(--aidrama-accent) !important;
   color: #ffffff !important;
+}
+.stButton > button[kind="primary"]:hover {
+  background: #e4b56d !important;
+  border-color: #e4b56d !important;
+  color: #111820 !important;
 }
 
 [data-testid="stSidebar"] {
@@ -51,6 +58,51 @@
   padding-top: 2.2rem;
   padding-bottom: 3rem;
 }
+
+/* The installed PyWebView window is the product shell. Streamlit's browser
+   deployment affordances are not part of the creative workflow. Keep the
+   menu accessible through the app shell while removing the visible Deploy /
+   developer chrome from normal desktop mode. */
+[data-testid="stToolbar"],
+[data-testid="stDecoration"],
+[data-testid="stStatusWidget"],
+[data-testid="stHeaderActionElements"] {
+  display: none !important;
+}
+[data-testid="stMainMenu"],
+button[aria-label="Deploy"],
+button[title="Deploy"],
+[aria-label="View fullscreen"] {
+  display: none !important;
+}
+
+.aidrama-workspace-context {
+  align-items: center;
+  background: linear-gradient(115deg, rgba(214,163,90,.13), rgba(18,23,32,.96) 42%);
+  border: 1px solid rgba(214,163,90,.35);
+  border-radius: 14px;
+  display: flex;
+  gap: 2.5rem;
+  justify-content: flex-start;
+  margin: -0.45rem 0 0.85rem;
+  padding: 0.78rem 1rem;
+}
+.aidrama-workspace-context > div { display: flex; flex-direction: column; gap: .12rem; }
+.aidrama-context-kicker { color: var(--aidrama-muted); font-size: .68rem; letter-spacing: .12em; text-transform: uppercase; }
+.aidrama-workspace-context strong { color: var(--aidrama-text); font-size: 1rem; }
+.aidrama-workspace-context + div { margin-bottom: .65rem; }
+
+.aidrama-primary-panel {
+  background: radial-gradient(circle at 85% 0%, rgba(214,163,90,.18), transparent 42%), var(--aidrama-panel);
+  border: 1px solid rgba(214,163,90,.34);
+  border-radius: 18px;
+  padding: clamp(1.4rem, 4vw, 3rem);
+}
+.aidrama-primary-panel h2 { color: var(--aidrama-text); margin: 0 0 .5rem; }
+.aidrama-primary-panel p { color: var(--aidrama-muted); max-width: 52rem; }
+.aidrama-stage-rail { display: flex; flex-wrap: wrap; gap: .45rem; margin: .75rem 0 1.2rem; }
+.aidrama-stage-chip { background: #232c39; border: 1px solid #344052; border-radius: 999px; color: #c8d1dc; font-size: .75rem; padding: .3rem .65rem; }
+.aidrama-stage-chip.is-current { background: rgba(214,163,90,.18); border-color: rgba(214,163,90,.55); color: #f0c783; }
 
 .aidrama-brand {
   color: var(--aidrama-text);
@@ -108,6 +160,13 @@
   justify-content: center;
   letter-spacing: 0.16em;
   margin-bottom: 0.85rem;
+}
+
+.aidrama-cover-empty {
+  background: linear-gradient(135deg, #252e3d, #161c27 55%, #493a2b);
+  color: #cda66b;
+  font-size: .75rem;
+  letter-spacing: .12em;
 }
 
 .aidrama-status {
@@ -175,4 +234,9 @@
   .aidrama-cover {
     height: 82px;
   }
+  .aidrama-workspace-context { gap: 1rem; justify-content: space-between; }
+}
+
+@media (max-width: 760px) {
+  .aidrama-workspace-context { align-items: flex-start; flex-direction: column; gap: .55rem; }
 }

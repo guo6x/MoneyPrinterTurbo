@@ -1,0 +1,43 @@
+- button "keyboard_double_arrow_left":
+  - generic: keyboard_double_arrow_left
+- list:
+  - paragraph: AIDrama Studio
+  - link "工作台":
+    - /url: http://127.0.0.1:8501/
+    - paragraph: 工作台
+  - link "创意与剧本":
+    - /url: http://127.0.0.1:8501/story
+    - paragraph: 创意与剧本
+  - link "角色与场景":
+    - /url: http://127.0.0.1:8501/assets
+    - paragraph: 角色与场景
+  - link "分镜导演台" [active]:
+    - /url: http://127.0.0.1:8501/director
+    - paragraph: 分镜导演台
+  - link "制作中心":
+    - /url: http://127.0.0.1:8501/production
+    - paragraph: 制作中心
+  - link "QC & Review":
+    - /url: http://127.0.0.1:8501/review
+    - paragraph: QC & Review
+  - link "后期与成片":
+    - /url: http://127.0.0.1:8501/postproduction
+    - paragraph: 后期与成片
+  - paragraph: System
+  - link "设置":
+    - /url: http://127.0.0.1:8501/settings
+    - paragraph: 设置
+- generic: AIDrama Studio
+- paragraph: AI 短剧全链路制作工作台
+- banner:
+  - button "Deploy":
+    - generic: Deploy
+  - button "Main menu":
+- generic: NO PROJECT
+- heading "请先选择一个项目" [level=3]:
+  - text: 请先选择一个项目
+  - link "Link to heading":
+    - /url: "#550e0655"
+- paragraph: 从工作台打开已有项目，或创建新的短剧项目后再进入这个阶段。
+- button "返回工作台":
+  - paragraph: 返回工作台

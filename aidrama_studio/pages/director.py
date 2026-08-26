@@ -10,7 +10,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import streamlit as st
 from aidrama_studio.components.page_header import page_header
-from aidrama_studio.pages._shared import current_project_or_stop
+from aidrama_studio.pages._shared import current_project_or_stop, render_actionable_blockers, render_project_context
 from aidrama_studio.services import (
     ScriptService,
     DirectorService,
@@ -51,6 +51,22 @@ def _decision_status_label(decision) -> str:
     status = _value(decision, "status", "RECOMMENDED")
     value = getattr(status, "value", status)
     return _DECISION_STATUS_LABELS.get(str(value), str(value))
+
+
+def _director_user_copy(action: str, reason: str) -> tuple[str, str]:
+    """Keep canonical Director vocabulary out of the creative surface."""
+    action_text = {
+        "STOP_AND_REVIEW": "完成准备清单",
+        "REVIEW_PROJECT_STATE": "检查当前准备度",
+        "LOCK_CHARACTER_REFERENCE": "锁定角色参考图",
+        "LOCK_LOCATION_REFERENCE": "锁定场景参考图",
+        "REVIEW_SHOT_PLAN": "检查分镜",
+        "MAKE_PRODUCTION_READY": "完成制作准备",
+    }.get(str(action), "继续处理当前阶段")
+    lowered = str(reason).lower()
+    if "approved story bible" in lowered or "approved structured script" in lowered or "approved shot plan" in lowered:
+        return action_text, "故事设定、剧本和分镜还没有全部确认。"
+    return action_text, str(reason)
 
 def _editor(service, project, plan):
     pid = _value(plan, "id", "plan"); shots = _value(plan, "shots", []) or []
@@ -153,11 +169,11 @@ def _render_shot_plan(project) -> None:
     planned_duration = sum(float(_value(s,'duration_seconds',0) or 0) for s in shots_now)
     difference = float(project.target_duration_seconds) - planned_duration
     m1,m2,m3,m4,m5 = st.columns(5)
-    m1.metric("Total Shots", len(shots_now))
-    m2.metric("Current", f"{planned_duration:g}s")
-    m3.metric("Target", f"{project.target_duration_seconds}s")
-    m4.metric("Remaining" if difference >= 0 else "Over target", f"{abs(difference):g}s")
-    m5.metric("Status", _status(plan))
+    m1.metric("镜头数", len(shots_now))
+    m2.metric("当前总时长", f"{planned_duration:g}s")
+    m3.metric("目标总时长", f"{project.target_duration_seconds}s")
+    m4.metric("差值" if difference >= 0 else "超出", f"{abs(difference):g}s")
+    m5.metric("准备状态", {"DRAFT": "草稿", "APPROVED": "已确认"}.get(_status(plan), "待处理"))
     st.caption(f"LOW {sum(1 for s in shots_now if _status({'status':_value(s,'risk_level','LOW')}) == 'LOW')} · MEDIUM {sum(1 for s in shots_now if _value(s,'risk_level','LOW') == 'MEDIUM')} · HIGH {sum(1 for s in shots_now if _value(s,'risk_level','LOW') == 'HIGH')} · Locked {sum(1 for s in shots_now if _value(s,'status','PLANNED') == 'LOCKED')}")
     if st.button("AI 时长重平衡建议", key=f"duration-rebalance-{current}"):
         try:
@@ -192,7 +208,7 @@ def _render_director_console(project) -> None:
     state through services and exposes one primary next action.  It never
     invokes a provider or mutates creative truth from the page.
     """
-    st.subheader("AI 导演 / 制片")
+    st.subheader("AI 导演建议")
     st.caption(f"项目：{project.title} · 状态由 Story、Script、Shot、资产、生产与 QC 汇总")
     director = DirectorService()
     producer = ProducerService()
@@ -203,7 +219,10 @@ def _render_director_console(project) -> None:
         st.caption(str(exc)[:180])
         return
 
-    state_label = str(state.get("project_state", "UNKNOWN"))
+    state_label = {
+        "STORY": "故事设定", "SCRIPT": "结构化剧本", "REFERENCES": "角色与场景",
+        "SHOT_PLAN": "分镜", "PRODUCTION": "制作", "REVIEW": "审片", "POST": "成片",
+    }.get(str(state.get("project_state", "")), "准备中")
     readiness = state.get("readiness") or {}
     try:
         producer_recommendations = producer.recommendations(project.id)
@@ -226,6 +245,7 @@ def _render_director_console(project) -> None:
         recommendation = producer_recommendations[0]
     action = getattr(recommendation, "action", None) or "REVIEW_PROJECT_STATE"
     reason = getattr(recommendation, "reason", None) or "先运行一次有界的导演检查，获得结构化下一步建议。"
+    user_action, user_reason = _director_user_copy(str(action), str(reason))
     target_id = getattr(recommendation, "target_id", None)
     pending_decision = None
     approved_decision = None
@@ -244,10 +264,8 @@ def _render_director_console(project) -> None:
 
     with st.container(border=True):
         st.markdown("### 下一步建议")
-        st.markdown(f"**{action}**")
-        st.write(reason)
-        if target_id:
-            st.caption(f"目标：{target_id}")
+        st.markdown(f"**{user_action}**")
+        st.write(user_reason)
         st.info("导演建议不会绕过 Story、Script、Shot Plan、资产锁定或人审批准 gates。")
         if latest_decision is not None:
             latest_status = _decision_status_label(latest_decision)
@@ -313,16 +331,19 @@ def _render_director_console(project) -> None:
                 except DirectorServiceError as exc:
                     st.error(str(exc))
 
+        with st.expander("高级诊断", expanded=False):
+            st.caption(f"Canonical action · {action}")
+            st.caption(f"原始建议 · {reason}")
+            if target_id:
+                st.caption(f"Target id · {target_id}")
+
     blockers = readiness.get("blocked_reasons", []) or []
-    with st.container(border=True):
-        st.markdown("### 当前阻塞")
-        if blockers:
-            for blocker in blockers[:5]:
-                st.markdown(f"- {str(blocker)[:220]}")
-        elif state.get("qc_failures"):
-            st.markdown("- 存在 QC 失败，需要人工审查。")
-        else:
-            st.success("当前没有已知阻塞。")
+    if state.get("qc_failures"):
+        blockers = list(blockers) + ["qc failures require review"]
+    if blockers:
+        render_actionable_blockers(blockers, project_id=project.id)
+    else:
+        st.success("当前没有已知阻塞。")
 
     high_risk = producer.high_risk_shots(project.id)
     with st.container(border=True):
@@ -333,7 +354,7 @@ def _render_director_console(project) -> None:
         else:
             st.caption("暂无标记为 HIGH 的镜头。")
 
-    with st.expander("最近导演决策", expanded=False):
+    with st.expander("高级信息 · 最近导演决策", expanded=False):
         if session is None:
             st.caption("尚未运行导演检查。")
         else:
@@ -345,7 +366,8 @@ def _render_director_console(project) -> None:
 
 def render() -> None:
     project = current_project_or_stop()
-    tabs = st.tabs(["AI 导演 / 制片", "Shot Plan / 分镜编辑"])
+    render_project_context(project, stage="分镜", next_action="检查并确认分镜", next_page="production")
+    tabs = st.tabs(["AI 导演建议", "分镜工作区"])
     with tabs[0]:
         _render_director_console(project)
     with tabs[1]:

@@ -12,6 +12,7 @@ from aidrama_studio.services import CredentialReadinessService, CredentialStoreE
 from aidrama_studio.services.ai_capabilities import CapabilityKind, default_capability_registry
 from aidrama_studio.services.provider_profiles import ProviderProfileError, ProviderProfileService
 from aidrama_studio.storage import get_default_paths
+from aidrama_studio.pages._shared import render_ai_readiness, render_project_context
 
 
 CORE_MODULES = (
@@ -93,7 +94,7 @@ def _render_provider_model_settings(
                 index=index,
                 key=f"provider-custom-{scope_project_id or 'global'}-{capability.value}",
                 format_func=lambda item, choices=by_id: (
-                    "UNAVAILABLE" if not item else _profile_label(choices[item])
+                    "未配置" if not item else _profile_label(choices[item])
                 ),
             )
             if selected_id:
@@ -119,28 +120,30 @@ def _render_provider_model_settings(
             st.rerun()
 
     st.markdown("#### 当前解析结果")
-    st.caption("configured 与 verified 独立展示；未进行 live 验证不会标记为已验证。")
+    st.caption("配置状态和验证状态分开显示；未主动验证不会发起网络请求。")
     for capability, label in _CAPABILITY_LABELS.items():
         try:
             resolution = service.resolve(scope_project_id, capability)
         except ProviderProfileError as exc:
-            st.warning(f"{label} · UNAVAILABLE · {exc}")
+            st.warning(f"{label} · 未配置")
+            with st.expander("高级诊断", expanded=False):
+                st.caption(str(exc))
             continue
         public = resolution.as_public_dict()
         with st.container(border=True):
-            st.markdown(f"**{label}** · {public['provider_id']} / {public['model_id']}")
+            st.markdown(f"**{label}**")
             state = "已配置" if public["configured"] else "未配置"
             verified = "已验证" if public["verified"] else "未验证"
-            st.caption(f"{state} · {verified} · {public['state']}")
-            if public["deployment_region"]:
-                st.caption(
-                    f"区域：{public['deployment_region']} · Endpoint：{public['endpoint_class']}"
-                )
-            if public["state"] == "UNAVAILABLE":
-                st.warning(str(public["detail"]))
+            st.caption(f"{state} · {verified}")
             profile = resolution.profile
-            if profile is not None:
-                with st.expander("高级模型信息"):
+            with st.expander("高级模型信息"):
+                st.caption(f"Provider · {public['provider_id']} / {public['model_id']}")
+                if public["deployment_region"]:
+                    st.caption(
+                        f"区域：{public['deployment_region']} · Endpoint：{public['endpoint_class']}"
+                    )
+                st.caption(f"状态 · {public['state']} · {public['detail']}")
+                if profile is not None:
                     st.caption(f"Endpoint profile · {profile.endpoint_profile_id}")
                     st.caption(f"模型快照 · {profile.model_id}")
                     limits = {
@@ -157,7 +160,8 @@ def _render_provider_model_settings(
                     if limits:
                         st.json(limits)
 
-    st.info("更改模型方案只影响新 RuntimePlan；已排队、已提交、运行中和历史执行保持原冻结选择。")
+    with st.expander("高级信息 · 模型版本边界", expanded=False):
+        st.info("更改模型方案只影响新 RuntimePlan；已排队、已提交、运行中和历史执行保持原冻结选择。")
 
 
 def check_media_engine() -> tuple[bool, str]:
@@ -171,7 +175,17 @@ def check_media_engine() -> tuple[bool, str]:
 
 
 def render() -> None:
-    page_header("设置", "SYSTEM", "查看产品能力、Provider 就绪状态与本地存储。")
+    page_header("设置", "SETUP", "配置模型能力、输出默认值与本地存储；高级诊断不会打扰日常创作。")
+    project_id = st.session_state.get("current_project_id")
+    if project_id:
+        try:
+            from aidrama_studio.services import ProjectService
+            project = ProjectService().get(project_id)
+        except Exception:
+            project = None
+        if project is not None:
+            render_project_context(project, stage="设置", next_action="返回创作", next_page="story")
+    render_ai_readiness(project_id=project_id, compact=True)
     paths = get_default_paths()
     ready, detail = check_media_engine()
 
@@ -200,7 +214,7 @@ def render() -> None:
         )
 
     with st.container(border=True):
-        st.markdown("### Provider 安全配置")
+        st.markdown("### 凭据与连接（高级）")
         st.caption("凭据使用当前 Windows 用户的 DPAPI 加密；不会写入 SQLite、项目包、日志或截图。配置凭据不会自动发起付费请求。")
         try:
             store = WindowsCredentialStore(paths.root)

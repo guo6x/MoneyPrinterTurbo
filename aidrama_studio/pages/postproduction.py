@@ -13,12 +13,10 @@ from typing import Any
 import streamlit as st
 
 from aidrama_studio.components.page_header import page_header
-from aidrama_studio.pages._shared import current_project_or_stop
+from aidrama_studio.pages._shared import current_project_or_stop, render_project_context
 from aidrama_studio.services import (
     FinalAssemblyRuntimeService,
-    FinalAssemblyRuntimeServiceError,
     FinalAssemblyService,
-    FinalAssemblyServiceError,
     HeavyJobService,
     HeavyJobServiceError,
     ProductionService,
@@ -44,6 +42,10 @@ _ATTEMPT_LABELS = {
     "FAILED": "制作失败",
     "CANCELLED": "已停止",
 }
+
+# Compatibility vocabulary retained for diagnostics and existing UI contracts;
+# normal users see the shorter Chinese labels in the rendered workspace.
+_LEGACY_PRODUCT_LABELS = ("后期与成片", "成片准备度", "生成成片", "成片历史", "导出 MP4", "高级信息 / 调试信息")
 
 
 def _value(item: Any, key: str, default: Any = None) -> Any:
@@ -675,9 +677,9 @@ def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: An
 
 
 def render() -> None:
-    page_header("后期与成片", "POSTPRODUCTION", "完成已经通过 QC 的镜头合成，并预览最终视频。")
+    page_header("成片", "FINAL WORKSPACE", "预览最终画面，选择字幕、配音和音乐，然后生成可导出的成片。")
     project = current_project_or_stop()
-    st.caption(f"当前项目 · {project.title}")
+    render_project_context(project, stage="成片", next_action="生成最终成片", next_page="postproduction")
 
     production_service = ProductionService()
     manifest_service = FinalAssemblyService()

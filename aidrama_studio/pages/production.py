@@ -12,13 +12,12 @@ from aidrama_studio.domain import (
     ProductionReviewDecision,
     ProductionShotStatus,
 )
-from aidrama_studio.pages._shared import current_project_or_stop
+from aidrama_studio.pages._shared import current_project_or_stop, render_actionable_blockers, render_project_context
 from aidrama_studio.services import (
     ProductionExecutionService,
     ProductionExecutionServiceError,
     FinalAssemblyService,
     FinalAssemblyServiceError,
-    ProductionOrchestrator,
     ProductionOrchestratorError,
     ProductionQueueError,
     ProductionQueueService,
@@ -378,8 +377,10 @@ def _render_readiness_console(readiness: Mapping[str, object]) -> None:
         st.success("制作准备已完成，可以开始整剧制作。")
     else:
         st.warning("Production 尚未就绪。请先完成以下前置条件：")
-        for reason in reasons or ["请完成 Story Bible、Structured Script、Shot Plan 与参考资产准备"]:
-            st.markdown(f"- {reason}")
+        render_actionable_blockers(
+            reasons or ["approved Story Bible, Structured Script, Shot Plan and Reference Assets are required"],
+            project_id=str(readiness.get("project_id") or "production"),
+        )
         missing = [reason for reason in reasons if "reference" in reason.lower() or "参考" in reason]
         if missing:
             st.info("参考资产缺失时，请前往「创意与剧本 → Reference Assets」补齐人物或场景覆盖。")
@@ -1135,8 +1136,9 @@ def _render_empty_shot_board(readiness: Mapping[str, object]) -> None:
 
 
 def render() -> None:
-    page_header("整剧制作", "DIRECTOR PRODUCTION CONSOLE", "从制作准备到镜头生产、QC 与完成的多镜头工作台。")
+    page_header("制作", "PRODUCTION WORKSPACE", "查看镜头进度，处理失败项，并在明确授权后开始制作。")
     project = current_project_or_stop()
+    render_project_context(project, stage="制作", next_action="查看制作进度", next_page="production")
     production_service = ProductionService()
     execution_service = ProductionExecutionService(production_service=production_service)
     qc_service = ProductionQCService()

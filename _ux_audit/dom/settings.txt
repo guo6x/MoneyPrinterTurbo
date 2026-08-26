@@ -1,0 +1,158 @@
+- button "keyboard_double_arrow_left":
+  - generic: keyboard_double_arrow_left
+- list:
+  - paragraph: AIDrama Studio
+  - link "工作台":
+    - /url: http://127.0.0.1:8501/
+    - paragraph: 工作台
+  - link "创意与剧本":
+    - /url: http://127.0.0.1:8501/story
+    - paragraph: 创意与剧本
+  - link "角色与场景":
+    - /url: http://127.0.0.1:8501/assets
+    - paragraph: 角色与场景
+  - link "分镜导演台":
+    - /url: http://127.0.0.1:8501/director
+    - paragraph: 分镜导演台
+  - link "制作中心":
+    - /url: http://127.0.0.1:8501/production
+    - paragraph: 制作中心
+  - link "QC & Review":
+    - /url: http://127.0.0.1:8501/review
+    - paragraph: QC & Review
+  - link "后期与成片":
+    - /url: http://127.0.0.1:8501/postproduction
+    - paragraph: 后期与成片
+  - paragraph: System
+  - link "设置" [active]:
+    - /url: http://127.0.0.1:8501/settings
+    - paragraph: 设置
+- generic: AIDrama Studio
+- paragraph: AI 短剧全链路制作工作台
+- banner:
+  - button "Deploy":
+    - generic: Deploy
+  - button "Main menu":
+- generic: SYSTEM
+- heading "设置" [level=1]:
+  - text: 设置
+  - link "Link to heading":
+    - /url: "#4012f2d9"
+- paragraph: 查看产品能力、Provider 就绪状态与本地存储。
+- heading "产品信息" [level=3]:
+  - text: 产品信息
+  - link "Link to heading":
+    - /url: "#93557419"
+- paragraph:
+  - strong: AIDrama Studio
+- paragraph: AI 短剧全链路制作工作台 · v1.0.0
+- paragraph: MIT License
+- paragraph: 上游组件归属与许可证详见仓库 NOTICE。
+- heading "本地媒体内核" [level=3]:
+  - text: 本地媒体内核
+  - link "Link to heading":
+    - /url: "#82daf7ad"
+- status:
+  - paragraph: READY
+- paragraph: 核心媒体模块已就绪
+- heading "模型方案" [level=3]:
+  - text: 模型方案
+  - link "Link to heading":
+    - /url: "#7eaf7150"
+- paragraph: 中国大陆 / 国际 / 自定义均解析到同一 CapabilityRegistry 与 Provider inventory；不会创建第二套 Provider 真相。
+- paragraph: 设置作用域
+- radiogroup "设置作用域":
+  - radio "全局默认" [checked]
+  - paragraph: 全局默认
+- paragraph: 模型方案
+- radiogroup "模型方案":
+  - radio "中国大陆"
+  - paragraph: 中国大陆
+  - radio "国际"
+  - paragraph: 国际
+  - radio "自定义" [checked]
+  - paragraph: 自定义
+- paragraph: 每种能力独立选择；未选择的能力保持 UNAVAILABLE，不会自动换区。
+- paragraph: LLM
+- combobox "LLM": UNAVAILABLE
+- button "Open":
+- paragraph: 图片生成
+- combobox "图片生成": UNAVAILABLE
+- button "Open":
+- paragraph: 视频生成
+- combobox "视频生成": UNAVAILABLE
+- button "Open":
+- paragraph: 视觉理解
+- combobox "视觉理解": UNAVAILABLE
+- button "Open":
+- paragraph: 语音
+- combobox "语音": UNAVAILABLE
+- button "Open":
+- button "保存模型方案":
+  - paragraph: 保存模型方案
+- heading "当前解析结果" [level=4]:
+  - text: 当前解析结果
+  - link "Link to heading":
+    - /url: "#855853aa"
+- paragraph: configured 与 verified 独立展示；未进行 live 验证不会标记为已验证。
+- paragraph:
+  - strong: LLM
+  - text: · UNAVAILABLE / UNAVAILABLE
+- paragraph: 未配置 · 未验证 · UNAVAILABLE
+- alert:
+  - paragraph: 能力 LLM 没有可用 Provider
+- paragraph:
+  - strong: 图片生成
+  - text: · UNAVAILABLE / UNAVAILABLE
+- paragraph: 未配置 · 未验证 · UNAVAILABLE
+- alert:
+  - paragraph: 能力 IMAGE 没有可用 Provider
+- paragraph:
+  - strong: 视频生成
+  - text: · UNAVAILABLE / UNAVAILABLE
+- paragraph: 未配置 · 未验证 · UNAVAILABLE
+- alert:
+  - paragraph: 能力 VIDEO_GENERATIVE 没有可用 Provider
+- paragraph:
+  - strong: 视觉理解
+  - text: · UNAVAILABLE / UNAVAILABLE
+- paragraph: 未配置 · 未验证 · UNAVAILABLE
+- alert:
+  - paragraph: 能力 VISION 没有可用 Provider
+- paragraph:
+  - strong: 语音
+  - text: · UNAVAILABLE / UNAVAILABLE
+- paragraph: 未配置 · 未验证 · UNAVAILABLE
+- alert:
+  - paragraph: 能力 TTS 没有可用 Provider
+- status:
+  - paragraph: 更改模型方案只影响新 RuntimePlan；已排队、已提交、运行中和历史执行保持原冻结选择。
+- heading "Provider 安全配置" [level=3]:
+  - text: Provider 安全配置
+  - link "Link to heading":
+    - /url: "#provider"
+- paragraph: 凭据使用当前 Windows 用户的 DPAPI 加密；不会写入 SQLite、项目包、日志或截图。配置凭据不会自动发起付费请求。
+- generic "keyboard_arrow_right OpenAI Image · 未配置":
+  - generic: keyboard_arrow_right
+  - paragraph: OpenAI Image · 未配置
+- generic "keyboard_arrow_right Seedance / Ark · 未配置":
+  - generic: keyboard_arrow_right
+  - paragraph: Seedance / Ark · 未配置
+- generic "keyboard_arrow_right Wan / DashScope · 未配置":
+  - generic: keyboard_arrow_right
+  - paragraph: Wan / DashScope · 未配置
+- generic "keyboard_arrow_right Google Gemini Vision · 未配置":
+  - generic: keyboard_arrow_right
+  - paragraph: Google Gemini Vision · 未配置
+- heading "本地存储" [level=3]:
+  - text: 本地存储
+  - link "Link to heading":
+    - /url: "#bca24b3e"
+- paragraph: 项目数据使用本机 SQLite；Redis 不作为项目 canonical DB。
+- paragraph: AIDrama 数据
+- paragraph: 9.3 MB
+- paragraph: 磁盘可用
+- paragraph: 52.7 GB
+- generic "keyboard_arrow_right 高级信息 / 调试信息":
+  - generic: keyboard_arrow_right
+  - paragraph: 高级信息 / 调试信息

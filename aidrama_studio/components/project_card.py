@@ -33,7 +33,7 @@ def project_card(
     display_status = workflow_stage or project.status
     with st.container(border=True):
         st.markdown(
-            '<div class="aidrama-cover">PROJECT FRAME</div>', unsafe_allow_html=True
+            '<div class="aidrama-cover aidrama-cover-empty">AIDRAMA · SHORT DRAMA</div>', unsafe_allow_html=True
         )
         left, right = st.columns([3, 1])
         with left:
@@ -47,10 +47,10 @@ def project_card(
             f"\n更新于 {_display_time(project.updated_at)}"
         )
         st.progress(PROGRESS[display_status])
-        open_col, edit_col, delete_col = st.columns(3)
-        if open_col.button("打开", key=f"open-{project.id}", use_container_width=True):
+        open_col, edit_col, delete_col = st.columns([2, 1, 1])
+        if open_col.button("继续创作", type="primary", key=f"open-{project.id}", use_container_width=True):
             return "open"
-        if edit_col.button("编辑", key=f"edit-{project.id}", use_container_width=True):
+        if edit_col.button("编辑项目", key=f"edit-{project.id}", use_container_width=True):
             return "edit"
         if delete_col.button(
             "删除", key=f"delete-{project.id}", use_container_width=True

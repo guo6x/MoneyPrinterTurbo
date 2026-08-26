@@ -257,13 +257,19 @@ def _navigate(page: str) -> None:
 
 
 def _create_project_form(service: ProjectService) -> None:
-    with st.expander("+ 新建短剧项目", expanded=not service.list()):
+    with st.expander("开始一个短剧", expanded=not service.list()):
         with st.form("create-project", clear_on_submit=False):
+            st.radio(
+                "创作入口",
+                ["一句话创意", "粘贴故事 / 大纲", "上传剧本 / 策划文档", "上传参考图片", "组合输入"],
+                horizontal=True,
+                key="create-entry-mode",
+            )
             title = st.text_input(
                 "项目名称", max_chars=120, placeholder="例如：霓虹雨夜"
             )
             description = st.text_area(
-                "一句话描述", max_chars=1000, placeholder="用一句话描述故事核心冲突"
+                "一句话创意", max_chars=1000, placeholder="例如：失忆的末班车司机，在终点站遇见未来的自己。"
             )
             aspect = st.selectbox("画幅", [item.value for item in AspectRatio], index=1)
             duration = st.number_input(
@@ -290,7 +296,7 @@ def _create_project_form(service: ProjectService) -> None:
                 help="质量模式会冻结到新 RuntimePlan；预览产物不会自动成为最终成片来源。",
             )
             submitted = st.form_submit_button(
-                "创建并进入创意与剧本", type="primary", use_container_width=True
+                "开始创作", type="primary", use_container_width=True
             )
         if submitted:
             try:
@@ -452,8 +458,8 @@ def _delete_project(service: ProjectService, project: Project) -> None:
 def render() -> None:
     page_header(
         "工作台",
-        "PRODUCTION DESK",
-        "集中管理短剧项目、制作阶段与最近更新。",
+        "AIDRAMA STUDIO",
+        "从一句创意开始，沿着清晰的创作流程完成短剧。",
     )
     try:
         service = ProjectService()
@@ -486,10 +492,20 @@ def render() -> None:
         canonical_statuses[project.id] is ProjectStatus.COMPLETED
         for project in projects
     )
-    metric_cols = st.columns(3)
-    metric_cols[0].metric("项目总数", len(projects))
-    metric_cols[1].metric("进行中", active_count)
-    metric_cols[2].metric("已完成", completed_count)
+    st.markdown(
+        '<section class="aidrama-primary-panel"><h2>开始一个短剧</h2>'
+        '<p>选择最自然的入口：写下一句话创意、粘贴已有故事，或导入剧本与参考图片。你可以随时保存并继续。</p>'
+        '<div class="aidrama-stage-rail"><span class="aidrama-stage-chip is-current">创意</span>'
+        '<span class="aidrama-stage-chip">故事 / 剧本</span><span class="aidrama-stage-chip">角色与场景</span>'
+        '<span class="aidrama-stage-chip">分镜</span><span class="aidrama-stage-chip">制作</span>'
+        '<span class="aidrama-stage-chip">审片</span><span class="aidrama-stage-chip">成片</span></div></section>',
+        unsafe_allow_html=True,
+    )
+    with st.expander("项目概览", expanded=False):
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("项目总数", len(projects))
+        metric_cols[1].metric("进行中", active_count)
+        metric_cols[2].metric("已完成", completed_count)
 
     _render_recovery_notice()
     imported_title = st.session_state.pop("archive_import_result", None)

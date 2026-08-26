@@ -10,7 +10,7 @@ from aidrama_studio.domain import (
     Character, Location, StoryBible, StoryRevisionStatus, ScriptRevisionStatus,
     ScriptBeatType, InteriorExterior, TimeOfDay, Scene, ScriptBeat, StructuredScript,
 )
-from aidrama_studio.pages._shared import current_project_or_stop
+from aidrama_studio.pages._shared import current_project_or_stop, render_ai_readiness, render_project_context
 from aidrama_studio.services import (
     CreativeIntakeService,
     DependencyStatusService,
@@ -62,7 +62,7 @@ def _parse_list(value: str, separator: str = ",") -> list[str]:
 def _render_creative_intake(project) -> None:
     service = CreativeIntakeService()
     source_pack = service.source_pack
-    st.markdown("### Creative Intake / Source Pack")
+    st.markdown("### 创意输入")
     st.caption(
         "一句创意、现有文档和多张参考图会先进入项目隔离的 Source Pack；"
         "原文件与 SHA-256 保持不变，不会自动发送到云端。"
@@ -127,10 +127,12 @@ def _render_creative_intake(project) -> None:
         with st.container(border=True):
             name_col, action_col = st.columns([4, 1])
             name_col.markdown(f"**{item.display_filename}**")
-            name_col.caption(
-                f"{item.source_kind.value} · {item.extraction_state.value} · "
-                f"{item.size_bytes} bytes · SHA256 {item.sha256[:12]}…"
-            )
+            name_col.caption("已保存到当前项目 · 可用于 Brief 和故事设定")
+            with name_col.expander("高级来源信息", expanded=False):
+                st.caption(
+                    f"{item.source_kind.value} · {item.extraction_state.value} · "
+                    f"{item.size_bytes} bytes · SHA256 {item.sha256[:12]}…"
+                )
             if analysis is not None:
                 name_col.caption("识别：" + " / ".join(analysis.classifications))
             if action_col.button(
@@ -280,7 +282,7 @@ def _render_brief(project, service: StoryService) -> None:
 
     ready, detail = service.llm_readiness(project.id)
     if not ready:
-        st.info(f"AI 服务尚未配置：{detail}")
+        st.info("AI 功能尚未配置。可以先手动编辑，或前往设置模型后生成故事。")
         if st.button("前往设置", key=f"story-settings-{project.id}"):
             _go_settings()
     if st.button(
@@ -470,7 +472,7 @@ def _render_bible_editor(project, service: StoryService, revision: dict) -> None
     working = _get_working(revision)
     revision_id = revision["id"]
     status = revision["status"]
-    status_text = {StoryRevisionStatus.DRAFT: "DRAFT", StoryRevisionStatus.APPROVED: "APPROVED · 已确认", StoryRevisionStatus.SUPERSEDED: "SUPERSEDED"}[status]
+    status_text = {StoryRevisionStatus.DRAFT: "草稿", StoryRevisionStatus.APPROVED: "已确认", StoryRevisionStatus.SUPERSEDED: "下游内容需要更新"}[status]
     st.markdown(f'<div class="story-revision-bar"><strong>Story Bible v{revision["version"]}</strong><span class="story-revision-status">{status_text}</span></div>', unsafe_allow_html=True)
     overview, characters, locations, beats = st.tabs(["故事概览", "人物", "场景", "剧情结构"])
     with overview:
@@ -531,12 +533,12 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
         except ScriptServiceError as exc:
             st.error(str(exc))
     elif not ready:
-        st.caption(f"AI 生成不可用：{detail}；仍可手动创建剧本。")
+        st.caption("AI 功能尚未配置；你仍可手动创建剧本，或前往设置模型后生成。")
     revisions = script_service.list_revisions(project.id)
     if not revisions:
-        st.info("还没有 Structured Script。请先确认 Story Bible，再手动创建或生成剧本。")
+        st.info("还没有剧本。请先确认故事设定，再创建或生成结构化剧本。")
         if story_revision["status"] is StoryRevisionStatus.APPROVED:
-            if st.button("创建空白 Structured Script", type="primary", key=f"create-script-{project.id}"):
+            if st.button("创建空白剧本", type="primary", key=f"create-script-{project.id}"):
                 try:
                     script = script_service.create_manual_script(project, story_revision)
                     st.session_state.script_revision_id = script["id"]
@@ -553,7 +555,7 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
     if revision is None or revision.get("project_id") != project.id:
         revision = revisions[0]
     st.session_state.script_revision_id = revision["id"]
-    history = st.selectbox("Structured Script 历史", revisions, index=next((i for i, x in enumerate(revisions) if x["id"] == revision["id"]), 0), format_func=lambda x: f"v{x['version']} · {x['status'].value}", key=f"script-history-{project.id}")
+    history = st.selectbox("剧本历史", revisions, index=next((i for i, x in enumerate(revisions) if x["id"] == revision["id"]), 0), format_func=lambda x: f"v{x['version']} · { {ScriptRevisionStatus.DRAFT: '草稿', ScriptRevisionStatus.APPROVED: '已确认', ScriptRevisionStatus.SUPERSEDED: '下游内容需要更新'}[x['status']] }", key=f"script-history-{project.id}")
     if history["id"] != revision["id"]:
         st.session_state.script_revision_id = history["id"]; st.rerun()
     if revision["status"] is ScriptRevisionStatus.APPROVED and st.button("从此版本创建新 Draft", key=f"fork-script-{revision['id']}"):
@@ -563,38 +565,41 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
     status = revision["status"]
     dependency_service = dependency_service or DependencyStatusService(script_service.repository)
     dependency = dependency_service.status_for_script(project.id, revision)
-    status_text = {ScriptRevisionStatus.DRAFT: "DRAFT", ScriptRevisionStatus.APPROVED: "APPROVED · 已确认", ScriptRevisionStatus.SUPERSEDED: "SUPERSEDED"}[status]
-    st.markdown(f'<div class="story-revision-bar"><strong>Structured Script v{revision["version"]}</strong><span class="story-revision-status">{status_text}</span></div>', unsafe_allow_html=True)
+    status_text = {ScriptRevisionStatus.DRAFT: "草稿", ScriptRevisionStatus.APPROVED: "已确认", ScriptRevisionStatus.SUPERSEDED: "下游内容需要更新"}[status]
+    st.markdown(f'<div class="story-revision-bar"><strong>结构化剧本 v{revision["version"]}</strong><span class="story-revision-status">{status_text}</span></div>', unsafe_allow_html=True)
     working_key = _script_working_key(revision["id"])
     if working_key not in st.session_state:
         st.session_state[working_key] = revision["content"].model_dump(mode="python")
     working = st.session_state[working_key]
     if dependency.source_revision_id:
-        st.caption(
-            f"Story Bible 依赖 · {dependency.source_to_current}"
-            + (" · OUTDATED" if dependency.outdated else " · UP TO DATE")
-        )
+        st.caption("故事设定版本已同步" if not dependency.outdated else "故事设定已更新，需要重新确认剧本")
+        with st.expander("高级来源信息", expanded=False):
+            st.caption(f"Story Bible revision · {dependency.source_to_current}")
     if dependency.outdated:
         st.warning(
-            "当前 Structured Script 基于旧版 Story Bible（OUTDATED）。"
+            "当前剧本基于旧版故事设定，需要重新确认后再进入下游。"
             "下游：" + ("、".join(dependency.affected_downstream) or "无")
         )
     working["title"] = _input("剧本标题", working["title"], f"{revision['id']}-script-title")
     working["summary"] = _input("剧本摘要", working.get("summary", ""), f"{revision['id']}-script-summary", area=True, height=80)
-    character_options = [c["id"] for c in story_revision["content"].model_dump(mode="python")["characters"]]
-    location_options = [l["id"] for l in story_revision["content"].model_dump(mode="python")["locations"]]
-    st.markdown("#### Scene Navigator")
+    character_rows = story_revision["content"].model_dump(mode="python")["characters"]
+    location_rows = story_revision["content"].model_dump(mode="python")["locations"]
+    character_options = [c["id"] for c in character_rows]
+    location_options = [l["id"] for l in location_rows]
+    character_labels = {c["id"]: c.get("name") or "未命名角色" for c in character_rows}
+    location_labels = {l["id"]: l.get("name") or "未命名场景" for l in location_rows}
+    st.markdown("#### 场景导航")
     scene_options = sorted(working["scenes"], key=lambda x: x["order"])
     selected_scene = st.selectbox(
         "当前 Scene",
         scene_options,
-        format_func=lambda x: f"Scene {int(x['order']):02d} · {x['title']} · {x['location_id']} · {x.get('estimated_duration_seconds', 0):g}s",
+        format_func=lambda x: f"场景 {int(x['order']):02d} · {x['title']} · {location_labels.get(x['location_id'], '未命名场景')} · {x.get('estimated_duration_seconds', 0):g}s",
         key=f"scene-navigator-{revision['id']}",
     )
     st.caption("Scene Navigator 保持当前选择；下方编辑器展示全部场景，便于快速浏览与编辑。")
     for scene in sorted(working["scenes"], key=lambda x: x["order"]):
         with st.container(border=True):
-            st.markdown(f"**{scene['id']} · Scene {scene['order']}**")
+            st.markdown(f"**场景 {scene['order']} · {scene['title']}**")
             scene_move_left, scene_move_right = st.columns([1, 1])
             if scene_move_left.button("Scene ↑", key=f"scene-up-{revision['id']}-{scene['id']}"):
                 previous = next((x for x in working["scenes"] if x["order"] == scene["order"] - 1), None)
@@ -609,12 +614,12 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
             c1, c2, c3 = st.columns(3)
             scene["order"] = c1.number_input("顺序", 1, 999, int(scene["order"]), key=f"{revision['id']}-{scene['id']}-order")
             scene["title"] = c2.text_input("场景标题", scene["title"], key=f"{revision['id']}-{scene['id']}-title")
-            scene["location_id"] = c3.selectbox("地点", location_options, index=max(0, location_options.index(scene["location_id"]) if scene["location_id"] in location_options else 0), key=f"{revision['id']}-{scene['id']}-loc")
+            scene["location_id"] = c3.selectbox("地点", location_options, index=max(0, location_options.index(scene["location_id"]) if scene["location_id"] in location_options else 0), format_func=lambda value: location_labels.get(value, "未命名场景"), key=f"{revision['id']}-{scene['id']}-loc")
             ie_value = getattr(scene.get("interior_exterior"), "value", scene.get("interior_exterior", "INT"))
             tod_value = getattr(scene.get("time_of_day"), "value", scene.get("time_of_day", "UNSPECIFIED"))
-            scene["interior_exterior"] = st.selectbox("内外景", [x.value for x in InteriorExterior], index=[x.value for x in InteriorExterior].index(ie_value), key=f"{revision['id']}-{scene['id']}-ie")
-            scene["time_of_day"] = st.selectbox("时间", [x.value for x in TimeOfDay], index=[x.value for x in TimeOfDay].index(tod_value), key=f"{revision['id']}-{scene['id']}-tod")
-            scene["character_ids"] = st.multiselect("出场人物", character_options, default=[x for x in scene.get("character_ids", []) if x in character_options], key=f"{revision['id']}-{scene['id']}-chars")
+            scene["interior_exterior"] = st.selectbox("内外景", [x.value for x in InteriorExterior], index=[x.value for x in InteriorExterior].index(ie_value), format_func=lambda value: {"INT": "室内", "EXT": "室外"}.get(value, value), key=f"{revision['id']}-{scene['id']}-ie")
+            scene["time_of_day"] = st.selectbox("时间", [x.value for x in TimeOfDay], index=[x.value for x in TimeOfDay].index(tod_value), format_func=lambda value: {"DAY": "白天", "NIGHT": "夜晚", "DAWN": "黎明", "DUSK": "黄昏", "UNSPECIFIED": "未指定"}.get(value, "未指定"), key=f"{revision['id']}-{scene['id']}-tod")
+            scene["character_ids"] = st.multiselect("出场人物", character_options, default=[x for x in scene.get("character_ids", []) if x in character_options], format_func=lambda value: character_labels.get(value, "未命名角色"), key=f"{revision['id']}-{scene['id']}-chars")
             scene["purpose"] = _input("叙事目的", scene.get("purpose", ""), f"{revision['id']}-{scene['id']}-purpose")
             scene["summary"] = _input("场景摘要", scene.get("summary", ""), f"{revision['id']}-{scene['id']}-summary", area=True, height=70)
             scene["emotion"] = _input("情绪", scene.get("emotion", ""), f"{revision['id']}-{scene['id']}-emotion")
@@ -634,8 +639,8 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
                         st.rerun()
                 beat["order"] = b1.number_input("Beat 顺序", 1, 999, int(beat["order"]), key=f"{revision['id']}-{beat['id']}-order")
                 beat_type = getattr(beat.get("type"), "value", beat.get("type", "ACTION"))
-                beat["type"] = b2.selectbox("类型", [x.value for x in ScriptBeatType], index=[x.value for x in ScriptBeatType].index(beat_type), key=f"{revision['id']}-{beat['id']}-type")
-                beat["character_id"] = b3.selectbox("人物", ["（无）"] + character_options, index=(character_options.index(beat["character_id"])+1 if beat.get("character_id") in character_options else 0), key=f"{revision['id']}-{beat['id']}-char")
+                beat["type"] = b2.selectbox("类型", [x.value for x in ScriptBeatType], index=[x.value for x in ScriptBeatType].index(beat_type), format_func=lambda value: {"ACTION": "动作", "DIALOGUE": "对白", "TRANSITION": "转场"}.get(value, "动作"), key=f"{revision['id']}-{beat['id']}-type")
+                beat["character_id"] = b3.selectbox("人物", ["（无）"] + character_options, index=(character_options.index(beat["character_id"])+1 if beat.get("character_id") in character_options else 0), format_func=lambda value: "（无）" if value == "（无）" else character_labels.get(value, "未命名角色"), key=f"{revision['id']}-{beat['id']}-char")
                 beat["character_id"] = None if beat["character_id"] == "（无）" else beat["character_id"]
                 beat["text"] = _input("Beat 文本", beat.get("text", ""), f"{revision['id']}-{beat['id']}-text", area=True, height=70)
                 beat["emotion"] = _input("Beat 情绪", beat.get("emotion") or "", f"{revision['id']}-{beat['id']}-emotion") or None
@@ -648,16 +653,16 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
         working["scenes"].append(Scene(id=f"scene_{idx:03d}", order=idx, title=f"Scene {idx}", location_id=loc, estimated_duration_seconds=1, beats=[ScriptBeat(id=f"beat_{idx:03d}_001", order=1, type=ScriptBeatType.ACTION, text="待填写")]).model_dump(mode="python")); st.rerun()
     state = script_service.draft_state(revision, working)
     if state.dirty:
-        st.warning("当前 Structured Script Draft 有未保存修改；保存后可在冷启动时恢复。")
+            st.warning("当前剧本有未保存修改；保存后可在冷启动时恢复。")
     elif status is ScriptRevisionStatus.DRAFT:
-        st.caption(f"Draft 已持久保存 · 最近保存 {state.updated_at.replace('T', ' ').split('.')[0]}")
+        st.caption(f"草稿已保存 · 最近保存 {state.updated_at.replace('T', ' ').split('.')[0]}")
     save, approve = st.columns(2)
     if save.button("保存剧本", type="primary", key=f"save-script-{revision['id']}"):
         try:
             saved = script_service.save_draft(project.id, StructuredScript.model_validate(deepcopy(working)), revision_id=revision["id"])
             st.session_state.script_revision_id = saved["id"]; st.toast("Structured Script 已保存"); st.rerun()
         except Exception as exc: st.error(f"保存失败：{exc}")
-    if status is ScriptRevisionStatus.DRAFT and approve.button("确认 Structured Script", key=f"approve-script-{revision['id']}"):
+    if status is ScriptRevisionStatus.DRAFT and approve.button("确认剧本", key=f"approve-script-{revision['id']}"):
         try:
             saved = script_service.save_draft(project.id, StructuredScript.model_validate(deepcopy(working)), revision_id=revision["id"])
             script_service.approve_revision(saved["id"]); st.session_state.script_revision_id = saved["id"]; st.success("Structured Script 已确认"); st.rerun()
@@ -681,18 +686,21 @@ def _render_script_editor(project, story_revision: dict, script_service: ScriptS
     with st.expander("阅读模式 / Script Preview"):
         st.caption("Preview 由结构化数据即时渲染，不是单独保存的 canonical 文本。")
         for scene in sorted(working["scenes"], key=lambda x: x["order"]):
-            st.markdown(f"**SCENE {int(scene['order']):02d} — {scene['title']} — {scene.get('interior_exterior', 'INT')} — {scene.get('time_of_day', 'UNSPECIFIED')}**")
+            st.markdown(f"**场景 {int(scene['order']):02d} — {scene['title']} — { {'INT': '室内', 'EXT': '室外', 'INT_EXT': '室内外'} .get(scene.get('interior_exterior', 'INT'), '室内')} — { {'DAWN': '黎明', 'DAY': '白天', 'DUSK': '黄昏', 'NIGHT': '夜晚', 'UNSPECIFIED': '未指定'} .get(scene.get('time_of_day', 'UNSPECIFIED'), '未指定')}**")
             for beat in sorted(scene["beats"], key=lambda x: x["order"]):
                 label = beat.get("type", "ACTION")
                 if hasattr(label, "value"): label = label.value
+                label = {"ACTION": "动作", "DIALOGUE": "对白", "NARRATION": "旁白", "INNER_MONOLOGUE": "内心独白", "TRANSITION": "转场"}.get(label, "动作")
                 st.markdown(f"**{label}**  {beat.get('text', '')}")
 
 
 def render() -> None:
-    page_header("创意与剧本", "STORY DEVELOPMENT", "从一句创意建立可生产的 Story Bible，并保留每一次 revision。")
+    page_header("创意与剧本", "CREATIVE WORKSPACE", "从创意输入开始，逐步完成 Brief、故事设定与结构化剧本。")
     project = current_project_or_stop()
+    render_project_context(project, stage="故事与剧本", next_action="确认故事并进入剧本", next_page="story")
+    render_ai_readiness(project_id=project.id, compact=True)
     intake_tab, development_tab = st.tabs(
-        ["创意导入 / Source Pack", "Story Bible / Structured Script"]
+        ["创意输入", "故事与剧本"]
     )
     with intake_tab:
         _render_creative_intake(project)
@@ -718,12 +726,12 @@ def render() -> None:
                 st.info("右侧会展示结构化故事蓝图。你可以从左侧生成，或先创建空白 Draft。")
             else:
                 script_service = ScriptService()
-                bible_tab, script_tab = st.tabs(["Story Bible", "Structured Script"])
+                bible_tab, script_tab = st.tabs(["故事设定", "结构化剧本"])
                 with bible_tab:
                     _render_bible_editor(project, service, revision)
                 with script_tab:
                     approved_story = next((item for item in service.list_revisions(project.id) if item["status"] is StoryRevisionStatus.APPROVED), None)
                     if approved_story is None:
-                        st.warning("请先在 Story Bible 页确认一个 APPROVED 版本，才能编辑 Structured Script。")
+                        st.warning("请先确认故事设定，确认后就可以继续编辑结构化剧本。")
                     else:
                         _render_script_editor(project, approved_story, script_service, dependency_service)

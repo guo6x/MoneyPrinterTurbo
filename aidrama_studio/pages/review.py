@@ -9,6 +9,7 @@ import streamlit as st
 
 from aidrama_studio.components.page_header import page_header
 from aidrama_studio.pages._shared import current_project_or_stop
+from aidrama_studio.pages._shared import render_project_context
 from aidrama_studio.services import ProductionExecutionService, ProductionQCService, ProductionService
 
 
@@ -37,14 +38,21 @@ def _render_result(service: ProductionQCService, project: Any, result: Any) -> N
     with st.container(border=True):
         left, right = st.columns([3, 1])
         with left:
-            st.markdown(f"**QC Result** · `{result_id[:8]}`")
-            st.caption(f"Execution · `{str(_value(result, 'execution_id', ''))[:8]}` · {_value(result, 'created_at', '—')}")
-            st.write(f"状态：**{status}** · 通过 {summary.get('passed', 0)} · 失败 {summary.get('failed', 0)} · 跳过 {summary.get('skipped', 0)}")
+            shot_number = _value(result, "shot_number", _value(result, "shot_id", "—"))
+            st.markdown(f"### Shot {shot_number} · 审片")
+            st.caption("确定性检查已完成；请用画面和人审决定是否进入成片。")
+            media_path = _value(result, "media_path", _value(result, "artifact_path"))
+            if media_path:
+                try:
+                    st.video(str(media_path))
+                except Exception:
+                    st.caption("预览暂不可用")
+            st.write(f"技术检查 {'通过' if status == 'QC_PASS' else '需要处理'} · 通过 {summary.get('passed', 0)} · 失败 {summary.get('failed', 0)}")
             report_path = _value(result, "report_path")
             if report_path:
                 st.caption(f"报告：{_safe_path(report_path)}")
         with right:
-            if st.button("重新运行 QC", key=f"rerun-qc-{result_id}"):
+            if st.button("重新生成", key=f"rerun-qc-{result_id}", type="primary"):
                 try:
                     service.retry_qc(project.id, _value(result, "execution_id"), _value(result, "artifact_id"))
                     st.rerun()
@@ -66,7 +74,7 @@ def _render_result(service: ProductionQCService, project: Any, result: Any) -> N
             with st.form(f"review-form-{result_id}"):
                 decision = st.selectbox("人工决定", ["APPROVED", "REJECTED"], key=f"review-decision-{result_id}")
                 notes = st.text_area("备注", key=f"review-notes-{result_id}", height=70)
-                if st.form_submit_button("保存 Review Gate", type="primary"):
+                if st.form_submit_button("通过 / 退回", type="primary"):
                     try:
                         service.create_review(project.id, result_id, decision, reviewer="AIDrama user", notes=notes)
                         st.success("Review 决定已追加保存")
@@ -76,27 +84,31 @@ def _render_result(service: ProductionQCService, project: Any, result: Any) -> N
 
 
 def render() -> None:
-    page_header("QC & Review", "QUALITY CONTROL", "先完成确定性技术检查，再由人工确认是否进入成片。")
+    page_header("审片", "REVIEW WORKSPACE", "用画面检查每个镜头，并明确通过或退回重做。")
     project = current_project_or_stop()
+    render_project_context(project, stage="审片", next_action="完成审片", next_page="postproduction")
     qc_service = ProductionQCService()
     production_service = ProductionService(qc_service.repository)
     execution_service = ProductionExecutionService(qc_service.repository)
     st.caption(f"当前项目 · {project.title}")
     jobs = production_service.list_jobs(project.id)
     if not jobs:
-        st.info("暂无 Production Job。请先在制作中心创建制作任务。")
+        st.info("还没有可审片的制作结果。请先完成制作。")
+        if st.button("去制作", type="primary", key=f"review-production-{project.id}"):
+            from aidrama_studio.components.navigation import request_navigation
+            request_navigation("production")
         return
     job_options = [str(_value(job, "id")) for job in jobs]
     selected_job_id = st.selectbox(
-        "Production Job", job_options,
-        format_func=lambda value: f"Job {value[:8]} · {_status(next(job for job in jobs if _value(job, 'id') == value))}",
+        "选择制作结果", job_options,
+        format_func=lambda value: f"制作结果 · {_status(next(job for job in jobs if _value(job, 'id') == value))}",
     )
     executions = execution_service.list_executions(project.id, selected_job_id)
     if not executions:
         st.info("该任务还没有 execution。")
         return
     execution_options = [str(_value(execution, "id")) for execution in executions]
-    selected_execution_id = st.selectbox("Execution", execution_options, format_func=lambda value: f"Execution {value[:8]}")
+    selected_execution_id = st.selectbox("选择镜头批次", execution_options, format_func=lambda value: "最近一次制作")
     selected_execution = next(execution for execution in executions if _value(execution, "id") == selected_execution_id)
     artifacts = execution_service.list_artifacts(project.id, selected_execution.id)
     if st.button("运行确定性 QC", type="primary", key=f"run-qc-{selected_execution.id}", disabled=not artifacts):

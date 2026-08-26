@@ -8,7 +8,7 @@ from aidrama_studio.domain import (
     ReferenceBindingType,
     ReferenceImageCandidateStatus,
 )
-from aidrama_studio.pages._shared import current_project_or_stop
+from aidrama_studio.pages._shared import current_project_or_stop, render_project_context
 from aidrama_studio.services import (
     ReferenceAssetService,
     ReferenceAssetServiceError,
@@ -70,7 +70,8 @@ def _render_card(service, project, subject, binding_type, story_revision_id):
                 image_path = None
             if image_path is not None and image_path.exists():
                 st.image(str(image_path), width=180)
-        st.caption(f"{binding_type.value.title()} ID · `{subject.id}`")
+        with st.expander("高级来源信息", expanded=False):
+            st.caption(f"{binding_type.value.title()} ID · `{subject.id}`")
 
 
 def _ensure_asset(service, project, binding_type, subject_id):
@@ -277,24 +278,31 @@ def _render_subject_tab(service, storage, project, subjects, binding_type, story
 def render() -> None:
     page_header("角色与场景", "REFERENCE ASSET CENTER", "管理角色、场景与可锁定的视觉参考资产。")
     project = current_project_or_stop()
+    render_project_context(project, stage="角色与场景", next_action="检查并锁定参考图", next_page="director")
     service = ReferenceAssetService()
     storage = ReferenceAssetStorageService(service)
     story_revision = service.approved_story_revision(project.id)
     if story_revision is None:
-        st.warning("请先确认 Story Bible。")
+        st.warning("还不能进入参考图工作区")
+        st.caption("请先确认故事设定，确认后这里会自动列出角色和场景。")
+        if st.button("去确认故事", type="primary", key=f"assets-story-{project.id}"):
+            from aidrama_studio.components.navigation import request_navigation
+            request_navigation("story")
         return
     story = story_revision["content"]
     readiness = service.calculate_readiness(project.id, story_revision["id"])
     character_readiness = readiness["characters"]
     location_readiness = readiness["locations"]
-    st.markdown("## Reference Readiness")
-    st.markdown("#### Characters")
+    st.markdown("## 参考图准备度")
+    st.caption("Reference Readiness · 参考图准备度")
+    st.caption("先为主要角色和场景选择或上传参考图，再进入分镜。")
+    st.markdown("#### Characters · 角色")
     character_metrics = st.columns(4)
     character_metrics[0].metric("Characters total", character_readiness["total"])
     character_metrics[1].metric("Characters used", character_readiness["used"])
     character_metrics[2].metric("Characters locked", character_readiness["locked"])
     character_metrics[3].metric("Characters missing", character_readiness["missing"])
-    st.markdown("#### Locations")
+    st.markdown("#### Locations · 场景")
     location_metrics = st.columns(4)
     location_metrics[0].metric("Locations total", location_readiness["total"])
     location_metrics[1].metric("Locations used", location_readiness["used"])
