@@ -1,0 +1,116 @@
+{
+  "title": "雨夜来信",
+  "logline": "雨夜中，记者林夏收到一封十年前未寄出的信，追查旧案时被父亲阻拦，最后得知父亲保护的是唯一证人。",
+  "premise": "十年前一场被定性为意外的仓库火灾留下一个失踪证人。如今在雨夜老街工作的记者林夏收到一封从未寄出的信，信中线索指向旧案。她回到老屋质问父亲，父亲先阻止她继续调查，随后坦白自己一直在保护证人安全。林夏带着新的证据离开，父女关系从猜疑转为共同守护真相。",
+  "genre": "现实主义悬疑短剧",
+  "tone": "克制、潮湿、温柔而带有迟来的释然",
+  "themes": [
+    "沉默有时是保护，不等于罪证",
+    "真相需要证据，也需要对人的体谅",
+    "父女之间迟到的诚实"
+  ],
+  "world": {
+    "era": "当代中国小城，智能手机与纸质档案并存",
+    "setting": "一条临河的老街和街尾一间年久失修的老屋。雨夜持续，室内暖灯与窗外冷光形成唯一的色彩分界。",
+    "rules": [
+      "只呈现可由林夏或林父掌握的证据，不使用全知视角",
+      "十年前的信件、剪报和旧钥匙必须在镜头中保持同一磨损状态",
+      "父亲的阻拦来自对证人安全的担忧，不是对犯罪的掩盖",
+      "雨声贯穿全片，镜头切换不改变雨势方向"
+    ],
+    "timeline_notes": "旧案发生于十年前；未寄出的信写于案发后第三天并被夹在旧相册中。短剧发生在一个持续 60 秒的雨夜，所有闪回仅以物件和父亲的叙述暗示，不切入新地点。"
+  },
+  "characters": [
+    {
+      "id": "lin_xia",
+      "name": "林夏",
+      "role": "journalist",
+      "age_or_range": "26",
+      "identity": "小城新闻记者，擅长查证旧档案，十年前的火灾夺走了她对父亲的信任。",
+      "personality": "敏锐、克制、执拗；面对父亲时会先用职业问题保护自己的脆弱。",
+      "appearance": "26 岁东亚女性，短至下颌的黑色直发，米色防水风衣、深灰针织衫、黑色帆布肩包；左手食指有一条很浅的旧纸划痕。全片发型、衣物和包保持一致。",
+      "motivation": "确认信件线索是否能洗清被误解的人，并弄清父亲为何隐瞒十年。",
+      "relationship_notes": "林父的女儿；她把父亲的沉默理解成心虚，直到发现父亲守护的是证人。",
+      "speech_style": "短句、低声、记者式追问；情绪高点不喊叫，改用停顿和重复关键词。"
+    },
+    {
+      "id": "lin_father",
+      "name": "林父",
+      "role": "retired mechanic and father",
+      "age_or_range": "54",
+      "identity": "老屋的居住者，曾在旧案现场附近修理车辆，后来替证人保管联络地址。",
+      "personality": "沉默、警觉、责任感强；不善解释，习惯先确认门窗和周围动静。",
+      "appearance": "54 岁东亚男性，鬓角微白，深蓝旧棉夹克、灰色衬衣，右手虎口有一道细疤；眼镜只在读剪报时戴上。全片服装、胡茬和细疤保持一致。",
+      "motivation": "保护仍可能遭报复的证人，直到证据能安全交给林夏。",
+      "relationship_notes": "林夏的父亲；知道她会把保护误读为隐瞒，却仍选择先保住证人的安全。",
+      "speech_style": "少量、具体、带生活停顿；关键坦白前先说“不是你想的那样”。"
+    }
+  ],
+  "locations": [
+    {
+      "id": "rain_old_street",
+      "name": "雨夜老街",
+      "function": "接收信件、建立旧案线索和结尾离开；街道是父女秘密的公共边界。",
+      "environment": "狭窄石板街，旧报刊亭、褪色蓝雨棚、积水反光，街尾能看见老屋木门；持续中雨，路灯稀疏。",
+      "time_of_day": "night, continuous rain",
+      "visual_style": "冷蓝灰色，湿石板高光，远处暖色窗光只作为引导，不出现霓虹或现代高楼。",
+      "key_props": ["未寄出的米白色信封", "旧报刊亭", "蓝色雨棚", "黑色帆布肩包", "老屋木门"]
+    },
+    {
+      "id": "old_house_interior",
+      "name": "老屋室内",
+      "function": "父女冲突、证据重组和真相坦白；室内是被保护的秘密空间。",
+      "environment": "低矮木梁、潮痕墙面、单盏钨丝灯、旧书桌、铁皮档案盒和一扇有雨痕的窗；没有现代装饰。",
+      "time_of_day": "night, rain heard through window",
+      "visual_style": "暖琥珀灯光压住冷窗光，桌面纸张纹理清晰，阴影保留细节，禁止恐怖片式夸张阴影。",
+      "key_props": ["铁皮档案盒", "十年前的报纸剪报", "旧相册", "铜色小钥匙", "玻璃杯", "铅笔"]
+    }
+  ],
+  "story_beats": [
+    {
+      "id": "story_beat_01",
+      "order": 1,
+      "type": "OPENING",
+      "summary": "林夏在雨夜老街收到一封十年前从未寄出的信，寄件人姓名被雨水浸掉一半。",
+      "characters": ["lin_xia"],
+      "location_id": "rain_old_street",
+      "emotional_goal": "好奇中带一点不祥"
+    },
+    {
+      "id": "story_beat_02",
+      "order": 2,
+      "type": "DEVELOPMENT",
+      "summary": "信中一句“仓库后门没有锁”与林夏手机里的旧案剪报对应，她决定回老屋取档案。",
+      "characters": ["lin_xia"],
+      "location_id": "rain_old_street",
+      "emotional_goal": "职业性的确定感压过私人恐惧"
+    },
+    {
+      "id": "story_beat_03",
+      "order": 3,
+      "type": "TURNING_POINT",
+      "summary": "林父在老屋门内拦住林夏，要求她把信交出来，父女之间十年的猜疑被迫正面碰撞。",
+      "characters": ["lin_xia", "lin_father"],
+      "location_id": "old_house_interior",
+      "emotional_goal": "压抑冲突，危险感来自沉默而非暴力"
+    },
+    {
+      "id": "story_beat_04",
+      "order": 4,
+      "type": "CLIMAX",
+      "summary": "林父打开铁皮盒，展示证人的新地址和旧钥匙，说明自己保护的是目击者，不是自己的罪行。",
+      "characters": ["lin_xia", "lin_father"],
+      "location_id": "old_house_interior",
+      "emotional_goal": "真相落地后的短暂失重与重新理解"
+    },
+    {
+      "id": "story_beat_05",
+      "order": 5,
+      "type": "ENDING",
+      "summary": "林夏把信和新证据收进档案袋，父亲替她撑伞到街口；她决定以证人的安全为先重启调查。",
+      "characters": ["lin_xia", "lin_father"],
+      "location_id": "rain_old_street",
+      "emotional_goal": "不煽情的和解，留下继续查证的余韵"
+    }
+  ]
+}

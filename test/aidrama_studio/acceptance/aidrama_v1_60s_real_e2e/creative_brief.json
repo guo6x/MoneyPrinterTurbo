@@ -1,0 +1,54 @@
+{
+  "fixture_id": "AIDRAMA_V1_60S_REAL_E2E_ACCEPTANCE_FIXTURE",
+  "title": "雨夜来信",
+  "format": "short_drama",
+  "target_duration_seconds": 60,
+  "aspect_ratio": "16:9",
+  "native_generation": {
+    "width": 1280,
+    "height": 720,
+    "label": "720p"
+  },
+  "delivery": {
+    "width": 1920,
+    "height": 1080,
+    "label": "1080p"
+  },
+  "fps": 24,
+  "deterministic_seed": 26082660,
+  "language": "zh-CN",
+  "genre": "现实主义悬疑短剧",
+  "tone": "克制、潮湿、温柔而带有迟来的释然",
+  "logline": "雨夜里，记者林夏收到一封十年前从未寄出的信；她重启旧案并被父亲拦下，最终发现父亲保护的是证人，而不是掩盖自己的罪。",
+  "audience": "希望在一分钟内获得清晰因果、真实表演和情绪回收的短剧观众",
+  "creative_pillars": [
+    "雨水、旧信纸和钨丝灯构成统一的冷暖对照",
+    "信息按证据链递进，不靠旁白解释反转",
+    "父女冲突保持生活化距离，结尾用一个被保护的名字完成释然"
+  ],
+  "visual_language": {
+    "palette": "street blue-gray #4B5B66, paper ivory #E9E0CC, tungsten amber #C98D4A, ink black #1C2023",
+    "contrast": "雨夜外景低饱和冷色；老屋只保留一盏暖灯，肤色自然不过度磨皮",
+    "texture": "真实雨丝、旧墙潮痕、信封折痕、报纸纤维；禁止塑料感和过度锐化",
+    "camera": "24fps 电影运动，慢推和短暂停顿优先，冲突段仅轻微手持"
+  },
+  "sound_language": {
+    "bed": "连续雨声从街道延伸到老屋，室内加入远处雨棚滴水",
+    "music": "低音大提琴与单音钢琴，shot 08 反转时只留一拍后回到雨声",
+    "dialogue_mix": "对白清晰置中，雨声比对白低 10 dB，结尾留 0.7 秒环境尾音"
+  },
+  "hard_constraints": [
+    "总时长必须为 60.000 秒，12 个镜头按 01-12 顺序",
+    "只使用林夏与林父两名角色、雨夜老街与老屋室内两个地点",
+    "不得把父亲拍成纵火或犯罪实施者；他是在保护证人",
+    "不得添加未在脚本中的对白、字幕、角色或地点",
+    "原生生成 1280x720，最终交付 1920x1080，24 fps，16:9"
+  ],
+  "offline_acceptance_policy": {
+    "live_calls": 0,
+    "paid_calls": 0,
+    "provider_invocation": "forbidden",
+    "external_api_keys": "not_required",
+    "reference_mode": "locked_textual_requirements_until_human_asset_lock"
+  }
+}

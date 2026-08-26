@@ -1,0 +1,230 @@
+{
+  "title": "雨夜来信",
+  "summary": "一分钟现实主义悬疑短剧：林夏收到十年前未寄出的信，回老屋追问父亲，在证据链中发现父亲保护的是证人。",
+  "scenes": [
+    {
+      "id": "scene_01_street_letter",
+      "order": 1,
+      "title": "信从雨里来",
+      "location_id": "rain_old_street",
+      "interior_exterior": "EXT",
+      "time_of_day": "NIGHT",
+      "character_ids": ["lin_xia"],
+      "purpose": "建立雨夜、信件和旧案钩子",
+      "summary": "林夏在旧报刊亭取回一封被雨水浸透的旧信，并发现一句直指仓库火灾的线索。",
+      "emotion": "好奇转为职业性的决心",
+      "estimated_duration_seconds": 14,
+      "source_story_beat_ids": ["story_beat_01", "story_beat_02"],
+      "beats": [
+        {
+          "id": "beat_01_01",
+          "order": 1,
+          "type": "ACTION",
+          "character_id": "lin_xia",
+          "text": "林夏收伞，从旧报刊亭的缝隙取出米白色信封。",
+          "emotion": "警觉",
+          "stage_direction": "雨水沿信封边缘滴落，寄件人只剩半个姓。",
+          "estimated_duration_seconds": 4
+        },
+        {
+          "id": "beat_01_02",
+          "order": 2,
+          "type": "INNER_MONOLOGUE",
+          "character_id": "lin_xia",
+          "text": "这封信，为什么现在才到？",
+          "emotion": "压低的疑问",
+          "stage_direction": "她没有抬头，拇指摩挲折痕。",
+          "estimated_duration_seconds": 3
+        },
+        {
+          "id": "beat_02_01",
+          "order": 3,
+          "type": "ACTION",
+          "character_id": "lin_xia",
+          "text": "她用手机拍下信纸，打开收藏的十年前仓库火灾剪报。",
+          "emotion": "集中",
+          "stage_direction": "屏幕冷光映在她的眼睛里，与路灯暖光分开。",
+          "estimated_duration_seconds": 4
+        },
+        {
+          "id": "beat_02_02",
+          "order": 4,
+          "type": "DIALOGUE",
+          "character_id": "lin_xia",
+          "text": "仓库后门没有锁……我得回去问他。",
+          "emotion": "下定决心",
+          "stage_direction": "她把信折回原样，转身朝街尾老屋走。",
+          "estimated_duration_seconds": 3
+        }
+      ]
+    },
+    {
+      "id": "scene_02_house_confrontation",
+      "order": 2,
+      "title": "门后的十年",
+      "location_id": "old_house_interior",
+      "interior_exterior": "INT",
+      "time_of_day": "NIGHT",
+      "character_ids": ["lin_xia", "lin_father"],
+      "purpose": "让父女冲突具体化并把信与旧案证据放在同一空间",
+      "summary": "林夏进老屋翻找档案，林父突然出现并要求她停止调查；一只旧钥匙和铁皮盒让冲突从猜疑进入证据层面。",
+      "emotion": "克制但逐步升高的对峙",
+      "estimated_duration_seconds": 28,
+      "source_story_beat_ids": ["story_beat_02", "story_beat_03"],
+      "beats": [
+        {
+          "id": "beat_02_03",
+          "order": 1,
+          "type": "ACTION",
+          "character_id": "lin_xia",
+          "text": "林夏推门进屋，把湿外套挂在门后，从桌下拖出铁皮档案盒。",
+          "emotion": "急切",
+          "stage_direction": "她的肩包始终在身上，信封放在最上层。",
+          "estimated_duration_seconds": 5
+        },
+        {
+          "id": "beat_03_01",
+          "order": 2,
+          "type": "ACTION",
+          "character_id": "lin_father",
+          "text": "林父关上内门，站在钨丝灯与窗之间，伸手挡住盒盖。",
+          "emotion": "紧张而克制",
+          "stage_direction": "不碰林夏，只把手掌放在盒盖上。",
+          "estimated_duration_seconds": 5
+        },
+        {
+          "id": "beat_03_02",
+          "order": 3,
+          "type": "DIALOGUE",
+          "character_id": "lin_father",
+          "text": "别再查了。把信给我。",
+          "emotion": "压低的命令",
+          "stage_direction": "他说完看向窗外，确认街上没有人。",
+          "estimated_duration_seconds": 3
+        },
+        {
+          "id": "beat_03_03",
+          "order": 4,
+          "type": "DIALOGUE",
+          "character_id": "lin_xia",
+          "text": "你十年前也是这么说的。那场火，究竟是谁放的？",
+          "emotion": "受伤的追问",
+          "stage_direction": "林夏把信按在桌面，不后退。",
+          "estimated_duration_seconds": 5
+        },
+        {
+          "id": "beat_03_04",
+          "order": 5,
+          "type": "ACTION",
+          "character_id": "lin_father",
+          "text": "林父打开抽屉，取出铜色小钥匙和一张折过多次的剪报。",
+          "emotion": "终于松动",
+          "stage_direction": "右手虎口的细疤经过灯光，钥匙放在两人之间。",
+          "estimated_duration_seconds": 5
+        },
+        {
+          "id": "beat_03_05",
+          "order": 6,
+          "type": "INNER_MONOLOGUE",
+          "character_id": "lin_xia",
+          "text": "你一直留着？",
+          "emotion": "怀疑开始裂开",
+          "stage_direction": "她看向钥匙，不再看父亲。",
+          "estimated_duration_seconds": 2
+        },
+        {
+          "id": "beat_03_06",
+          "order": 7,
+          "type": "ACTION",
+          "character_id": "lin_father",
+          "text": "林父把剪报翻到背面，露出一行手写地址。",
+          "emotion": "承担后果",
+          "stage_direction": "雨声短暂盖过呼吸，画面停在地址上。",
+          "estimated_duration_seconds": 3
+        }
+      ]
+    },
+    {
+      "id": "scene_03_house_truth",
+      "order": 3,
+      "title": "保护者的名字",
+      "location_id": "old_house_interior",
+      "interior_exterior": "INT",
+      "time_of_day": "NIGHT",
+      "character_ids": ["lin_xia", "lin_father"],
+      "purpose": "完成反转：父亲保护证人而非隐藏自己的罪",
+      "summary": "林父说明证人仍活着且有人追查，自己十年里只负责转交地址；林夏把新证据与信件重新排序。",
+      "emotion": "失重、理解、共同承担",
+      "estimated_duration_seconds": 9,
+      "source_story_beat_ids": ["story_beat_04"],
+      "beats": [
+        {
+          "id": "beat_04_01",
+          "order": 1,
+          "type": "DIALOGUE",
+          "character_id": "lin_father",
+          "text": "不是你想的那样。我护着的，是当晚看见一切的人。",
+          "emotion": "坦白前的停顿",
+          "stage_direction": "他把地址推给林夏，自己留在灯影外。",
+          "estimated_duration_seconds": 4
+        },
+        {
+          "id": "beat_04_02",
+          "order": 2,
+          "type": "ACTION",
+          "character_id": "lin_xia",
+          "text": "林夏把信、钥匙和地址并排放好，发现三者的日期吻合。",
+          "emotion": "震动后冷静",
+          "stage_direction": "她用铅笔圈出“后门”两个字，没有拍下地址。",
+          "estimated_duration_seconds": 3
+        },
+        {
+          "id": "beat_04_03",
+          "order": 3,
+          "type": "DIALOGUE",
+          "character_id": "lin_xia",
+          "text": "原来你是在保护他。",
+          "emotion": "迟到的理解",
+          "stage_direction": "父亲没有回答，只把玻璃杯推到她手边。",
+          "estimated_duration_seconds": 2
+        }
+      ]
+    },
+    {
+      "id": "scene_04_street_departure",
+      "order": 4,
+      "title": "一起走到街口",
+      "location_id": "rain_old_street",
+      "interior_exterior": "EXT",
+      "time_of_day": "NIGHT",
+      "character_ids": ["lin_xia", "lin_father"],
+      "purpose": "以行动而非拥抱完成和解，并留下可继续调查的开放结尾",
+      "summary": "父亲替林夏撑伞到街口，林夏把证据袋贴近胸口，决定先保护证人再重启报道。",
+      "emotion": "安静的并肩与余韵",
+      "estimated_duration_seconds": 9,
+      "source_story_beat_ids": ["story_beat_05"],
+      "beats": [
+        {
+          "id": "beat_05_01",
+          "order": 1,
+          "type": "ACTION",
+          "character_id": "lin_father",
+          "text": "林父替林夏撑开旧伞，两人从木门走到街口。",
+          "emotion": "笨拙的照顾",
+          "stage_direction": "伞面偏向林夏，父亲右肩淋湿。",
+          "estimated_duration_seconds": 5
+        },
+        {
+          "id": "beat_05_02",
+          "order": 2,
+          "type": "INNER_MONOLOGUE",
+          "character_id": "lin_xia",
+          "text": "有些沉默，是为了让真相活下来。",
+          "emotion": "平静的决心",
+          "stage_direction": "她把档案袋收进肩包，回头看一眼老屋。",
+          "estimated_duration_seconds": 4
+        }
+      ]
+    }
+  ]
+}

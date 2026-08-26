@@ -1,0 +1,116 @@
+{
+  "fixture_id": "AIDRAMA_V1_60S_REAL_E2E_ACCEPTANCE_FIXTURE",
+  "language": "zh-CN",
+  "render_mode": "dry_run_until_provider_is_explicitly_configured",
+  "provider_invocation": "forbidden_in_fixture_tests",
+  "voice_profiles": {
+    "lin_xia": {
+      "voice_id": "zh-CN-XiaoxiaoNeural",
+      "description": "年轻女性，低声记者式追问；若现场供应商不支持此 ID，映射到同等年龄/音色并记录映射。",
+      "rate": "-6%",
+      "pitch": "+0Hz",
+      "volume_db": -1.0
+    },
+    "lin_father": {
+      "voice_id": "zh-CN-YunxiNeural",
+      "description": "54 岁男性，克制、略沙哑；不得演成反派或播音腔。",
+      "rate": "-10%",
+      "pitch": "-2Hz",
+      "volume_db": -1.5
+    }
+  },
+  "cues": [
+    {
+      "cue_id": "cue_01",
+      "shot_id": "shot_02",
+      "speaker_id": "lin_xia",
+      "text": "这封信，为什么现在才到？",
+      "start_seconds": 5.8,
+      "end_seconds": 9.5,
+      "voice_profile_id": "lin_xia",
+      "pause_before_ms": 180,
+      "pause_after_ms": 220,
+      "expected_subtitle_index": 1
+    },
+    {
+      "cue_id": "cue_02",
+      "shot_id": "shot_03",
+      "speaker_id": "lin_xia",
+      "text": "仓库后门没有锁……我得回去问他。",
+      "start_seconds": 10.7,
+      "end_seconds": 13.7,
+      "voice_profile_id": "lin_xia",
+      "pause_before_ms": 120,
+      "pause_after_ms": 120,
+      "expected_subtitle_index": 2
+    },
+    {
+      "cue_id": "cue_03",
+      "shot_id": "shot_06",
+      "speaker_id": "lin_father",
+      "text": "别再查了。把信给我。",
+      "start_seconds": 26.2,
+      "end_seconds": 28.5,
+      "voice_profile_id": "lin_father",
+      "pause_before_ms": 600,
+      "pause_after_ms": 300,
+      "expected_subtitle_index": 3
+    },
+    {
+      "cue_id": "cue_04",
+      "shot_id": "shot_07",
+      "speaker_id": "lin_xia",
+      "text": "你十年前也是这么说的。那场火，究竟是谁放的？",
+      "start_seconds": 31.4,
+      "end_seconds": 35.5,
+      "voice_profile_id": "lin_xia",
+      "pause_before_ms": 180,
+      "pause_after_ms": 180,
+      "expected_subtitle_index": 4
+    },
+    {
+      "cue_id": "cue_05",
+      "shot_id": "shot_09",
+      "speaker_id": "lin_father",
+      "text": "不是你想的那样。我护着的，是当晚看见一切的人。",
+      "start_seconds": 42.4,
+      "end_seconds": 45.8,
+      "voice_profile_id": "lin_father",
+      "pause_before_ms": 500,
+      "pause_after_ms": 400,
+      "expected_subtitle_index": 5
+    },
+    {
+      "cue_id": "cue_06",
+      "shot_id": "shot_10",
+      "speaker_id": "lin_xia",
+      "text": "原来你是在保护他。",
+      "start_seconds": 47.1,
+      "end_seconds": 49.5,
+      "voice_profile_id": "lin_xia",
+      "pause_before_ms": 220,
+      "pause_after_ms": 260,
+      "expected_subtitle_index": 6
+    },
+    {
+      "cue_id": "cue_07",
+      "shot_id": "shot_12",
+      "speaker_id": "lin_xia",
+      "text": "有些沉默，是为了让真相活下来。",
+      "start_seconds": 56.2,
+      "end_seconds": 59.3,
+      "voice_profile_id": "lin_xia",
+      "pause_before_ms": 250,
+      "pause_after_ms": 700,
+      "expected_subtitle_index": 7
+    }
+  ],
+  "mixing": {
+    "sample_rate_hz": 48000,
+    "channels": 2,
+    "loudness_target_lufs": -16,
+    "true_peak_max_dbtp": -1.0,
+    "duck_rain_under_dialogue_db": -10,
+    "tail_seconds_after_last_cue": 0.7
+  }
+}
