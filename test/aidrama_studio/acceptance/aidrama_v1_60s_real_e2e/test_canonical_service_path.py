@@ -68,8 +68,16 @@ from aidrama_studio.services import (
     StoryService,
     StoryServiceError,
 )
+from aidrama_studio.services.ai_capabilities import (
+    CapabilityKind,
+    CapabilityRegistry,
+    CapabilityStatus,
+    TTSProvider,
+)
 from aidrama_studio.services.llm_runtime import LLMInvocationError
+from aidrama_studio.services.provider_profiles import ProviderProfileService
 from aidrama_studio.services.runtime_foundation import OutputProfileService
+from aidrama_studio.services.tts_runtime import TTSRuntimeError, TTSRuntimeService
 from aidrama_studio.storage.database import DatabasePaths
 from aidrama_studio.storage.repositories import ProjectRepository
 
@@ -151,6 +159,46 @@ class _OfflineLLMGateway:
         self.generation_calls += 1
         raise LLMInvocationError(
             "offline acceptance harness: provider invocation forbidden"
+        )
+
+
+class _OfflineTTSProvider(TTSProvider):
+    """Unavailable canonical TTS boundary with a zero-call counter."""
+
+    provider_name = "OFFLINE_ACCEPTANCE_TTS"
+
+    def __init__(self) -> None:
+        self.synthesis_calls = 0
+
+    @property
+    def status(self) -> CapabilityStatus:
+        return CapabilityStatus(
+            CapabilityKind.TTS,
+            self.provider_name,
+            False,
+            "offline acceptance harness: TTS provider forbidden",
+            {
+                "model": "offline-boundary",
+                "deployment_region": "LOCAL",
+                "endpoint_class": "OFFLINE_ACCEPTANCE",
+                "endpoint_profile_id": (
+                    "runtime:TTS:OFFLINE_ACCEPTANCE_TTS:OFFLINE_ACCEPTANCE"
+                ),
+            },
+            configured=False,
+        )
+
+    def synthesize(
+        self,
+        _text: str,
+        *,
+        voice: str,
+        language: str = "zh-CN",
+        sample_rate: int = 48000,
+    ) -> object:
+        self.synthesis_calls += 1
+        raise AssertionError(
+            "offline acceptance harness reached TTS provider synthesis"
         )
 
 
@@ -743,6 +791,28 @@ def test_canonical_service_path_ingests_fixture_offline(monkeypatch: pytest.Monk
             fixture_subtitle_track.model_copy(update={"plan_id": post_plan.id})
         )
         assert len(persisted_track.cues) == 7
+
+        # The real TTS service validates the persisted post-plan/script/track
+        # chain, then fails at its unavailable provider selection boundary.
+        # Its provider method must never be reached in this offline harness.
+        offline_tts = _OfflineTTSProvider()
+        tts_registry = CapabilityRegistry([offline_tts])
+        tts_profiles = ProviderProfileService(repository, registry=tts_registry)
+        tts_runtime = TTSRuntimeService(
+            repository,
+            provider=offline_tts,
+            registry=tts_registry,
+            provider_profiles=tts_profiles,
+        )
+        with pytest.raises(TTSRuntimeError, match="不会调用 TTS Provider"):
+            tts_runtime.synthesize_track(
+                project.id,
+                post_plan.id,
+                persisted_track.cues,
+                script_revision_id=script_revision["id"],
+                subtitle_track_id=persisted_track.id,
+            )
+        assert offline_tts.synthesis_calls == 0
 
         # A cold repository reopen must project the same approved chain and
         # manifest from the isolated database, not from in-memory JSON.
