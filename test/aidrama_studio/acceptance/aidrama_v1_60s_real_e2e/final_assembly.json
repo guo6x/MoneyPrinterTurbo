@@ -1,0 +1,25 @@
+{
+  "fixture_id": "AIDRAMA_V1_60S_REAL_E2E_ACCEPTANCE_FIXTURE",
+  "title": "雨夜来信",
+  "expected_duration_seconds": 60,
+  "expected_order": ["shot_01", "shot_02", "shot_03", "shot_04", "shot_05", "shot_06", "shot_07", "shot_08", "shot_09", "shot_10", "shot_11", "shot_12"],
+  "transition_policy": "hard_cut_unless_transition_hint_is_explicit; no transition may change timeline duration",
+  "items": [
+    {"order_index": 1, "shot_id": "shot_01", "source_path": "renders/shot_01.mp4", "timeline_start_seconds": 0, "timeline_end_seconds": 5, "trimmed_duration_seconds": 5, "transition_in": "cold_open", "transition_out": "cut"},
+    {"order_index": 2, "shot_id": "shot_02", "source_path": "renders/shot_02.mp4", "timeline_start_seconds": 5, "timeline_end_seconds": 10, "trimmed_duration_seconds": 5, "transition_in": "cut", "transition_out": "match_cut_envelope"},
+    {"order_index": 3, "shot_id": "shot_03", "source_path": "renders/shot_03.mp4", "timeline_start_seconds": 10, "timeline_end_seconds": 14, "trimmed_duration_seconds": 4, "transition_in": "match_cut_envelope", "transition_out": "hard_cut"},
+    {"order_index": 4, "shot_id": "shot_04", "source_path": "renders/shot_04.mp4", "timeline_start_seconds": 14, "timeline_end_seconds": 20, "trimmed_duration_seconds": 6, "transition_in": "hard_cut", "transition_out": "cut_on_door_latch"},
+    {"order_index": 5, "shot_id": "shot_05", "source_path": "renders/shot_05.mp4", "timeline_start_seconds": 20, "timeline_end_seconds": 25, "trimmed_duration_seconds": 5, "transition_in": "eyeline_cut", "transition_out": "sound_bridge_rain"},
+    {"order_index": 6, "shot_id": "shot_06", "source_path": "renders/shot_06.mp4", "timeline_start_seconds": 25, "timeline_end_seconds": 31, "trimmed_duration_seconds": 6, "transition_in": "sound_bridge_rain", "transition_out": "eyeline_cut"},
+    {"order_index": 7, "shot_id": "shot_07", "source_path": "renders/shot_07.mp4", "timeline_start_seconds": 31, "timeline_end_seconds": 36, "trimmed_duration_seconds": 5, "transition_in": "eyeline_cut", "transition_out": "match_cut_hand_key"},
+    {"order_index": 8, "shot_id": "shot_08", "source_path": "renders/shot_08.mp4", "timeline_start_seconds": 36, "timeline_end_seconds": 42, "trimmed_duration_seconds": 6, "transition_in": "match_cut_hand_key", "transition_out": "paper_texture_dissolve"},
+    {"order_index": 9, "shot_id": "shot_09", "source_path": "renders/shot_09.mp4", "timeline_start_seconds": 42, "timeline_end_seconds": 46, "trimmed_duration_seconds": 4, "transition_in": "paper_texture_dissolve", "transition_out": "cut_on_address"},
+    {"order_index": 10, "shot_id": "shot_10", "source_path": "renders/shot_10.mp4", "timeline_start_seconds": 46, "timeline_end_seconds": 51, "trimmed_duration_seconds": 5, "transition_in": "cut_on_address", "transition_out": "doorway_match_cut"},
+    {"order_index": 11, "shot_id": "shot_11", "source_path": "renders/shot_11.mp4", "timeline_start_seconds": 51, "timeline_end_seconds": 56, "trimmed_duration_seconds": 5, "transition_in": "doorway_match_cut", "transition_out": "cut"},
+    {"order_index": 12, "shot_id": "shot_12", "source_path": "renders/shot_12.mp4", "timeline_start_seconds": 56, "timeline_end_seconds": 60, "trimmed_duration_seconds": 4, "transition_in": "cut", "transition_out": "fade_after_rain_tail"}
+  ],
+  "audio_order": ["rain_bed_continuous", "music_low_cello_piano", "tts_cues_01_to_07", "rain_tail_0.7s"],
+  "subtitle_path": "subtitle_track.srt",
+  "tts_cues_path": "tts_cues.json",
+  "output_profile_path": "output_profile.json"
+}
