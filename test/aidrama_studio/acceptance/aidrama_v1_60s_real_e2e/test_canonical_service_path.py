@@ -350,16 +350,26 @@ def test_canonical_service_path_ingests_fixture_offline(monkeypatch: pytest.Monk
         assert [shot.id for shot in loaded_plan.shots] == EXPECTED_SHOT_IDS
         assert [shot.duration_seconds for shot in loaded_plan.shots] == EXPECTED_SHOT_DURATIONS
         assert all(shot.status.value == "LOCKED" for shot in loaded_plan.shots)
+        assert sum(shot.duration_seconds for shot in loaded_plan.shots) == TARGET_DURATION
         assert loaded_plan.total_duration_seconds == pytest.approx(TARGET_DURATION)
 
         dependency = DependencyStatusService(repository).project(project.id)
-        # ``DependencyStatusService`` is still exercised as a real projection,
-        # but its current-map fields are known to be shifted in production
-        # (status_for_script/status_for_shot_plan).  Keep this harness focused
-        # on the ingest path and report that source blocker separately rather
-        # than changing production code here.
-        assert dependency["current"]["story"] == story_revision["id"]
-        assert len(dependency["dependencies"]) == 3
+        dependency_by_type = {
+            item["entity_type"]: item for item in dependency["dependencies"]
+        }
+        assert set(dependency_by_type) == {
+            "STORY_BIBLE",
+            "STRUCTURED_SCRIPT",
+            "SHOT_PLAN",
+        }
+        assert dependency_by_type["STORY_BIBLE"]["revision_id"] == story_revision["id"]
+        assert dependency_by_type["STORY_BIBLE"]["current_revision_id"] == story_revision["id"]
+        assert dependency_by_type["STRUCTURED_SCRIPT"]["revision_id"] == script_revision["id"]
+        assert dependency_by_type["STRUCTURED_SCRIPT"]["source_revision_id"] == story_revision["id"]
+        assert dependency_by_type["STRUCTURED_SCRIPT"]["current_revision_id"] == story_revision["id"]
+        assert dependency_by_type["SHOT_PLAN"]["revision_id"] == shot_revision["id"]
+        assert dependency_by_type["SHOT_PLAN"]["source_revision_id"] == script_revision["id"]
+        assert dependency_by_type["SHOT_PLAN"]["current_revision_id"] == script_revision["id"]
         assert dependency["outdated"] == []
         assert CurrentProductionStateService(repository).workflow_stage(project.id) is ProjectStatus.PREPRODUCTION
 
