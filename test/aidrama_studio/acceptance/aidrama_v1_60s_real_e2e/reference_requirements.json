@@ -1,0 +1,75 @@
+{
+  "fixture_id": "AIDRAMA_V1_60S_REAL_E2E_ACCEPTANCE_FIXTURE",
+  "policy": {
+    "required_before_paid_run": true,
+    "provider_calls_for_fixture_validation": 0,
+    "asset_source": "human_supplied_local_reference",
+    "allowed_mime_types": ["image/png", "image/jpeg", "image/webp"],
+    "minimum_resolution": {"width": 1024, "height": 576},
+    "aspect_ratio_tolerance": 0.02,
+    "must_not_contain": ["logos", "watermarks", "extra people", "readable private addresses", "weapons", "fire imagery"],
+    "versioning": "lock exactly one current version per required role; retain SHA-256 in the paid-run record"
+  },
+  "characters": [
+    {
+      "reference_id": "ref_char_lin_xia_v1",
+      "binding_id": "lin_xia",
+      "name": "林夏",
+      "required": true,
+      "age": 26,
+      "image_count": 1,
+      "pose_and_expression": "neutral three-quarter portrait, eyes open, mouth relaxed; include a small full-body crop if available",
+      "wardrobe": "米色防水风衣、深灰针织衫、黑色帆布肩包",
+      "identity_anchors": ["下颌黑色直发", "左手食指浅纸痕", "自然肤色", "不戴明显首饰"],
+      "continuity_notes": "湿发、风衣和肩包在 shots 01-12 不换款；室内可脱风衣但必须挂在 shot_04 门后。",
+      "filename_slot": "references/character_lin_xia_v1.png"
+    },
+    {
+      "reference_id": "ref_char_lin_father_v1",
+      "binding_id": "lin_father",
+      "name": "林父",
+      "required": true,
+      "age": 54,
+      "image_count": 1,
+      "pose_and_expression": "neutral three-quarter portrait, calm eyes; include right hand with thumb-web scar visible",
+      "wardrobe": "深蓝旧棉夹克、灰色衬衣；读剪报时才戴眼镜",
+      "identity_anchors": ["鬓角微白", "右手虎口细疤", "短胡茬", "不戴帽子"],
+      "continuity_notes": "全片服装不换；shot_11-12 右肩逐渐淋湿，不能把湿肩误作换衣。",
+      "filename_slot": "references/character_lin_father_v1.png"
+    }
+  ],
+  "locations": [
+    {
+      "reference_id": "ref_loc_rain_old_street_v1",
+      "binding_id": "rain_old_street",
+      "name": "雨夜老街",
+      "required": true,
+      "image_count": 1,
+      "coverage": "wide establishing plate with street direction, old newsstand, faded blue awning, wet stone pavement, and old-house door visible",
+      "lighting": "night rain, cold blue-gray ambient with one warm street lamp",
+      "identity_anchors": ["石板积水", "褪色蓝雨棚", "旧报刊亭", "街尾木门", "无现代高楼"],
+      "continuity_notes": "camera-facing street direction fixed: old house is always at the far end/right rear; rain falls diagonally right-down."
+    },
+    {
+      "reference_id": "ref_loc_old_house_interior_v1",
+      "binding_id": "old_house_interior",
+      "name": "老屋室内",
+      "required": true,
+      "image_count": 1,
+      "coverage": "wide interior plate with wooden door, low beams, damp wall, single tungsten lamp, old desk, metal archive box, and rain-streaked window",
+      "lighting": "single warm tungsten key, cool window fill; preserve shadow detail",
+      "identity_anchors": ["低矮木梁", "潮痕墙面", "铁皮档案盒", "雨痕窗", "无现代装饰"],
+      "continuity_notes": "screen direction fixed: door on camera-left, window behind father, desk between characters; no set dressing changes during shots 04-10."
+    }
+  ],
+  "props": [
+    {"id": "prop_unsent_letter_v1", "name": "未寄出的米白色信封", "required_in_shots": [1, 2, 3, 4, 7, 8, 10], "identity_anchors": ["右上折痕", "潮湿边缘", "无现代邮戳"]},
+    {"id": "prop_archive_box_v1", "name": "铁皮档案盒", "required_in_shots": [4, 5, 6, 8, 10], "identity_anchors": ["暗灰铁皮", "左前角轻微凹痕"]},
+    {"id": "prop_copper_key_v1", "name": "铜色小钥匙", "required_in_shots": [8, 10], "identity_anchors": ["钥匙缺口朝右上", "旧磨损"]}
+  ],
+  "style_reference": {
+    "reference_id": "ref_style_rain_realism_v1",
+    "required": false,
+    "description": "可选风格板：冷蓝雨夜、暖钨丝灯、纸张纤维、克制表演；若未提供，以 creative_brief.visual_language 为唯一风格真相。"
+  }
+}
