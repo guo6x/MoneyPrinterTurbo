@@ -59,4 +59,3 @@ handling changes. No additional unreconciled security fix affects AIDrama V1:
 
 No provider/live request, dependency installation, AIDrama architecture change,
 or desktop UX change is part of this checkpoint.
-
