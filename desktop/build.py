@@ -7,6 +7,7 @@ than installing packages or silently producing an incomplete artifact.
 
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 import os
 import subprocess
@@ -26,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # Streamlit page itself would bypass the loopback/health/WebView lifecycle and
 # produce a binary that cannot perform the documented desktop startup flow.
 DESKTOP_ENTRYPOINT = PROJECT_ROOT / "desktop" / "launcher.py"
+PYWEBVIEW_VERSION = "6.2.1"
 
 
 def _add_data(source: Path, destination: str) -> list[str]:
@@ -64,6 +66,17 @@ def runtime_data_args() -> list[str]:
 def build_command(*, output_dir: Path | None = None) -> list[str]:
     if importlib.util.find_spec("PyInstaller") is None:
         raise RuntimeError("PyInstaller is not installed; install only the optional desktop build tool to package AIDrama")
+    try:
+        installed_webview = importlib.metadata.version("pywebview")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise RuntimeError(
+            f"PyWebView {PYWEBVIEW_VERSION} is required for the native desktop build"
+        ) from exc
+    if installed_webview != PYWEBVIEW_VERSION:
+        raise RuntimeError(
+            f"PyWebView {PYWEBVIEW_VERSION} is required for the native desktop build; "
+            f"found {installed_webview}"
+        )
     destination = output_dir or PROJECT_ROOT / "dist"
     command = [
         sys.executable,
@@ -82,6 +95,18 @@ def build_command(*, output_dir: Path | None = None) -> list[str]:
         # architecture or adding runtime dependencies.
         "--collect-all",
         "streamlit",
+        # PyWebView is imported lazily by the launcher. Collect its WinForms
+        # backend and bundled WebView2 interop DLLs explicitly so a frozen
+        # executable opens a native window instead of silently falling back
+        # to the system browser.
+        "--collect-all",
+        "webview",
+        "--collect-all",
+        "pythonnet",
+        "--collect-all",
+        "clr_loader",
+        "--collect-all",
+        "proxy_tools",
         "--collect-submodules",
         "aidrama_studio",
         "--collect-submodules",
@@ -97,6 +122,14 @@ def build_command(*, output_dir: Path | None = None) -> list[str]:
         "app.services.video",
         "--hidden-import",
         "app.utils.utils",
+        "--hidden-import",
+        "webview.platforms.winforms",
+        "--hidden-import",
+        "webview.platforms.edgechromium",
+        "--hidden-import",
+        "webview.platforms.mshtml",
+        "--hidden-import",
+        "clr",
     ]
     command.extend(runtime_data_args())
     command.append(str(DESKTOP_ENTRYPOINT))

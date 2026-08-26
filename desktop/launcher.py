@@ -1,8 +1,8 @@
-"""Loopback-only Streamlit launcher used by the optional desktop shell.
+"""Loopback-only Streamlit launcher used by the AIDrama desktop shell.
 
-PyWebView is intentionally optional.  The same launcher can open the local
-application in a browser for development/fallback, while a packaged build can
-inject the PyWebView module without changing process or security behavior.
+PyWebView is the normal packaged window; a browser remains an explicit
+development/emergency fallback when native WebView initialization genuinely
+fails or ``--browser`` is requested.
 """
 
 from __future__ import annotations
@@ -56,6 +56,14 @@ def configure_packaged_runtime_environment() -> Path | None:
 
     if not getattr(sys, "frozen", False):
         return None
+    # PyInstaller's windowed bootloader intentionally sets stdout/stderr to
+    # ``None``. A few transitive libraries (including Streamlit and pywebview)
+    # still emit diagnostics during startup, so give them a harmless sink
+    # instead of allowing an otherwise healthy native launch to crash.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
         data_root = Path(local_app_data) / "AIDramaStudio"

@@ -1,0 +1,4 @@
+# Optional desktop-shell build/runtime dependency.  The normal packaged
+# AIDrama Studio window uses PyWebView; source-only/headless installs do not
+# need this GUI dependency.
+pywebview==6.2.1

@@ -1,15 +1,17 @@
 # AIDrama Studio desktop and brand foundation
 
 This foundation keeps the existing Streamlit application as the canonical
-product surface while adding an optional local desktop shell.
+product surface while adding a local desktop shell for the Windows release.
 
 ## Desktop launcher
 
 `desktop/launcher.py` starts `aidrama_studio/Main.py` with an explicit
 loopback-only address (`127.0.0.1` by default), selects an available local
 port, waits for `/_stcore/health`, and terminates the child process on exit.
-PyWebView is optional: a machine without it receives a browser fallback rather
-than an automatic dependency installation or a LAN-exposed server.
+PyWebView 6.2.1 is the normal packaged window implementation. A browser is
+still available only as an explicit development/emergency fallback when native
+WebView initialization genuinely fails (or `--browser` is supplied); the
+loopback server is never exposed to a LAN.
 
 Repeatable local health smoke:
 
@@ -17,11 +19,10 @@ Repeatable local health smoke:
 & .\.venv\Scripts\python.exe -m desktop.launcher --smoke
 ```
 
-The optional PyInstaller onedir command is exposed by `desktop/build.py`. The
-repository environment currently has neither PyWebView nor PyInstaller, so no
-packaging dependency was installed. `build.py` exits with a clear prerequisite
-message until the operator deliberately provisions the minimal packaging
-tools.
+The PyInstaller onedir command is exposed by `desktop/build.py`. Provision the
+desktop-only runtime with `desktop/requirements.txt` and the free build tool
+separately; `build.py` fails closed unless the pinned PyWebView version is
+installed, so a frozen build cannot silently regress to browser-only mode.
 
 ## Product brand and readiness
 
