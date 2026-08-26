@@ -113,6 +113,7 @@ class WanProviderConfig:
     api_key: str = field(default="", repr=False)
     base_url: str = DEFAULT_WAN_BASE_URL
     model: str = DEFAULT_WAN_MODEL
+    allow_paid_live_tests: bool = False
     duration_seconds: int = 5
     # Wan 2.7 supports 720P and 1080P for this protocol.  720P is the
     # deliberately conservative default for an explicit, low-cost smoke.
@@ -133,6 +134,10 @@ class WanProviderConfig:
             "api_key": os.environ.get("DASHSCOPE_API_KEY", "").strip(),
             "base_url": os.environ.get("DASHSCOPE_BASE_URL", DEFAULT_WAN_BASE_URL).strip(),
             "model": os.environ.get("WAN_VIDEO_MODEL", DEFAULT_WAN_MODEL).strip(),
+            "allow_paid_live_tests": os.environ.get(
+                "AIDRAMA_ALLOW_PAID_LIVE_TESTS", ""
+            )
+            == "1",
             "result_hosts": tuple(
                 item.strip()
                 for item in os.environ.get("WAN_RESULT_HOSTS", "").split(",")
@@ -143,9 +148,18 @@ class WanProviderConfig:
         values.update(overrides)
         return cls(**values)
 
-    def validate(self, *, require_api_key: bool = True) -> None:
+    def validate(
+        self,
+        *,
+        require_api_key: bool = True,
+        require_paid_create: bool = False,
+    ) -> None:
         if require_api_key and not self.api_key.strip():
             raise WanAdapterError("DASHSCOPE_API_KEY is not configured")
+        if require_paid_create and not self.allow_paid_live_tests:
+            raise WanAdapterError(
+                "Wan paid create requires AIDRAMA_ALLOW_PAID_LIVE_TESTS=1"
+            )
         try:
             parsed = urlsplit(self.base_url.rstrip("/"))
             port = parsed.port
@@ -456,7 +470,7 @@ class WanVideoClient:
         )
 
     def create_task(self, payload: Mapping[str, object]) -> str:
-        self.config.validate(require_api_key=True)
+        self.config.validate(require_api_key=True, require_paid_create=True)
         response = self._request("POST", WAN_VIDEO_SYNTHESIS_PATH, json_body=payload, async_header=True)
         output = response.get("output") if isinstance(response.get("output"), Mapping) else response
         task_id = output.get("task_id") or output.get("taskId") if isinstance(output, Mapping) else None
@@ -572,20 +586,61 @@ class WanProductionAdapter(ProductionRuntimeAdapter):
     def map_input(self, snapshot: ProductionInputSnapshot) -> tuple[dict[str, object], dict[str, object]]:
         return WanInputMapper.map_snapshot(snapshot, self.config, self.reference_resolver)
 
+    @property
+    def status(self):
+        from ..ai_capabilities import CapabilityKind, CapabilityStatus
+
+        configured = bool(self.config.api_key)
+        available = configured and self.config.allow_paid_live_tests
+        return CapabilityStatus(
+            CapabilityKind.VIDEO_GENERATIVE,
+            "WAN_VIDEO",
+            available,
+            "configured"
+            if available
+            else (
+                "provider credential unavailable"
+                if not configured
+                else "paid live authorization is required"
+            ),
+            {
+                "model": self.config.model,
+                "live_authorized": self.config.allow_paid_live_tests,
+                "configured": configured,
+                "deployment_region": "MAINLAND_CHINA",
+                "endpoint_class": "DASHSCOPE_CN",
+                "endpoint_profile_id": (
+                    "runtime:VIDEO_GENERATIVE:WAN_VIDEO:DASHSCOPE_CN"
+                ),
+                "credential_reference": "DASHSCOPE_API_KEY",
+                "credential_present": configured,
+                "verification_state": "NOT_VERIFIED",
+                # Polling an already-created task is read-only with respect to
+                # paid provider creation and must remain available after the
+                # create authorization flag is removed.
+                "supports_poll_without_paid_create_authorization": True,
+            },
+            configured=configured,
+            verified=False,
+        )
+
     def validate(self, snapshot: ProductionInputSnapshot) -> bool:
         try:
             self.map_input(snapshot)
             # Validate readiness even when a test transport is injected.  A
             # fake client must not make a production adapter appear usable
             # without the real provider credential.
-            self.config.validate(require_api_key=True)
+            self.config.validate(require_api_key=True, require_paid_create=True)
             return True
         except (WanAdapterError, OSError, TypeError, ValueError):
             return False
 
     def submit(self, snapshot: ProductionInputSnapshot) -> RuntimeSubmission:
+        # Fail closed before reaching either the injected or HTTP create
+        # boundary. Polling an already-created task deliberately does not use
+        # this paid-create gate.
+        self.config.validate(require_api_key=True, require_paid_create=True)
         payload, trace = self.map_input(snapshot)
-        self.config.validate(require_api_key=True)
         task_id = str(self.client.create_task(payload) or "").strip()
         if not task_id:
             raise WanAdapterError("Wan create task returned an empty task id")

@@ -22,6 +22,19 @@ class ProductionRuntimeResolutionError(RuntimeError):
     pass
 
 
+_POLL_ONLY_TASK_STATES = frozenset(
+    {
+        "SUBMITTING",
+        "SUBMISSION_UNCERTAIN",
+        "RECONCILIATION_REQUIRED",
+        "PROVIDER_ACCEPTED",
+        "PROVIDER_RUNNING",
+        "POLLING_INTERRUPTED",
+        "PROVIDER_SUCCEEDED_ARTIFACT_PENDING",
+    }
+)
+
+
 class ProductionRuntimeResolver:
     def __init__(
         self,
@@ -60,7 +73,19 @@ class ProductionRuntimeResolver:
             status = provider.status
         except Exception as exc:
             raise ProductionRuntimeResolutionError(f"Provider readiness 不可用: {provider_id}") from exc
-        if not bool(getattr(status, "available", False)):
+        status_metadata = dict(getattr(status, "metadata", {}) or {})
+        task_state = str(getattr(task, "state", "") or "").strip().upper()
+        provider_task_id = str(getattr(task, "provider_task_id", "") or "").strip()
+        poll_only_ready = bool(
+            getattr(status, "configured", False) is True
+            and bool(provider_task_id)
+            and task_state in _POLL_ONLY_TASK_STATES
+            and status_metadata.get(
+                "supports_poll_without_paid_create_authorization"
+            )
+            is True
+        )
+        if getattr(status, "available", False) is not True and not poll_only_ready:
             reason = str(getattr(status, "reason", "provider unavailable"))
             raise ProductionRuntimeResolutionError(f"Provider 尚未就绪: {provider_id} ({reason})")
         authorization = runtime_plan.authorization if runtime_plan is not None else task.request_summary
@@ -139,7 +164,7 @@ class ProductionRuntimeResolver:
         # non-secret config.  Test/local adapters without a dataclass config
         # are returned above unchanged.
         from .adapters.seedance_video import SeedanceProductionAdapter
-        from .adapters.wan_video import WanProductionAdapter
+        from .adapters.wan_video import WanProductionAdapter, WanVideoClient
 
         if isinstance(adapter, SeedanceProductionAdapter):
             brief = (
@@ -169,8 +194,24 @@ class ProductionRuntimeResolver:
                 image_downloader=getattr(adapter, "image_downloader", None),
             )
         if isinstance(adapter, WanProductionAdapter):
+            # Keep deterministic/injected transports usable during recovery
+            # tests and in embedded hosts.  A real WanVideoClient is rebuilt
+            # against the pinned config so a changed model/endpoint cannot
+            # leak through its nested config; only its already-created HTTP
+            # session is retained.  Duck-typed test clients are passed
+            # through unchanged and therefore never turn a poll-only
+            # reconciliation into an accidental network call.
+            existing_client = getattr(adapter, "client", None)
+            if type(existing_client) is WanVideoClient:
+                pinned_client = WanVideoClient(
+                    pinned_config,
+                    session=getattr(existing_client, "session", None),
+                )
+            else:
+                pinned_client = existing_client
             return WanProductionAdapter(
                 config=pinned_config,
+                client=pinned_client,
                 reference_resolver=adapter.reference_resolver,
             )
         try:

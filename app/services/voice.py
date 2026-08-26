@@ -417,6 +417,8 @@ def tts(
     voice_rate: float,
     voice_file: str,
     voice_volume: float = 1.0,
+    *,
+    max_attempts: int | None = None,
 ) -> Union[SubMaker, None]:
     if is_no_voice(voice_name):
         duration_seconds = estimate_no_voice_duration(text)
@@ -430,12 +432,39 @@ def tts(
             audio_duration_seconds=duration_seconds,
         )
 
+    provider_specific_voice = any(
+        checker(voice_name)
+        for checker in (
+            is_siliconflow_voice,
+            is_gemini_voice,
+            is_mimo_voice,
+            is_minimax_voice,
+            is_elevenlabs_voice,
+            is_chatterbox_voice,
+        )
+    )
+    if max_attempts is not None and provider_specific_voice:
+        # Those adapters own their retry loops and do not yet expose a safe
+        # attempt override. Refuse the bounded smoke instead of silently
+        # allowing a second paid submission.
+        raise ValueError(
+            "bounded TTS smoke is available only for Microsoft Azure/Edge voices"
+        )
+
     if is_azure_v2_voice(voice_name):
+        if max_attempts is None:
+            return azure_tts_v2(
+                text,
+                voice_name,
+                voice_file,
+                voice_rate=voice_rate,
+            )
         return azure_tts_v2(
             text,
             voice_name,
             voice_file,
             voice_rate=voice_rate,
+            max_attempts=max_attempts,
         )
     elif is_siliconflow_voice(voice_name):
         # 从voice_name中提取模型和声音
@@ -503,7 +532,15 @@ def tts(
         else:
             logger.error(f"Invalid chatterbox voice name format: {voice_name}")
             return None
-    return azure_tts_v1(text, voice_name, voice_rate, voice_file)
+    if max_attempts is None:
+        return azure_tts_v1(text, voice_name, voice_rate, voice_file)
+    return azure_tts_v1(
+        text,
+        voice_name,
+        voice_rate,
+        voice_file,
+        max_attempts=max_attempts,
+    )
 
 
 def convert_rate_to_percent(rate: float) -> str:
@@ -784,12 +821,19 @@ def stream_edge_tts_chunks(
 
 
 def azure_tts_v1(
-    text: str, voice_name: str, voice_rate: float, voice_file: str
+    text: str,
+    voice_name: str,
+    voice_rate: float,
+    voice_file: str,
+    *,
+    max_attempts: int = 3,
 ) -> Union[SubMaker, None]:
     voice_name = parse_voice_name(voice_name)
     text = text.strip()
     rate_str = convert_rate_to_percent(voice_rate)
-    for i in range(3):
+    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or not 1 <= max_attempts <= 3:
+        raise ValueError("Azure TTS max_attempts must be an integer from 1 to 3")
+    for i in range(max_attempts):
         try:
             logger.info(f"start, voice name: {voice_name}, try: {i + 1}")
 
@@ -1009,6 +1053,8 @@ def azure_tts_v2(
     voice_name: str,
     voice_file: str,
     voice_rate: float = 1.0,
+    *,
+    max_attempts: int = 3,
 ) -> Union[SubMaker, None]:
     voice_name = is_azure_v2_voice(voice_name)
     if not voice_name:
@@ -1033,7 +1079,9 @@ def azure_tts_v2(
 
         return 0
 
-    for i in range(3):
+    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or not 1 <= max_attempts <= 3:
+        raise ValueError("Azure TTS max_attempts must be an integer from 1 to 3")
+    for i in range(max_attempts):
         try:
             logger.info(
                 f"start, voice name: {voice_name}, rate: {voice_rate}, try: {i + 1}"

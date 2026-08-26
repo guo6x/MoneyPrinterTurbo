@@ -13,7 +13,7 @@ import os
 import re
 import subprocess
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
@@ -39,6 +39,9 @@ class TTSRuntimeError(RuntimeError):
     pass
 
 
+TTS_LIVE_SMOKE_TEXT = "AIDrama Studio TTS live smoke."
+
+
 class TTSRuntimeService:
     def __init__(
         self,
@@ -58,6 +61,92 @@ class TTSRuntimeService:
         )
         self.provider = provider or self.registry.get("TTS")
         self.ffmpeg_binary = ffmpeg_binary
+
+    def synthesize_live_smoke(
+        self,
+        project_id: str,
+        *,
+        text: str = TTS_LIVE_SMOKE_TEXT,
+        voice: str | None = None,
+        language: str = "zh-CN",
+        sample_rate: int = 48000,
+        disclosure: ProviderDisclosure | Mapping[str, object] | None = None,
+    ) -> TTSResult:
+        """Run one explicitly authorized TTS submission with retries disabled.
+
+        This acceptance path intentionally does not build a multi-cue track.
+        The selected provider must expose its own bounded smoke implementation;
+        otherwise the method fails before any provider submission.
+        """
+
+        if self.repository.get_project(project_id) is None:
+            raise TTSRuntimeError("项目不存在")
+        bounded_text = str(text or "").strip()
+        if not bounded_text or len(bounded_text) > 200:
+            raise TTSRuntimeError("TTS live smoke 文本必须为 1 到 200 个字符")
+        try:
+            resolved = self.provider_profiles.resolve(
+                project_id,
+                CapabilityKind.TTS,
+                require_available=True,
+            )
+            selected_provider = self.provider_profiles.provider_for_selection(resolved)
+            self.provider_profiles.require_disclosure(
+                project_id,
+                CapabilityKind.TTS,
+                disclosure,
+                transmitted_content_types=("TEXT_TIMELINE",),
+            )
+        except (ProviderProfileError, CapabilityUnavailable) as exc:
+            raise TTSRuntimeError(
+                "TTS live smoke Provider disclosure/selection 不可用；不会调用 Provider"
+            ) from exc
+        if not isinstance(selected_provider, TTSProvider):
+            raise TTSRuntimeError("选中的 TTS provider 无效")
+        # The bounded path is an acceptance-only paid boundary.  A concrete
+        # provider may expose the method without enforcing its own flag, so
+        # the canonical runtime also requires an explicit status signal before
+        # invoking it.  Local engines are the only exception because they do
+        # not submit a remote/paid request.
+        try:
+            status_metadata = dict(
+                getattr(selected_provider.status, "metadata", {}) or {}
+            )
+        except Exception as exc:
+            raise TTSRuntimeError(
+                "TTS live smoke readiness check failed；不会调用 Provider"
+            ) from exc
+        deployment_region = str(
+            status_metadata.get("deployment_region") or "UNSPECIFIED"
+        ).upper()
+        if (
+            deployment_region != "LOCAL"
+            and status_metadata.get("live_authorized") is not True
+        ):
+            raise TTSRuntimeError(
+                "TTS live smoke requires AIDRAMA_ALLOW_PAID_LIVE_TESTS=1"
+            )
+        selected_voice = str(
+            voice or getattr(selected_provider, "voice", "")
+        ).strip()
+        if not selected_voice:
+            raise TTSRuntimeError("TTS live smoke voice 未选择")
+        try:
+            result = selected_provider.synthesize_live_smoke(
+                bounded_text,
+                voice=selected_voice,
+                language=language,
+                sample_rate=sample_rate,
+            )
+        except Exception as exc:
+            if isinstance(exc, TTSRuntimeError):
+                raise
+            raise TTSRuntimeError("TTS live smoke synthesis failed") from exc
+        if not isinstance(result, TTSResult) or not isinstance(
+            result.audio, (bytes, bytearray)
+        ) or not result.audio:
+            raise TTSRuntimeError("TTS live smoke returned no audio")
+        return result
 
     def synthesize_track(
         self,
@@ -280,7 +369,7 @@ class TTSRuntimeService:
             "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
         ]
         filters: list[str] = []
-        inputs = [f"[base]"]
+        inputs = ["[base]"]
         filters.append(
             f"[{len(segments)}:a:0]atrim=duration={timeline_end:.6f}[base]"
         )
@@ -344,4 +433,4 @@ class TTSRuntimeService:
         return digest.hexdigest()
 
 
-__all__ = ["TTSRuntimeError", "TTSRuntimeService"]
+__all__ = ["TTS_LIVE_SMOKE_TEXT", "TTSRuntimeError", "TTSRuntimeService"]

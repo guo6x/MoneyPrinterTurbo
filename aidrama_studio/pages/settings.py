@@ -24,11 +24,11 @@ CORE_MODULES = (
 )
 
 _CAPABILITY_LABELS = {
-    CapabilityKind.LLM: "LLM",
-    CapabilityKind.IMAGE: "图片生成",
+    CapabilityKind.LLM: "文本生成",
+    CapabilityKind.IMAGE: "参考图生成",
     CapabilityKind.VIDEO_GENERATIVE: "视频生成",
-    CapabilityKind.VISION: "视觉理解",
-    CapabilityKind.TTS: "语音",
+    CapabilityKind.VISION: "画面分析",
+    CapabilityKind.TTS: "配音",
 }
 
 _PRESET_LABELS = {
@@ -41,6 +41,45 @@ _PRESET_LABELS = {
 def _profile_label(profile) -> str:
     region = profile.deployment_region.value
     return f"{profile.provider_id} / {profile.model_id} · {region} · {profile.endpoint_class}"
+
+
+def _human_capability_state(public: dict[str, object]) -> str:
+    """Map provider resolution to the three normal-user status labels."""
+
+    raw_state = str(public.get("state") or "").upper()
+    # A configured-but-unavailable profile can be missing paid authorization,
+    # runtime support, or another local prerequisite.  Unless its detail is an
+    # explicit configuration error, direct the user to configuration rather
+    # than claiming the capability is ready.
+    error_markers = (
+        "invalid",
+        "error",
+        "failed",
+        "mismatch",
+        "无效",
+        "错误",
+        "失败",
+        "不匹配",
+    )
+    detail = str(public.get("detail") or "").casefold()
+    if raw_state == "ERROR" or any(marker in detail for marker in error_markers):
+        return "配置有误"
+    if raw_state:
+        if raw_state == "READY":
+            return (
+                "已配置"
+                if public.get("configured") is True
+                and public.get("available") is True
+                else "配置有误"
+            )
+        if raw_state in {"UNAVAILABLE", "CONFIGURED"}:
+            return "需要配置"
+        # Unknown/contradictory state values are diagnostic errors, never a
+        # green normal-user readiness claim.
+        return "配置有误"
+    if bool(public.get("configured")) and bool(public.get("available")):
+        return "已配置"
+    return "需要配置"
 
 
 def _render_provider_model_settings(
@@ -132,7 +171,7 @@ def _render_provider_model_settings(
         public = resolution.as_public_dict()
         with st.container(border=True):
             st.markdown(f"**{label}**")
-            state = "已配置" if public["configured"] else "未配置"
+            state = _human_capability_state(public)
             verified = "已验证" if public["verified"] else "未验证"
             st.caption(f"{state} · {verified}")
             profile = resolution.profile

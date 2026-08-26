@@ -6,10 +6,15 @@ import threading
 
 import pytest
 
-from aidrama_studio.branding import BRAND, get_brand_config
+from aidrama_studio.branding import get_brand_config
 from aidrama_studio.services.provider_readiness import (
     ProviderReadinessService,
     ReadinessState,
+)
+from aidrama_studio.services.ai_capabilities import (
+    CapabilityKind,
+    CapabilityRegistry,
+    CapabilityStatus,
 )
 from desktop.launcher import (
     DesktopLaunchError,
@@ -40,7 +45,11 @@ def test_brand_config_has_replaceable_mark_without_upstream_ui_name(monkeypatch)
 def test_provider_readiness_never_returns_secret_values():
     secret = "test-secret-do-not-render"
     service = ProviderReadinessService(
-        env={"DASHSCOPE_API_KEY": secret, "WAN_VIDEO_MODEL": "test-model"},
+        env={
+            "DASHSCOPE_API_KEY": secret,
+            "WAN_VIDEO_MODEL": "test-model",
+            "AIDRAMA_ALLOW_PAID_LIVE_TESTS": "1",
+        },
         llm_status=lambda: (False, "API Key 尚未配置"),
     )
     snapshot = service.snapshot()
@@ -48,6 +57,61 @@ def test_provider_readiness_never_returns_secret_values():
     assert secret not in repr(snapshot)
     assert snapshot["IMAGE"]["state"] == ReadinessState.UNAVAILABLE.value
     assert snapshot["VISION"]["state"] == ReadinessState.UNAVAILABLE.value
+
+
+def test_provider_readiness_keeps_production_and_explicit_env_resolution_distinct(
+    monkeypatch,
+):
+    import aidrama_studio.services.provider_readiness as readiness_module
+    from aidrama_studio.services.ai_capabilities import CapabilityRegistry
+
+    calls = []
+    registry = CapabilityRegistry([])
+
+    def fake_registry(*args, **kwargs):
+        calls.append((args, kwargs))
+        return registry
+
+    monkeypatch.setattr(readiness_module, "default_capability_registry", fake_registry)
+
+    readiness_module.ProviderReadinessService()._capability_registry()
+    readiness_module.ProviderReadinessService(env={"AIDRAMA_TEST": "1"})._capability_registry()
+
+    assert calls[0] == ((), {})
+    assert calls[1] == ((), {"env": {"AIDRAMA_TEST": "1"}})
+
+
+def test_provider_readiness_fails_closed_on_contradictory_runtime_status():
+    class BrokenImageProvider:
+        capability = CapabilityKind.IMAGE
+        provider_name = "BROKEN_IMAGE"
+
+        @property
+        def status(self):
+            return CapabilityStatus(
+                CapabilityKind.IMAGE,
+                self.provider_name,
+                True,
+                "invalid endpoint configuration",
+                {
+                    "model": "broken-image-v1",
+                    "deployment_region": "INTERNATIONAL",
+                    "endpoint_class": "BROKEN_PUBLIC",
+                    "endpoint_profile_id": (
+                        "runtime:IMAGE:BROKEN_IMAGE:BROKEN_PUBLIC"
+                    ),
+                    "configured": True,
+                    "credential_present": True,
+                    "provider_constraints_valid": False,
+                },
+                configured=True,
+            )
+
+    snapshot = ProviderReadinessService(
+        registry=CapabilityRegistry([BrokenImageProvider()])
+    ).snapshot()
+    assert snapshot["IMAGE"]["state"] == ReadinessState.ERROR.value
+    assert snapshot["IMAGE"]["ready"] is False
 
 
 def test_launcher_rejects_non_loopback_binding():

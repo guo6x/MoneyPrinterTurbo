@@ -104,7 +104,7 @@ def _version(*, version_id="v1", source_revision="story-v1"):
 def test_page_loads_and_exposes_required_center_sections():
     assert callable(assets.render)
     source = Path(assets.__file__).read_text(encoding="utf-8")
-    for label in ("Reference Readiness", "Characters", "Locations", "Styles", "Props", "Version history"):
+    for label in ("Reference Readiness", "Characters", "Locations", "Styles", "Props", "Version history", "生成候选图"):
         assert label in source
 
 
@@ -194,3 +194,37 @@ def test_upload_flow_invokes_storage_then_binds_version():
         "subject_id": subject.id,
     }
     assert service.calls[-1] == ("bind", project.id, imported_version.id, ReferenceBindingType.CHARACTER, subject.id)
+
+
+def test_generation_action_uses_canonical_recording_boundary_without_locking():
+    project = _Project("project-1")
+    subject = Character(id="char-1", name="Hero")
+    service = _FakeService()
+
+    class FakeRuntime:
+        def __init__(self):
+            self.calls = []
+
+        def generate_and_record_candidate(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return type("Candidate", (), {"id": "candidate-1"})()
+
+    runtime = FakeRuntime()
+    asset, candidate = assets._generate_image_candidate(
+        service,
+        runtime,
+        project,
+        subject,
+        ReferenceBindingType.CHARACTER,
+        "story-v1",
+        "Hero portrait",
+    )
+
+    assert asset.id == "asset-created"
+    assert candidate.id == "candidate-1"
+    args, kwargs = runtime.calls[0]
+    assert args == (project.id, asset.id, "Hero portrait")
+    assert kwargs["source_story_revision_id"] == "story-v1"
+    assert kwargs["reference_assets"] is service
+    assert kwargs["actor"] == "user"
+    assert "activate" not in [call[0] for call in service.calls]

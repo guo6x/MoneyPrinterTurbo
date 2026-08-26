@@ -29,6 +29,7 @@ from aidrama_studio.services.ai_capabilities import (
     MPTLLMProvider,
 )
 from aidrama_studio.services.llm_runtime import (
+    LLM_LIVE_SMOKE_PROMPT,
     LLMInvocationError,
     LLMInvocationGateway,
 )
@@ -48,6 +49,7 @@ class _LLMProvider:
     endpoint_class: str = "TEST_CN_LLM"
     endpoint_profile_id: str = "runtime:LLM:TEST_LLM:TEST_CN_LLM"
     upstream_provider_id: str | None = None
+    live_authorized: bool | None = None
     on_call: Callable[[int], None] | None = None
     capability: CapabilityKind = CapabilityKind.LLM
 
@@ -56,20 +58,23 @@ class _LLMProvider:
 
     @property
     def status(self) -> CapabilityStatus:
+        metadata = {
+            "model": self.model,
+            "configured": True,
+            "deployment_region": self.deployment_region,
+            "endpoint_class": self.endpoint_class,
+            "endpoint_profile_id": self.endpoint_profile_id,
+            "upstream_provider_id": self.upstream_provider_id,
+            "verification_state": "NOT_VERIFIED",
+        }
+        if self.live_authorized is not None:
+            metadata["live_authorized"] = self.live_authorized
         return CapabilityStatus(
             CapabilityKind.LLM,
             self.provider_name,
             True,
             "configured",
-            {
-                "model": self.model,
-                "configured": True,
-                "deployment_region": self.deployment_region,
-                "endpoint_class": self.endpoint_class,
-                "endpoint_profile_id": self.endpoint_profile_id,
-                "upstream_provider_id": self.upstream_provider_id,
-                "verification_state": "NOT_VERIFIED",
-            },
+            metadata,
             configured=True,
         )
 
@@ -218,6 +223,97 @@ def test_gateway_readiness_uses_canonical_selected_endpoint(tmp_path):
     assert ready is True
     assert "TEST_LLM" in detail
     assert "MAINLAND_CHINA" in detail
+
+
+def test_live_smoke_uses_exact_prompt_and_at_most_one_provider_call(tmp_path):
+    repository, project = _context(tmp_path)
+    seen_prompts = []
+
+    class CapturingProvider(_LLMProvider):
+        def generate_json_text(self, prompt: str) -> str:
+            seen_prompts.append(prompt)
+            return super().generate_json_text(prompt)
+
+    provider = CapturingProvider(["OK"], live_authorized=True)
+    gateway = LLMInvocationGateway(
+        repository,
+        registry=CapabilityRegistry([provider]),
+    )
+
+    assert gateway.run_live_smoke(project.id, correlation_id="llm-smoke") == "OK"
+    assert provider.call_count == 1
+    assert LLM_LIVE_SMOKE_PROMPT == "Reply with exactly: OK"
+    assert seen_prompts == ["Reply with exactly: OK"]
+    ledger = repository.list_ai_invocations(project.id)
+    assert [item.status for item in ledger] == ["STARTED", "SUCCEEDED"]
+    assert {item.request_summary["operation"] for item in ledger} == {
+        "LLM_LIVE_SMOKE"
+    }
+    assert {item.request_summary["attempt_kind"] for item in ledger} == {"PRIMARY"}
+
+
+def test_live_smoke_requires_explicit_remote_authorization_before_provider_call(tmp_path):
+    repository, project = _context(tmp_path)
+    provider = _LLMProvider(["OK"], live_authorized=False)
+    gateway = LLMInvocationGateway(
+        repository,
+        registry=CapabilityRegistry([provider]),
+    )
+
+    with pytest.raises(LLMInvocationError, match="AIDRAMA_ALLOW_PAID_LIVE_TESTS"):
+        gateway.run_live_smoke(project.id)
+
+    assert provider.call_count == 0
+    assert repository.list_ai_invocations(project.id) == []
+
+
+def test_live_smoke_invalid_reply_does_not_enter_repair_loop(tmp_path):
+    repository, project = _context(tmp_path)
+    provider = _LLMProvider(["Almost OK", "OK"], live_authorized=True)
+    gateway = LLMInvocationGateway(
+        repository,
+        registry=CapabilityRegistry([provider]),
+    )
+
+    with pytest.raises(LLMInvocationError, match="exactly OK"):
+        gateway.run_live_smoke(project.id)
+
+    assert provider.call_count == 1
+    assert provider.responses == ["OK"]
+    assert [
+        item.status for item in repository.list_ai_invocations(project.id)
+    ] == ["STARTED", "FAILED"]
+
+
+def test_local_live_smoke_may_omit_paid_authorization(tmp_path):
+    repository, project = _context(tmp_path)
+    provider = _LLMProvider(
+        ["OK"],
+        deployment_region="LOCAL",
+        live_authorized=None,
+    )
+    gateway = LLMInvocationGateway(
+        repository,
+        registry=CapabilityRegistry([provider]),
+    )
+
+    assert gateway.run_live_smoke(project.id) == "OK"
+    assert provider.call_count == 1
+
+
+def test_remote_live_smoke_without_authorization_fails_closed(tmp_path):
+    repository, project = _context(tmp_path)
+    provider = _LLMProvider(["OK"], live_authorized=None)
+    gateway = LLMInvocationGateway(
+        repository,
+        registry=CapabilityRegistry([provider]),
+    )
+
+    with pytest.raises(LLMInvocationError, match="AIDRAMA_ALLOW_PAID_LIVE_TESTS"):
+        gateway.run_live_smoke(project.id)
+
+    assert provider.call_count == 0
+    assert repository.list_ai_invocations(project.id) == []
 
 
 def test_structured_operation_freezes_provider_across_single_repair(tmp_path):

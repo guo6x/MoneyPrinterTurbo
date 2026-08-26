@@ -9,13 +9,14 @@ the deterministic mock Vision provider without making a live-model claim.
 from __future__ import annotations
 
 import json
+import importlib
 import os
 import tempfile
 from pathlib import Path
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Sequence
+from typing import Mapping, Sequence
 
 from aidrama_studio.domain import ProductionInputSnapshot
 
@@ -137,6 +138,25 @@ class TTSProvider(ABC):
 
     @abstractmethod
     def synthesize(self, text: str, *, voice: str, language: str = "zh-CN", sample_rate: int = 48000) -> "TTSResult": ...
+
+    def synthesize_live_smoke(
+        self,
+        text: str,
+        *,
+        voice: str,
+        language: str = "zh-CN",
+        sample_rate: int = 48000,
+    ) -> "TTSResult":
+        """Run a provider-specific, single-submission live smoke when supported.
+
+        The default is deliberately fail-closed: a provider must prove that it
+        can suppress internal paid retries before the acceptance path may use
+        it.
+        """
+
+        raise CapabilityUnavailable(
+            "selected TTS provider does not expose a bounded live-smoke path"
+        )
 
 
 @dataclass(frozen=True)
@@ -262,9 +282,23 @@ class MPTLLMProvider(LLMProvider):
 
     provider_name = "MPT_LLM"
 
-    def __init__(self, config_snapshot: Mapping[str, object] | None = None):
+    def __init__(
+        self,
+        config_snapshot: Mapping[str, object] | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+    ):
         self._config_snapshot = dict(
             snapshot_llm_config() if config_snapshot is None else config_snapshot
+        )
+        # Live-smoke authorization is an acceptance-only boundary.  Keep it
+        # separate from the mature LLM configuration/readiness path so normal
+        # creative generation remains backward compatible.  The registry
+        # passes its frozen environment explicitly; direct callers retain the
+        # process-environment fallback for compatibility.
+        self._allow_paid_live_tests = (
+            str((os.environ if env is None else env).get("AIDRAMA_ALLOW_PAID_LIVE_TESTS", ""))
+            == "1"
         )
 
     @property
@@ -277,6 +311,7 @@ class MPTLLMProvider(LLMProvider):
         provider = get_llm_provider(provider_id)
         model = "runtime"
         credential_reference = None
+        credential_present: bool | None = None
         endpoint_id = "unspecified"
         endpoint_class = "MPT_LLM_UNSPECIFIED"
         region = "UNSPECIFIED"
@@ -292,6 +327,14 @@ class MPTLLMProvider(LLMProvider):
                 if provider.requires_api_key
                 else None
             )
+            if credential_reference is not None:
+                credential_present = bool(
+                    str(
+                        self._config_snapshot.get(
+                            provider.config_key("api_key"), ""
+                        )
+                    ).strip()
+                )
             service_endpoint = provider.find_service_endpoint(resolved_base_url)
             if provider_id == "moonshot" and service_endpoint is not None:
                 endpoint_id = service_endpoint.endpoint_id
@@ -334,11 +377,18 @@ class MPTLLMProvider(LLMProvider):
                 f"runtime:LLM:MPT_LLM:{provider_id or 'unspecified'}:{endpoint_id}"
             ),
             "credential_reference": credential_reference,
+            "credential_present": credential_present,
             "upstream_provider_id": provider_id or "unspecified",
             "boundary_provider_id": self.provider_name,
             "configured": ready,
             "verification_state": "NOT_VERIFIED",
         }
+        # Local LLMs (for example Ollama) do not incur a remote paid request,
+        # so they intentionally omit this field.  Every non-local endpoint is
+        # explicit about the acceptance-only authorization state; normal
+        # readiness remains governed by ``llm_configuration_status`` above.
+        if region != "LOCAL":
+            metadata["live_authorized"] = self._allow_paid_live_tests
         return CapabilityStatus(
             CapabilityKind.LLM, self.provider_name, ready, reason, metadata,
             configured=ready, verified=False,
@@ -395,10 +445,14 @@ class RuntimeVideoProvider(VideoGenerationProvider):
         if adapter_status is not None and hasattr(adapter_status, "metadata"):
             metadata.update(dict(adapter_status.metadata))
             reason = str(adapter_status.reason or reason)
-            available = bool(adapter_status.available)
+            available = adapter_status.available is True
             explicit_configured = getattr(adapter_status, "configured", None)
-            configured = configured if explicit_configured is None else bool(explicit_configured)
-            verified = bool(getattr(adapter_status, "verified", False))
+            configured = (
+                configured
+                if explicit_configured is None
+                else explicit_configured is True
+            )
+            verified = getattr(adapter_status, "verified", False) is True
         else:
             available = configured
             verified = False
@@ -412,6 +466,7 @@ class RuntimeVideoProvider(VideoGenerationProvider):
         metadata.setdefault("endpoint_profile_id", f"runtime:{self.capability.value}:{self.provider_name}:{defaults[1]}")
         if defaults[2]:
             metadata.setdefault("credential_reference", defaults[2])
+            metadata.setdefault("credential_present", configured)
         metadata["configured"] = configured
         metadata.setdefault("verification_state", "NOT_VERIFIED")
         return CapabilityStatus(
@@ -475,37 +530,289 @@ class MPTTTSProvider(TTSProvider):
 
     provider_name = "MPT_TTS"
 
-    def __init__(self, *, enabled: bool | None = None, voice: str | None = None, voice_rate: float = 1.0, voice_volume: float = 1.0):
-        self.enabled = (os.environ.get("AIDRAMA_TTS_ENABLED", "") == "1") if enabled is None else bool(enabled)
-        self.voice = voice or os.environ.get("AIDRAMA_TTS_VOICE", "zh-CN-XiaoxiaoMultilingualNeural-V2-Female")
+    def __init__(
+        self,
+        *,
+        enabled: bool | None = None,
+        voice: str | None = None,
+        voice_rate: float = 1.0,
+        voice_volume: float = 1.0,
+        allow_paid_live_tests: bool | None = None,
+        env: Mapping[str, str] | None = None,
+        azure_config: Mapping[str, object] | None = None,
+        azure_speech_available: bool | None = None,
+    ):
+        values = os.environ if env is None else env
+        self._env = values
+        self._explicit_env = env is not None
+        self.enabled = (
+            str(values.get("AIDRAMA_TTS_ENABLED", "")) == "1"
+            if enabled is None
+            else bool(enabled)
+        )
+        self.voice = (
+            str(voice)
+            if voice is not None
+            else str(
+                values.get(
+                    "AIDRAMA_TTS_VOICE",
+                    "zh-CN-XiaoxiaoMultilingualNeural-V2-Female",
+                )
+            )
+        )
         self.voice_rate = float(voice_rate)
         self.voice_volume = float(voice_volume)
+        self.allow_paid_live_tests = (
+            str(values.get("AIDRAMA_ALLOW_PAID_LIVE_TESTS", "")) == "1"
+            if allow_paid_live_tests is None
+            else bool(allow_paid_live_tests)
+        )
+        self._azure_config = dict(azure_config) if azure_config is not None else None
+        self._azure_speech_available = azure_speech_available
 
     @property
     def status(self) -> CapabilityStatus:
+        return self._status_for_voice(self.voice)
+
+    def _status_for_voice(self, selected_voice: str) -> CapabilityStatus:
         try:
-            import app.services.voice  # noqa: F401
+            from app.services import voice as voice_runtime
         except Exception:
             return CapabilityStatus(CapabilityKind.TTS, self.provider_name, False, "MPT TTS seam unavailable", configured=False)
-        if not self.enabled:
-            return CapabilityStatus(CapabilityKind.TTS, self.provider_name, False, "TTS 未启用；设置 AIDRAMA_TTS_ENABLED=1 后才会调用语音服务", {"voice": self.voice, "deployment_region": "LOCAL", "endpoint_class": "MPT_LOCAL_TTS"}, configured=False)
-        return CapabilityStatus(CapabilityKind.TTS, self.provider_name, True, "configured", {"voice": self.voice, "model": "MPT voice seam", "deployment_region": "LOCAL", "endpoint_class": "MPT_LOCAL_TTS", "configured": True, "verification_state": "NOT_VERIFIED"}, configured=True)
+
+        voice_value = str(selected_voice or "").strip()
+        is_azure_v2 = bool(voice_runtime.is_azure_v2_voice(voice_value))
+        if is_azure_v2:
+            azure = self._azure_settings()
+            speech_key_present = bool(str(azure.get("speech_key") or "").strip())
+            speech_region = str(azure.get("speech_region") or "").strip()
+            runtime_ready = self._azure_runtime_available()
+            mainland = speech_region.casefold().startswith("china")
+            deployment_region = "MAINLAND_CHINA" if mainland else "INTERNATIONAL"
+            endpoint_class = (
+                "AZURE_SPEECH_CHINA" if mainland else "AZURE_SPEECH_PUBLIC"
+            )
+            configured = bool(
+                self.enabled
+                and voice_value
+                and speech_key_present
+                and speech_region
+                and runtime_ready
+            )
+            # Normal product readiness reflects whether Azure TTS can run.
+            # The acceptance-only paid authorization is enforced separately
+            # by ``synthesize_live_smoke`` and the offline live preflight.
+            available = configured
+            if not self.enabled:
+                reason = "TTS 未启用；设置 AIDRAMA_TTS_ENABLED=1 后才会调用语音服务"
+            elif not voice_value:
+                reason = "Azure TTS voice 未选择"
+            elif not speech_key_present:
+                reason = "Azure Speech credential unavailable"
+            elif not speech_region:
+                reason = "Azure Speech region unavailable"
+            elif not runtime_ready:
+                reason = "Azure Speech runtime unavailable"
+            else:
+                reason = "configured"
+            return CapabilityStatus(
+                CapabilityKind.TTS,
+                self.provider_name,
+                available,
+                reason,
+                {
+                    "voice": voice_value,
+                    "model": "AZURE_SPEECH_NEURAL_TTS",
+                    "upstream_provider_id": "AZURE_SPEECH",
+                    "deployment_region": deployment_region,
+                    "service_region": speech_region,
+                    "endpoint_class": endpoint_class,
+                    "endpoint_profile_id": (
+                        f"runtime:TTS:MPT_TTS:{endpoint_class}"
+                    ),
+                    "credential_reference": "AZURE_SPEECH_KEY",
+                    "credential_present": speech_key_present,
+                    "region_configured": bool(speech_region),
+                    "runtime_ready": runtime_ready,
+                    "live_authorized": self.allow_paid_live_tests,
+                    "configured": configured,
+                    "verification_state": "NOT_VERIFIED",
+                },
+                configured=configured,
+                verified=False,
+            )
+
+        # Legacy Edge voices are also remote Microsoft speech, not LOCAL.
+        # They do not use the Azure subscription key/region pair.
+        if voice_value and not any(
+            checker(voice_value)
+            for checker in (
+                voice_runtime.is_siliconflow_voice,
+                voice_runtime.is_gemini_voice,
+                voice_runtime.is_mimo_voice,
+                voice_runtime.is_minimax_voice,
+                voice_runtime.is_elevenlabs_voice,
+                voice_runtime.is_chatterbox_voice,
+                voice_runtime.is_no_voice,
+            )
+        ):
+            configured = bool(self.enabled and voice_value)
+            available = configured
+            reason = (
+                "configured"
+                if available
+                else "TTS 未启用或 voice 未选择"
+            )
+            return CapabilityStatus(
+                CapabilityKind.TTS,
+                self.provider_name,
+                available,
+                reason,
+                {
+                    "voice": voice_value,
+                    "model": "MICROSOFT_EDGE_TTS",
+                    "upstream_provider_id": "MICROSOFT_EDGE_TTS",
+                    "deployment_region": "INTERNATIONAL",
+                    "endpoint_class": "MICROSOFT_EDGE_TTS_PUBLIC",
+                    "endpoint_profile_id": "runtime:TTS:MPT_TTS:MICROSOFT_EDGE_TTS_PUBLIC",
+                    "live_authorized": self.allow_paid_live_tests,
+                    "configured": configured,
+                    "verification_state": "NOT_VERIFIED",
+                },
+                configured=configured,
+                verified=False,
+            )
+
+        # Other MPT voice backends retain their existing runtime seam, but the
+        # AIDrama readiness surface does not claim them ready without a
+        # provider-specific credential/runtime check.
+        return CapabilityStatus(
+            CapabilityKind.TTS,
+            self.provider_name,
+            False,
+            "selected TTS backend has no AIDrama readiness verifier",
+            {
+                "voice": voice_value,
+                "model": "MPT voice seam",
+                "deployment_region": "UNSPECIFIED",
+                "endpoint_class": "MPT_TTS_UNVERIFIED",
+                "endpoint_profile_id": "runtime:TTS:MPT_TTS:MPT_TTS_UNVERIFIED",
+                "live_authorized": self.allow_paid_live_tests,
+                "configured": False,
+                "verification_state": "NOT_VERIFIED",
+            },
+            configured=False,
+            verified=False,
+        )
+
+    def _azure_settings(self) -> Mapping[str, object]:
+        if self._azure_config is not None:
+            configured = self._azure_config
+        elif self._explicit_env:
+            # An injected environment is a deterministic boundary. Do not
+            # silently merge a host's persisted Azure credentials into an
+            # offline/test readiness check.
+            configured = {}
+        else:
+            try:
+                from app.config import config as mpt_config
+
+                configured = mpt_config.azure
+            except Exception:
+                configured = {}
+        return {
+            "speech_key": str(
+                self._env.get("AZURE_SPEECH_KEY", "")
+                or configured.get("speech_key", "")
+            ).strip(),
+            "speech_region": str(
+                self._env.get("AZURE_SPEECH_REGION", "")
+                or configured.get("speech_region", "")
+            ).strip(),
+        }
+
+    def _azure_runtime_available(self) -> bool:
+        if self._azure_speech_available is not None:
+            return bool(self._azure_speech_available)
+        try:
+            # Importing the SDK is local and side-effect free; it proves more
+            # than ``find_spec`` alone, which can report a broken install as
+            # ready while the actual runtime import would fail.
+            return importlib.import_module("azure.cognitiveservices.speech") is not None
+        except Exception:
+            return False
 
     def synthesize(self, text: str, *, voice: str, language: str = "zh-CN", sample_rate: int = 48000) -> TTSResult:
-        if not self.status.available:
-            raise CapabilityUnavailable(self.status.reason)
+        return self._synthesize(
+            text,
+            voice=voice,
+            language=language,
+            sample_rate=sample_rate,
+            max_attempts=None,
+        )
+
+    def synthesize_live_smoke(
+        self,
+        text: str,
+        *,
+        voice: str,
+        language: str = "zh-CN",
+        sample_rate: int = 48000,
+    ) -> TTSResult:
+        """Synthesize once with no automatic second paid submission."""
+
+        if not self.allow_paid_live_tests:
+            raise CapabilityUnavailable(
+                "TTS live smoke requires AIDRAMA_ALLOW_PAID_LIVE_TESTS=1"
+            )
+        return self._synthesize(
+            text,
+            voice=voice,
+            language=language,
+            sample_rate=sample_rate,
+            max_attempts=1,
+        )
+
+    def _synthesize(
+        self,
+        text: str,
+        *,
+        voice: str,
+        language: str,
+        sample_rate: int,
+        max_attempts: int | None,
+    ) -> TTSResult:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("TTS text 不能为空")
         selected_voice = str(voice or self.voice).strip()
         if not selected_voice:
             raise ValueError("voice 不能为空")
+        status = self._status_for_voice(selected_voice)
+        if not status.available:
+            raise CapabilityUnavailable(status.reason)
         from app.services.voice import tts
 
         descriptor, filename = tempfile.mkstemp(prefix="aidrama-tts-", suffix=".mp3")
         os.close(descriptor)
         path = Path(filename)
         try:
-            result = tts(text, selected_voice, self.voice_rate, str(path), self.voice_volume)
+            if max_attempts is None:
+                result = tts(
+                    text,
+                    selected_voice,
+                    self.voice_rate,
+                    str(path),
+                    self.voice_volume,
+                )
+            else:
+                result = tts(
+                    text,
+                    selected_voice,
+                    self.voice_rate,
+                    str(path),
+                    self.voice_volume,
+                    max_attempts=max_attempts,
+                )
             if not path.is_file() or path.stat().st_size <= 0:
                 raise CapabilityUnavailable("TTS provider returned no audio")
             duration = getattr(result, "audio_duration_seconds", None) if result is not None else None
@@ -581,7 +888,13 @@ class CapabilityRegistry:
     @staticmethod
     def _available(provider: object) -> bool:
         try:
-            return bool(provider.status.available)
+            status = provider.status
+            metadata = status.metadata
+            if not isinstance(metadata, Mapping):
+                return False
+            if metadata.get("requires_explicit_selection") is True:
+                return False
+            return status.available is True
         except (AttributeError, TypeError):
             return False
 
@@ -645,6 +958,10 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
             api_key=str(values.get("DASHSCOPE_API_KEY", "")).strip(),
             base_url=str(values.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")).strip(),
             model=str(values.get("WAN_VIDEO_MODEL", "wan2.7-i2v-2026-04-25")).strip(),
+            allow_paid_live_tests=str(
+                values.get("AIDRAMA_ALLOW_PAID_LIVE_TESTS", "")
+            )
+            == "1",
         )
     )
     wan = RuntimeVideoProvider(wan_adapter, provider_name="WAN_VIDEO", mode=CapabilityKind.VIDEO_GENERATIVE)
@@ -660,17 +977,95 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
     # Preserve the existing Wan capability as the default compatibility
     # provider; a configured Seedance profile is selected explicitly through
     # ProviderProfileService without hiding the preserved Wan boundary.
+    llm_snapshot = _llm_snapshot_for_registry_environment(values, explicit=env is not None)
+    tts_provider = (
+        MPTTTSProvider() if env is None else MPTTTSProvider(env=values)
+    )
     return CapabilityRegistry(
         [
-            MPTLLMProvider(),
+            MPTLLMProvider(config_snapshot=llm_snapshot, env=values),
             wan,
             seedance,
             stock,
             OpenAIImageProvider(env=values),
             GeminiVisionProvider(env=values),
-            MPTTTSProvider(),
+            tts_provider,
         ]
     )
+
+
+def _llm_snapshot_for_registry_environment(
+    values: Mapping[str, str],
+    *,
+    explicit: bool,
+) -> Mapping[str, object] | None:
+    """Freeze LLM settings when a caller supplies an explicit environment.
+
+    The existing MPT LLM seam stores its settings in ``config.toml`` rather
+    than in process environment variables.  Other capability adapters accept
+    an injected mapping for deterministic/offline checks, so silently reading
+    ambient LLM credentials in that mode would make a preflight claim depend
+    on the host.  Preserve non-secret config defaults, clear ambient secret
+    fields, and overlay conventional provider environment aliases.
+    """
+
+    if not explicit:
+        return None
+    from .ai import snapshot_llm_config
+    from app.models.llm_provider import get_llm_provider
+
+    snapshot = dict(snapshot_llm_config())
+    secret_markers = (
+        "api_key",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "password",
+        "secret",
+    )
+    for key in list(snapshot):
+        if any(marker in str(key).casefold() for marker in secret_markers):
+            snapshot[key] = ""
+
+    normalized = {str(key).casefold(): value for key, value in values.items()}
+    provider_id = str(
+        normalized.get("mpt_llm_provider")
+        or normalized.get("llm_provider")
+        or snapshot.get("llm_provider", "")
+    ).strip().lower()
+    if provider_id:
+        snapshot["llm_provider"] = provider_id
+    provider = get_llm_provider(provider_id) if provider_id else None
+
+    # Overlay exact config keys first (case-insensitive), then common
+    # environment aliases used by deployment scripts.
+    for key in list(snapshot):
+        value = normalized.get(str(key).casefold())
+        if value is not None:
+            snapshot[key] = value
+    if provider is not None:
+        provider_prefix = provider.provider_id.upper()
+        aliases = {
+            provider.config_key("api_key"): (
+                f"{provider_prefix}_API_KEY",
+                "MPT_LLM_API_KEY",
+            ),
+            provider.config_key("model_name"): (
+                f"{provider_prefix}_MODEL_NAME",
+                f"{provider_prefix}_MODEL",
+                "MPT_LLM_MODEL",
+            ),
+            provider.config_key("base_url"): (
+                f"{provider_prefix}_BASE_URL",
+                "MPT_LLM_BASE_URL",
+            ),
+        }
+        for config_key, candidates in aliases.items():
+            for candidate in candidates:
+                if candidate.casefold() in normalized:
+                    snapshot[config_key] = normalized[candidate.casefold()]
+                    break
+    return snapshot
 
 
 __all__ = [

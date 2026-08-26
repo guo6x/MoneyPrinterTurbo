@@ -21,7 +21,7 @@ from .ai_capabilities import (
     default_capability_registry,
 )
 from .production import ProductionService, ProductionServiceError
-from .production_orchestrator import ProductionOrchestrator, ProductionOrchestratorError
+from .production_orchestrator import ProductionOrchestrator
 from .production_execution import ProductionExecutionService, ProductionExecutionServiceError
 from .provider_profiles import ProviderProfileError, ProviderProfileService
 from .runtime_foundation import (
@@ -39,6 +39,10 @@ def _now() -> str:
 
 class ProductionQueueError(RuntimeError):
     pass
+
+
+_SEEDANCE_PROVIDER_IDS = frozenset({"seedance", "seedance_video"})
+_SEEDANCE_SUPPORTED_DURATIONS = tuple(float(item) for item in range(4, 31))
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,8 +179,12 @@ class ProductionQueueService:
             snapshot = self.execution_service.create_input_snapshot(project_id, job.id)
         except (ProductionServiceError, ProviderProfileError, CapabilityUnavailable) as exc:
             raise ProductionQueueError(str(exc)) from exc
-        minimum, maximum = self._duration_limits(profile.profile)
-        allowed_durations = self._allowed_durations(profile.profile)
+        minimum, maximum = self._duration_limits(
+            profile.profile, provider_id=profile.provider_id
+        )
+        allowed_durations = self._allowed_durations(
+            profile.profile, provider_id=profile.provider_id
+        )
         request_counts: dict[str, int] = {}
         shot_revision = self.repository.get_shot_revision(job.shot_plan_revision_id)
         if shot_revision is None:
@@ -371,8 +379,12 @@ class ProductionQueueService:
             if shot_plan is None:
                 raise ProductionQueueError("ProductionJob 缺少 Shot Plan revision")
             shot_by_id = {shot.id: shot for shot in shot_plan["content"].shots}
-            minimum, maximum = self._duration_limits(provider_profile.profile)
-            allowed_durations = self._allowed_durations(provider_profile.profile)
+            minimum, maximum = self._duration_limits(
+                provider_profile.profile, provider_id=provider_profile.provider_id
+            )
+            allowed_durations = self._allowed_durations(
+                provider_profile.profile, provider_id=provider_profile.provider_id
+            )
             plan_ids: dict[str, str] = {}
             for production_shot in self.repository.list_production_shots(job.id):
                 shot = shot_by_id.get(production_shot.shot_id)
@@ -554,7 +566,17 @@ class ProductionQueueService:
         return ProductionOrchestrator(production_service=self.production_service).get_job_progress(project_id, production_job_id)
 
     @staticmethod
-    def _duration_limits(profile: Mapping[str, object]) -> tuple[float, float]:
+    def _duration_limits(
+        profile: Mapping[str, object],
+        *,
+        provider_id: str | None = None,
+    ) -> tuple[float, float]:
+        provider_value = str(
+            provider_id or profile.get("provider_id") or ""
+        ).strip().casefold()
+        if provider_value in _SEEDANCE_PROVIDER_IDS:
+            ProductionQueueService._validate_seedance_duration_profile(profile)
+            return 4.0, 30.0
         raw = profile.get("supported_durations")
         values: list[float] = []
         if isinstance(raw, (list, tuple)):
@@ -575,7 +597,17 @@ class ProductionQueueService:
         return minimum, maximum
 
     @staticmethod
-    def _allowed_durations(profile: Mapping[str, object]) -> tuple[float, ...]:
+    def _allowed_durations(
+        profile: Mapping[str, object],
+        *,
+        provider_id: str | None = None,
+    ) -> tuple[float, ...]:
+        provider_value = str(
+            provider_id or profile.get("provider_id") or ""
+        ).strip().casefold()
+        if provider_value in _SEEDANCE_PROVIDER_IDS:
+            ProductionQueueService._validate_seedance_duration_profile(profile)
+            return _SEEDANCE_SUPPORTED_DURATIONS
         raw = profile.get("supported_durations")
         if not isinstance(raw, (list, tuple)):
             return ()
@@ -589,6 +621,27 @@ class ProductionQueueService:
                 raise ProductionQueueError("Provider supported_durations 无效")
             values.append(value)
         return tuple(sorted(set(values)))
+
+    @staticmethod
+    def _validate_seedance_duration_profile(
+        profile: Mapping[str, object],
+    ) -> None:
+        """Require the official Seedance 2.5 profile without fallback."""
+
+        if profile.get("requires_explicit_selection") is not True:
+            raise ProductionQueueError(
+                "Seedance 必须通过显式 Provider 选择，且不得使用通用 duration fallback"
+            )
+        if profile.get("minimum_duration_seconds") != 4:
+            raise ProductionQueueError("Seedance duration profile 必须从 4 秒开始")
+        if profile.get("maximum_duration_seconds") != 30:
+            raise ProductionQueueError("Seedance duration profile 必须支持到 30 秒")
+        if profile.get("supported_durations") != [
+            int(item) for item in _SEEDANCE_SUPPORTED_DURATIONS
+        ]:
+            raise ProductionQueueError(
+                "Seedance supported_durations 必须是 4–30 秒的整数集合"
+            )
 
     @staticmethod
     def _shot_references(reference_versions: Mapping[str, str], brief) -> dict[str, str]:

@@ -23,6 +23,7 @@ from .security import sanitize_error, sanitize_persistent_metadata
 
 
 ValidatedValue = TypeVar("ValidatedValue")
+LLM_LIVE_SMOKE_PROMPT = "Reply with exactly: OK"
 
 
 def _now() -> str:
@@ -100,6 +101,61 @@ class LLMInvocationGateway:
             f"{profile.provider_id} / {profile.model_id} · "
             f"{profile.deployment_region.value} / {profile.endpoint_class}",
         )
+
+    def run_live_smoke(
+        self,
+        project_id: str,
+        *,
+        correlation_id: str | None = None,
+        disclosure: ProviderDisclosure | Mapping[str, object] | None = None,
+    ) -> str:
+        """Issue the exact acceptance prompt once, with no repair attempt."""
+
+        context = self._freeze_context(
+            project_id,
+            input_source_ids=(),
+            correlation_id=correlation_id,
+            disclosure=disclosure,
+        )
+
+        # ``live_authorized`` is intentionally an explicit provider-status
+        # signal.  Do this check after exact profile freezing but before the
+        # invocation ledger or provider method, guaranteeing zero calls when a
+        # remote smoke has not been opt-ed into.  Only LOCAL providers may omit
+        # the field; unknown or non-local endpoints fail closed.
+        try:
+            status_metadata = dict(getattr(context.provider.status, "metadata", {}) or {})
+        except Exception as exc:
+            raise LLMInvocationError(
+                "LLM live smoke readiness check failed;不会调用 Provider"
+            ) from exc
+        deployment_region = str(
+            status_metadata.get("deployment_region") or "UNSPECIFIED"
+        ).upper()
+        if deployment_region != "LOCAL" and status_metadata.get("live_authorized") is not True:
+            raise LLMInvocationError(
+                "LLM live smoke requires AIDRAMA_ALLOW_PAID_LIVE_TESTS=1"
+            )
+
+        def validate(raw: str) -> str:
+            value = raw.strip()
+            if value != "OK":
+                raise ValueError("LLM smoke response must be exactly OK")
+            return value
+
+        try:
+            return self._invoke_validated(
+                project_id,
+                context,
+                LLM_LIVE_SMOKE_PROMPT,
+                operation="LLM_LIVE_SMOKE",
+                attempt_kind="PRIMARY",
+                validator=validate,
+            )
+        except _OutputInvalid as exc:
+            raise LLMInvocationError(
+                "LLM live smoke response was not exactly OK"
+            ) from exc.cause
 
     def generate_json_text(
         self,
@@ -397,4 +453,8 @@ class LLMInvocationGateway:
         )
 
 
-__all__ = ["LLMInvocationError", "LLMInvocationGateway"]
+__all__ = [
+    "LLM_LIVE_SMOKE_PROMPT",
+    "LLMInvocationError",
+    "LLMInvocationGateway",
+]

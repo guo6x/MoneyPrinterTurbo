@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import base64
+import json
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from aidrama_studio.domain import (
-    ProductionArtifact,
     ProductionAttempt,
     ProductionAttemptStatus,
     ProductionExecutionStatus,
@@ -15,18 +16,28 @@ from aidrama_studio.domain import (
     ProductionReview,
     ProductionReviewDecision,
     ReferenceAssetType,
+    ReferenceBindingType,
     ReferenceImageCandidateStatus,
 )
 from aidrama_studio.services import (
+    CapabilityKind,
+    CapabilityStatus,
     FinalAssemblyService,
     FinalAssemblyServiceError,
+    ImageCandidate,
+    ImageGenerationProvider,
+    ImageRuntimeError,
+    ImageRuntimeService,
     ProductionExecutionService,
     ProductionService,
     ProjectService,
     ReferenceAssetService,
     ReferenceAssetServiceError,
 )
-from aidrama_studio.storage.database import DatabasePaths
+from aidrama_studio.services.providers.openai_image import (
+    OpenAIImageProvider,
+    OpenAIImageProviderConfig,
+)
 from aidrama_studio.storage.repositories import ProjectRepository
 from test.aidrama_studio.image_fixtures import png_bytes
 from test.aidrama_studio.test_final_assembly import _shots, _source
@@ -54,6 +65,109 @@ def _candidate(service, project, asset, *, color="red", parent=None):
         request_parameters={"quality": "preview"},
         parent_candidate_id=parent,
     )
+
+
+class _OpenAIImageResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self._payload).encode("utf-8")
+
+
+class _OfflineImageProvider(ImageGenerationProvider):
+    provider_name = "OFFLINE_TEST_IMAGE"
+
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.calls: list[dict[str, object]] = []
+
+    @property
+    def status(self) -> CapabilityStatus:
+        return CapabilityStatus(
+            CapabilityKind.IMAGE,
+            self.provider_name,
+            True,
+            "configured",
+            {
+                "model": "offline-image-v1",
+                "configured": True,
+                "deployment_region": "LOCAL",
+                "endpoint_class": "OFFLINE_TEST",
+                "endpoint_profile_id": "runtime:IMAGE:OFFLINE_TEST_IMAGE:OFFLINE_TEST",
+                "verification_state": "VERIFIED",
+            },
+            configured=True,
+            verified=True,
+        )
+
+    def generate_candidate(self, prompt, *, project_id, metadata=None):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "project_id": project_id,
+                "metadata": dict(metadata or {}),
+            }
+        )
+        return ImageCandidate(
+            project_id=project_id,
+            provider=self.provider_name,
+            prompt=prompt,
+            content=self.content,
+            mime_type="image/png",
+            metadata={
+                **dict(metadata or {}),
+                "request_parameters": {"n": 1},
+            },
+        )
+
+
+def test_gpt_image_request_body_matches_documented_contract(monkeypatch):
+    captured: list[object] = []
+    image = png_bytes()
+
+    def fake_urlopen(request, *, timeout):
+        captured.append((request, timeout))
+        return _OpenAIImageResponse(
+            {"data": [{"b64_json": base64.b64encode(image).decode("ascii")}]}
+        )
+
+    monkeypatch.setattr(
+        "aidrama_studio.services.providers.openai_image.urllib.request.urlopen",
+        fake_urlopen,
+    )
+    provider = OpenAIImageProvider(
+        OpenAIImageProviderConfig(
+            api_key="unit-test-credential",
+            model="gpt-image-2",
+            timeout_seconds=17,
+            allow_paid_live_tests=True,
+        )
+    )
+
+    candidate = provider.generate_candidate(
+        "一位身穿蓝色风衣的侦探",
+        project_id="project-1",
+    )
+
+    assert len(captured) == 1
+    request, timeout = captured[0]
+    assert request.full_url == "https://api.openai.com/v1/images/generations"
+    assert timeout == 17
+    assert json.loads(request.data.decode("utf-8")) == {
+        "model": "gpt-image-2",
+        "prompt": "一位身穿蓝色风衣的侦探",
+        "n": 1,
+    }
+    assert candidate.content == image
+    assert candidate.metadata["model"] == "gpt-image-2"
+    assert candidate.metadata["request_parameters"] == {"n": 1}
 
 
 def test_image_candidate_is_durable_noncanonical_and_requires_separate_lock(context):
@@ -117,6 +231,149 @@ def test_tampered_candidate_cannot_partially_promote(context):
         service.promote_image_candidate(project.id, candidate.id)
     assert service.list_versions(project.id, asset.id) == []
     assert service.get_image_candidate(project.id, candidate.id).status is ReferenceImageCandidateStatus.DRAFT
+
+
+def test_generation_records_durable_draft_but_never_promotes_or_locks(context):
+    repository, project = context
+    references = ReferenceAssetService(repository)
+    asset = references.ensure_workspace_asset(
+        project.id,
+        ReferenceBindingType.CHARACTER,
+        "char_001",
+    )
+    provider = _OfflineImageProvider(png_bytes())
+    runtime = ImageRuntimeService(repository, provider=provider)
+
+    candidate = runtime.generate_and_record_candidate(
+        project.id,
+        asset.id,
+        "Hero portrait",
+        source_story_revision_id="story_001",
+        filename="hero-generated.png",
+        reference_assets=references,
+    )
+
+    assert len(provider.calls) == 1
+    assert candidate.status is ReferenceImageCandidateStatus.DRAFT
+    assert candidate.provider_id == provider.provider_name
+    assert candidate.model_id == "offline-image-v1"
+    assert references.resolve_image_candidate_path(
+        project.id, candidate.id
+    ).read_bytes() == png_bytes()
+    assert references.list_versions(project.id, asset.id) == []
+    assert references.get_current_version(project.id, asset.id) is None
+
+    reloaded = ReferenceAssetService(ProjectRepository(repository.paths))
+    assert reloaded.find_workspace_asset(
+        project.id,
+        ReferenceBindingType.CHARACTER,
+        "char_001",
+    ).id == asset.id
+    assert reloaded.list_image_candidates(project.id, asset.id) == [candidate]
+
+    version = reloaded.promote_image_candidate(project.id, candidate.id)
+    assert reloaded.get_current_version(project.id, asset.id) is None
+    reloaded.bind_version(
+        project.id,
+        version.id,
+        ReferenceBindingType.CHARACTER,
+        "char_001",
+    )
+    assert reloaded.get_current_version(project.id, asset.id) is None
+    reloaded.activate_version(project.id, asset.id, version.id)
+    assert reloaded.get_current_version(project.id, asset.id).id == version.id
+
+
+def test_physical_image_validation_happens_before_candidate_recording(context):
+    repository, project = context
+    references = ReferenceAssetService(repository)
+    asset = references.ensure_workspace_asset(
+        project.id,
+        ReferenceBindingType.CHARACTER,
+        "char_001",
+    )
+    provider = _OfflineImageProvider(b"not-a-physical-image")
+    runtime = ImageRuntimeService(repository, provider=provider)
+
+    with pytest.raises(ImageRuntimeError, match="物理图片验证"):
+        runtime.generate_and_record_candidate(
+            project.id,
+            asset.id,
+            "Hero portrait",
+            source_story_revision_id="story_001",
+            filename="hero-generated.png",
+            reference_assets=references,
+        )
+
+    assert len(provider.calls) == 1
+    assert references.list_image_candidates(project.id, asset.id) == []
+    assert references.list_versions(project.id, asset.id) == []
+    assert references.get_current_version(project.id, asset.id) is None
+
+
+def test_image_candidate_rejects_forged_provider_disclosure(context):
+    repository, project = context
+    references = ReferenceAssetService(repository)
+    asset = references.ensure_workspace_asset(
+        project.id,
+        ReferenceBindingType.CHARACTER,
+        "char_001",
+    )
+
+    class ForgingProvider(_OfflineImageProvider):
+        def generate_candidate(self, prompt, *, project_id, metadata=None):
+            candidate = super().generate_candidate(
+                prompt, project_id=project_id, metadata=metadata
+            )
+            forged = dict(candidate.metadata)
+            disclosure = dict(forged["provider_disclosure"])
+            disclosure["model_id"] = "forged-model"
+            forged["provider_disclosure"] = disclosure
+            return candidate.__class__(
+                project_id=candidate.project_id,
+                provider=candidate.provider,
+                prompt=candidate.prompt,
+                content=candidate.content,
+                mime_type=candidate.mime_type,
+                metadata=forged,
+            )
+
+    runtime = ImageRuntimeService(
+        repository,
+        provider=ForgingProvider(png_bytes()),
+    )
+    with pytest.raises(ImageRuntimeError, match="provenance"):
+        runtime.generate_and_record_candidate(
+            project.id,
+            asset.id,
+            "Hero portrait",
+            source_story_revision_id="story_001",
+            filename="hero-generated.png",
+            reference_assets=references,
+        )
+    assert references.list_image_candidates(project.id, asset.id) == []
+
+
+def test_image_candidate_rejects_secret_bearing_request_parameters(context):
+    repository, project = context
+    references = ReferenceAssetService(repository)
+    asset = references.create_asset(project.id, ReferenceAssetType.CHARACTER_REFERENCE)
+    with pytest.raises(ReferenceAssetServiceError, match="secret"):
+        references.record_image_candidate(
+            project.id,
+            asset.id,
+            source_story_revision_id="story_001",
+            provider_id="MOCK_IMAGE",
+            model_id="deterministic-image-v1",
+            endpoint_profile_id="runtime:IMAGE:MOCK_IMAGE:LOCAL",
+            deployment_region="LOCAL",
+            prompt="Hero portrait",
+            content=png_bytes(),
+            filename="hero-secret.png",
+            mime_type="image/png",
+            request_parameters={"api_key": "secret-value"},
+        )
+    assert references.list_image_candidates(project.id, asset.id) == []
 
 
 def test_explicit_shot_source_selection_is_frozen_and_append_only(context):

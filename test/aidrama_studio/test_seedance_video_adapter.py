@@ -7,13 +7,19 @@ import pytest
 
 from aidrama_studio.domain import ProductionInputSnapshot
 from aidrama_studio.services import (
+    CapabilityKind,
     GenerationBriefCompiler,
     ProductionExecutionService,
+    ProviderProfileService,
     ReferenceAssetService,
     RuntimePlanService,
+    default_capability_registry,
 )
 from aidrama_studio.services.adapters.seedance_video import (
     DEFAULT_SEEDANCE_MODEL,
+    SEEDANCE_MAX_DURATION_SECONDS,
+    SEEDANCE_MIN_DURATION_SECONDS,
+    SEEDANCE_SUPPORTED_DURATIONS,
     SEEDANCE_TASK_PATH,
     SeedanceAdapterError,
     SeedanceProductionAdapter,
@@ -63,7 +69,12 @@ class FakeDownloader:
         return StreamingArtifactSource(lambda sink: sink.write(self.payload), 1024)
 
 
-def _frozen_seedance_context(tmp_path, *, provider_parameters=None):
+def _frozen_seedance_context(
+    tmp_path,
+    *,
+    provider_parameters=None,
+    provider_generation_duration=5,
+):
     repository, project = _execution_context.__wrapped__(tmp_path)
     job = _ready_job(repository, project)
     full = ProductionExecutionService(repository).create_input_snapshot(project.id, job.id)
@@ -78,7 +89,7 @@ def _frozen_seedance_context(tmp_path, *, provider_parameters=None):
         provider_capability="VIDEO_GENERATIVE",
         provider_id="SEEDANCE",
         model_id=DEFAULT_SEEDANCE_MODEL,
-        provider_generation_duration=5,
+        provider_generation_duration=provider_generation_duration,
         target_creative_duration=2,
         audio_strategy="NATIVE_PROVIDER_AUDIO",
         provider_parameters={
@@ -170,6 +181,73 @@ def test_seedance_official_contract_uses_typed_content_and_frozen_reference_orde
     assert "data:image" not in repr(submission.metadata)
     first_data_uri = payload["content"][1]["image_url"]["url"]
     assert base64.b64decode(first_data_uri.split(",", 1)[1])
+
+
+def test_seedance_profile_uses_official_4_to_30_planner_and_explicit_selection(
+    tmp_path,
+):
+    registry = default_capability_registry(
+        env={
+            "ARK_API_KEY": "test-key",
+            "AIDRAMA_ALLOW_PAID_LIVE_TESTS": "1",
+        }
+    )
+    seedance = next(
+        provider
+        for provider in registry.list(CapabilityKind.VIDEO_GENERATIVE)
+        if provider.provider_name == "SEEDANCE"
+    )
+    assert seedance.status.available is True
+    assert seedance.status.metadata["minimum_duration_seconds"] == 4
+    assert seedance.status.metadata["maximum_duration_seconds"] == 30
+    assert seedance.status.metadata["supported_durations"] == list(range(4, 31))
+    assert seedance.status.metadata["requires_explicit_selection"] is True
+
+    # Registry order/availability must not promote the opt-in paid Seedance
+    # runtime when Wan is unavailable.
+    assert registry.get(CapabilityKind.VIDEO_GENERATIVE).provider_name == "WAN_VIDEO"
+
+    repository, project = _execution_context.__wrapped__(tmp_path)
+    profiles = ProviderProfileService(repository, registry=registry)
+    implicit = profiles.resolve(project.id, CapabilityKind.VIDEO_GENERATIVE)
+    assert implicit.profile is None or implicit.profile.provider_id != "SEEDANCE"
+    explicit = profiles.resolve(
+        project.id,
+        CapabilityKind.VIDEO_GENERATIVE,
+        provider_id="SEEDANCE",
+        require_available=True,
+    )
+    assert explicit.profile is not None
+    assert explicit.profile.provider_id == "SEEDANCE"
+    assert explicit.available is True
+
+    allowed = explicit.profile.profile["supported_durations"]
+    assert profiles.plan_duration(3, allowed_durations=allowed).chunks == (4.0,)
+    assert profiles.plan_duration(20, allowed_durations=allowed).chunks == (20.0,)
+    assert profiles.plan_duration(31, allowed_durations=allowed).chunks == (
+        30.0,
+        4.0,
+    )
+    assert SEEDANCE_MIN_DURATION_SECONDS == 4
+    assert SEEDANCE_MAX_DURATION_SECONDS == 30
+    assert SEEDANCE_SUPPORTED_DURATIONS == tuple(range(4, 31))
+
+
+@pytest.mark.parametrize("duration", [3, 31])
+def test_seedance_rejects_out_of_contract_duration_before_post(tmp_path, duration):
+    repository, _project, _job, snapshot, plan, brief, _bindings = (
+        _frozen_seedance_context(
+            tmp_path,
+            provider_generation_duration=duration,
+        )
+    )
+    client = Client()
+    adapter = _adapter(repository, plan, brief, client=client)
+
+    assert adapter.validate(snapshot) is False
+    with pytest.raises(SeedanceAdapterError, match="4–30"):
+        adapter.submit(snapshot)
+    assert client.posts == []
 
 
 def test_seedance_frames_replaces_duration_and_unknown_parameters_do_not_leak(tmp_path):

@@ -46,6 +46,11 @@ from .production_adapter import (
 DEFAULT_SEEDANCE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 DEFAULT_SEEDANCE_MODEL = "doubao-seedance-2-5-260628"
 SEEDANCE_TASK_PATH = "/contents/generations/tasks"
+SEEDANCE_MIN_DURATION_SECONDS = 4
+SEEDANCE_MAX_DURATION_SECONDS = 30
+SEEDANCE_SUPPORTED_DURATIONS = tuple(
+    range(SEEDANCE_MIN_DURATION_SECONDS, SEEDANCE_MAX_DURATION_SECONDS + 1)
+)
 DEFAULT_SEEDANCE_RESULT_HOSTS = (
     "ark-content-generation-v2-cn-beijing.tos-cn-beijing.volces.com",
 )
@@ -227,7 +232,17 @@ class SeedanceInputMapper:
             payload["frames"] = frame_count
         else:
             duration = float(runtime_plan.provider_generation_duration)
-            payload["duration"] = int(duration) if duration.is_integer() else duration
+            if (
+                not math.isfinite(duration)
+                or not duration.is_integer()
+                or not SEEDANCE_MIN_DURATION_SECONDS
+                <= duration
+                <= SEEDANCE_MAX_DURATION_SECONDS
+            ):
+                raise SeedanceAdapterError(
+                    "Seedance 2.5 duration 必须是 4–30 秒的整数"
+                )
+            payload["duration"] = int(duration)
         for key in (
             "omni_reference_task_type",
             "seed",
@@ -560,8 +575,21 @@ class SeedanceProductionAdapter(ProductionRuntimeAdapter):
                 "endpoint_class": "ARK_CN_BEIJING",
                 "endpoint_profile_id": "runtime:VIDEO_GENERATIVE:SEEDANCE:ARK_CN_BEIJING",
                 "credential_reference": "ARK_API_KEY",
+                "credential_present": bool(self.config.api_key),
                 "verification_state": "NOT_VERIFIED",
                 "supports_cancel": False,
+                # Seedance is an opt-in paid runtime. It remains visible in
+                # inventory, but generic registry/preset ordering must never
+                # make it the implicit VIDEO_GENERATIVE provider.
+                "requires_explicit_selection": True,
+                # The official Seedance 2.5 contract accepts integer output
+                # durations from 4 through 30 seconds (or -1 for provider
+                # auto-selection, which AIDrama's positive frozen plan does
+                # not use). Supplying the complete discrete range keeps the
+                # generic planner from falling back to legacy 2–15 limits.
+                "minimum_duration_seconds": SEEDANCE_MIN_DURATION_SECONDS,
+                "maximum_duration_seconds": SEEDANCE_MAX_DURATION_SECONDS,
+                "supported_durations": list(SEEDANCE_SUPPORTED_DURATIONS),
             },
             configured=bool(self.config.api_key),
             verified=False,
@@ -738,6 +766,9 @@ __all__ = [
     "DEFAULT_SEEDANCE_BASE_URL",
     "DEFAULT_SEEDANCE_MODEL",
     "DEFAULT_SEEDANCE_RESULT_HOSTS",
+    "SEEDANCE_MIN_DURATION_SECONDS",
+    "SEEDANCE_MAX_DURATION_SECONDS",
+    "SEEDANCE_SUPPORTED_DURATIONS",
     "SEEDANCE_TASK_PATH",
     "SeedanceAdapterError",
     "SeedanceInputMapper",

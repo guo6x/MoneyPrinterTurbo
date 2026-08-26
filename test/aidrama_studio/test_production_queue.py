@@ -48,6 +48,46 @@ def _authorization(queue, project_id, job_id):
     }
 
 
+def test_seedance_queue_accepts_only_the_official_4_to_30_duration_profile():
+    profile = {
+        "requires_explicit_selection": True,
+        "minimum_duration_seconds": 4,
+        "maximum_duration_seconds": 30,
+        "supported_durations": list(range(4, 31)),
+    }
+
+    assert ProductionQueueService._duration_limits(
+        profile, provider_id="SEEDANCE"
+    ) == (4.0, 30.0)
+    assert ProductionQueueService._allowed_durations(
+        profile, provider_id="SEEDANCE"
+    ) == tuple(float(value) for value in range(4, 31))
+
+
+@pytest.mark.parametrize(
+    "tampered",
+    [
+        {"requires_explicit_selection": False},
+        {"minimum_duration_seconds": 2},
+        {"maximum_duration_seconds": 15},
+        {"supported_durations": list(range(2, 16))},
+    ],
+)
+def test_seedance_queue_rejects_missing_or_tampered_duration_metadata(tampered):
+    profile = {
+        "requires_explicit_selection": True,
+        "minimum_duration_seconds": 4,
+        "maximum_duration_seconds": 30,
+        "supported_durations": list(range(4, 31)),
+    }
+    profile.update(tampered)
+
+    with pytest.raises(ProductionQueueError, match="Seedance"):
+        ProductionQueueService._duration_limits(profile, provider_id="SEEDANCE")
+    with pytest.raises(ProductionQueueError, match="Seedance"):
+        ProductionQueueService._allowed_durations(profile, provider_id="SEEDANCE")
+
+
 def test_ui_queue_is_durable_idempotent_and_nonblocking(tmp_path):
     repository, project = _execution_context.__wrapped__(tmp_path)
     job = _ready_job(repository, project)
@@ -504,7 +544,7 @@ def test_submission_uncertain_without_identity_stays_manual_and_calls_no_adapter
             AssertionError("manual reconciliation must not resolve an adapter")
         ),
     )
-    wrapper = runner.enqueue(project.id, execution.id)
+    runner.enqueue(project.id, execution.id)
     completed = runner.run_once(project.id)
 
     assert completed[0].state == "RECONCILIATION_REQUIRED"
@@ -565,7 +605,7 @@ def test_crash_after_submitting_state_never_reposts_paid_request(tmp_path):
             AssertionError("manual reconciliation must not resolve an adapter")
         ),
     )
-    wrapper = runner.enqueue(project.id, execution.id)
+    runner.enqueue(project.id, execution.id)
     completed = runner.run_once(project.id)
 
     assert completed[0].state == "RECONCILIATION_REQUIRED"

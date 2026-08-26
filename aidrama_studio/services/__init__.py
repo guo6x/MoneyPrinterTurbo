@@ -21,7 +21,7 @@ from .director import DirectorService, DirectorServiceError
 from .producer import ProducerService, ProducerServiceError
 from .runtime_foundation import AIInvocationService, GenerationBriefCompiler, GenerationBriefService, OutputProfileService, RuntimeFoundationError, RuntimePlanService
 from .creative_control import CreativeControlError, CreativeLockService
-from .llm_runtime import LLMInvocationError, LLMInvocationGateway
+from .llm_runtime import LLM_LIVE_SMOKE_PROMPT, LLMInvocationError, LLMInvocationGateway
 from .image_runtime import ImageRuntimeError, ImageRuntimeService
 from .creative_intake import CreativeIntakeError, CreativeIntakeService, DocumentIngestionService, IntakeAnalyzer, SourcePackService
 from .reference_profiles import ReferenceProfileService, ReferenceProfileServiceError
@@ -43,7 +43,7 @@ from .project_archive import ProjectArchiveError, ProjectArchiveService
 from .current_state import CurrentProductionState, CurrentProductionStateService
 from .vision_qc import VisionFrameSamplingService, VisionQCResult, VisionQCService
 from .diagnostics import DiagnosticsError, DiagnosticsService, DiskSpaceService
-from .tts_runtime import TTSRuntimeError, TTSRuntimeService
+from .tts_runtime import TTS_LIVE_SMOKE_TEXT, TTSRuntimeError, TTSRuntimeService
 from .production_queue import ProductionAuthorizationPreview, ProductionQueueError, ProductionQueueService
 from .production_runtime_resolver import ProductionRuntimeResolutionError, ProductionRuntimeResolver
 from .security import (
@@ -52,6 +52,7 @@ from .security import (
     sanitize_persistent_metadata,
 )
 from .provider_readiness import ProviderReadinessService, CapabilityReadiness, ReadinessState
+from .provider_preflight import OfflineLivePreflightService, OfflineProfilePreflight
 from .ai_capabilities import (
     CapabilityKind,
     CapabilityStatus,
@@ -133,7 +134,7 @@ __all__ = [
     "CurrentProductionState", "CurrentProductionStateService",
     "OutputProfileService", "GenerationBriefCompiler", "GenerationBriefService", "RuntimePlanService", "AIInvocationService", "RuntimeFoundationError",
     "CreativeControlError", "CreativeLockService",
-    "LLMInvocationGateway", "LLMInvocationError",
+    "LLM_LIVE_SMOKE_PROMPT", "LLMInvocationGateway", "LLMInvocationError",
     "ImageRuntimeService", "ImageRuntimeError",
     "CreativeIntakeService", "CreativeIntakeError", "SourcePackService", "DocumentIngestionService", "IntakeAnalyzer",
     "ReferenceProfileService", "ReferenceProfileServiceError",
@@ -147,11 +148,12 @@ __all__ = [
     "ProjectArchiveService", "ProjectArchiveError",
     "VisionFrameSamplingService", "VisionQCResult", "VisionQCService",
     "DiagnosticsError", "DiagnosticsService", "DiskSpaceService",
-    "TTSRuntimeError", "TTSRuntimeService",
+    "TTS_LIVE_SMOKE_TEXT", "TTSRuntimeError", "TTSRuntimeService",
     "ProductionAuthorizationPreview", "ProductionQueueError", "ProductionQueueService",
     "ProductionRuntimeResolutionError", "ProductionRuntimeResolver",
     "configure_runtime_logging", "sanitize_error", "sanitize_persistent_metadata",
     "ProviderReadinessService", "CapabilityReadiness", "ReadinessState",
+    "OfflineLivePreflightService", "OfflineProfilePreflight",
     "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",
     "LLMProvider", "ImageGenerationProvider", "VideoGenerationProvider", "VisionAnalysisProvider", "TTSProvider",
     "ImageCandidate", "VisionAnalysis", "VisionAnalysisRequest", "VisionMediaInput", "TTSResult", "MPTLLMProvider", "RuntimeVideoProvider",

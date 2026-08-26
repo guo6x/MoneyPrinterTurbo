@@ -450,6 +450,7 @@ class ProviderProfileService:
                 for item in inventory
                 if item.deployment_region in allowed_regions
                 and self._configured(item)
+                and not self._requires_explicit_selection(item)
             ]
             profile = configured_candidates[0] if configured_candidates else None
             return self._resolved(
@@ -461,7 +462,15 @@ class ProviderProfileService:
         # Compatibility only for installations that have never saved a V1
         # model scheme. Once a scope policy exists, failure is fail-closed and
         # never falls through to another provider or region.
-        legacy = next((item for item in inventory if self._available(item)), None)
+        legacy = next(
+            (
+                item
+                for item in inventory
+                if self._available(item)
+                and not self._requires_explicit_selection(item)
+            ),
+            None,
+        )
         return self._resolved(
             value, "LEGACY", "LEGACY_DEFAULT", legacy,
             require_available=require_available,
@@ -730,7 +739,11 @@ class ProviderProfileService:
         if status is None:
             return False
         configured = getattr(status, "configured", None)
-        return bool(status.available if configured is None else configured)
+        return (
+            status.available is True
+            if configured is None
+            else configured is True
+        )
 
     def _available(self, profile: CapabilityProfile) -> bool:
         if not profile.enabled:
@@ -738,13 +751,27 @@ class ProviderProfileService:
         if self.registry is None:
             return True
         status = self._runtime_status(profile)
-        return bool(status and status.available)
+        return bool(status and status.available is True)
 
     def _verified(self, profile: CapabilityProfile) -> bool:
         if profile.verification_state is ProviderVerificationState.VERIFIED:
             return True
         status = self._runtime_status(profile)
-        return bool(status and getattr(status, "verified", False))
+        return bool(status and getattr(status, "verified", False) is True)
+
+    @staticmethod
+    def _requires_explicit_selection(profile: CapabilityProfile) -> bool:
+        # Seedance is an opt-in paid runtime by provider identity, not merely
+        # by a mutable metadata marker.  A project-scoped profile copied from
+        # an older installation (or tampered to omit the marker) must never
+        # become the implicit MAINLAND/legacy selection or inherit generic
+        # video limits.  Keep the metadata check for any future explicitly
+        # gated provider as well.
+        provider_id = str(profile.provider_id or "").strip().casefold()
+        if provider_id in {"seedance", "seedance_video"}:
+            return True
+        metadata = profile.profile if isinstance(profile.profile, Mapping) else {}
+        return metadata.get("requires_explicit_selection") is True
 
     def _runtime_reason(self, profile: CapabilityProfile) -> str:
         status = self._runtime_status(profile)

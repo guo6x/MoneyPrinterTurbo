@@ -10,6 +10,8 @@ from aidrama_studio.domain import (
 )
 from aidrama_studio.pages._shared import current_project_or_stop, render_project_context
 from aidrama_studio.services import (
+    ImageRuntimeError,
+    ImageRuntimeService,
     ReferenceAssetService,
     ReferenceAssetServiceError,
     ReferenceAssetStorageError,
@@ -38,7 +40,12 @@ def _version_status(asset, version, story_revision_id: str) -> str:
 
 
 def _asset_status(service, project, binding_type, subject_id, story_revision_id):
-    asset = service.find_asset_for_binding(project.id, binding_type, subject_id)
+    finder = getattr(service, "find_workspace_asset", None)
+    asset = (
+        finder(project.id, binding_type, subject_id)
+        if callable(finder)
+        else service.find_asset_for_binding(project.id, binding_type, subject_id)
+    )
     current = service.get_current_version(project.id, asset.id) if asset else None
     return asset, current, _version_status(asset, current, story_revision_id)
 
@@ -75,11 +82,48 @@ def _render_card(service, project, subject, binding_type, story_revision_id):
 
 
 def _ensure_asset(service, project, binding_type, subject_id):
-    asset = service.find_asset_for_binding(project.id, binding_type, subject_id)
+    finder = getattr(service, "find_workspace_asset", None)
+    asset = (
+        finder(project.id, binding_type, subject_id)
+        if callable(finder)
+        else service.find_asset_for_binding(project.id, binding_type, subject_id)
+    )
     if asset is None:
-        asset_type = ReferenceAssetType.CHARACTER_REFERENCE if binding_type is ReferenceBindingType.CHARACTER else ReferenceAssetType.LOCATION_REFERENCE
-        asset = service.create_asset(project.id, asset_type)
+        ensure = getattr(service, "ensure_workspace_asset", None)
+        if callable(ensure):
+            asset = ensure(project.id, binding_type, subject_id)
+        else:
+            asset_type = ReferenceAssetType.CHARACTER_REFERENCE if binding_type is ReferenceBindingType.CHARACTER else ReferenceAssetType.LOCATION_REFERENCE
+            asset = service.create_asset(project.id, asset_type)
     return asset
+
+
+def _generate_image_candidate(
+    service,
+    runtime,
+    project,
+    subject,
+    binding_type,
+    story_revision_id,
+    prompt,
+):
+    """Run the canonical generate/validate/record boundary for the UI."""
+
+    asset = _ensure_asset(service, project, binding_type, subject.id)
+    candidate = runtime.generate_and_record_candidate(
+        project.id,
+        asset.id,
+        prompt,
+        source_story_revision_id=story_revision_id,
+        filename=f"{binding_type.value.lower()}-{subject.id}-generated.png",
+        metadata={
+            "subject_id": subject.id,
+            "binding_type": binding_type.value,
+        },
+        actor="user",
+        reference_assets=service,
+    )
+    return asset, candidate
 
 
 def _import_uploads(service, storage, project, subject, binding_type, story_revision_id, uploads) -> int:
@@ -219,8 +263,42 @@ def _render_workspace(service, storage, project, subject, binding_type, story_re
             st.success(f"已创建 {imported} 个 Draft version")
             st.rerun()
 
+    st.markdown("### AI 生成参考图候选")
+    st.caption(
+        "点击后会把画面描述发送给“设置”中选定的参考图 Provider。"
+        "返回文件通过真实图片解码验证后，只保存为候选；不会自动提升或锁定。"
+    )
+    generation_prompt = st.text_area(
+        "画面描述",
+        value=_brief(subject, binding_type),
+        height=120,
+        key=f"reference-generation-prompt-{project.id}-{binding_type.value}-{subject.id}",
+    )
+    if st.button(
+        "生成候选图",
+        type="primary",
+        key=f"generate-reference-candidate-{project.id}-{binding_type.value}-{subject.id}",
+    ):
+        try:
+            runtime = ImageRuntimeService(service.repository)
+            with st.spinner("正在生成并验证候选图…"):
+                asset, candidate = _generate_image_candidate(
+                    service,
+                    runtime,
+                    project,
+                    subject,
+                    binding_type,
+                    story_revision_id,
+                    generation_prompt,
+                )
+            st.success(
+                f"候选图已保存（{candidate.status.value}）。请预览后再决定是否提升。"
+            )
+        except (ImageRuntimeError, ReferenceAssetServiceError, ValueError) as exc:
+            st.warning(str(exc))
+
     if not asset:
-        st.info("暂无 Reference Asset。上传图片后会自动创建。")
+        st.info("暂无 Reference Asset。上传图片或生成候选图后会自动创建。")
         return
     _render_generated_candidates(
         service, project, asset, subject, binding_type

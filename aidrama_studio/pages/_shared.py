@@ -69,7 +69,7 @@ def render_ai_readiness(*, project_id: str | None = None, compact: bool = False)
     try:
         from aidrama_studio.services.provider_readiness import ProviderReadinessService
 
-        readiness = ProviderReadinessService().snapshot()
+        readiness = ProviderReadinessService().snapshot(project_id=project_id)
     except Exception:
         readiness = {}
     labels = (("text", "文本生成"), ("image", "参考图生成"), ("video", "视频生成"), ("vision", "画面分析"), ("tts", "配音"))
@@ -80,9 +80,42 @@ def render_ai_readiness(*, project_id: str | None = None, compact: bool = False)
         for col, (key, label) in zip(cols, labels):
             capability_key = {"text": "LLM", "image": "IMAGE", "video": "VIDEO_GENERATIVE", "vision": "VISION", "tts": "TTS"}[key]
             value = readiness.get(capability_key, {}) if isinstance(readiness, dict) else {}
-            configured = bool(value.get("ready")) if isinstance(value, dict) else bool(value)
-            col.metric(label, "已配置" if configured else "未配置")
-            if not configured:
+            if isinstance(value, dict):
+                raw_state = value.get("state")
+                # Older/embedded readiness providers may expose only the
+                # boolean ``ready`` field.  Preserve that contract while
+                # keeping unknown or malformed payloads fail-closed.
+                if raw_state:
+                    state = str(raw_state).upper()
+                    ready_value = value.get("ready")
+                    # A contradictory payload must never render a green
+                    # normal-user status.  ``state=READY`` without the
+                    # canonical boolean proof is treated as a configuration
+                    # error; the same applies to any known state claiming the
+                    # opposite readiness value.
+                    if state == "READY" and ready_value is not True:
+                        state = "ERROR"
+                    elif state == "UNAVAILABLE" and ready_value is True:
+                        state = "ERROR"
+                    elif state == "ERROR" and ready_value is True:
+                        state = "ERROR"
+                    elif state not in {"READY", "UNAVAILABLE", "ERROR"}:
+                        state = "ERROR"
+                elif value.get("ready") is True:
+                    state = "READY"
+                elif value.get("ready") is False:
+                    state = "UNAVAILABLE"
+                else:
+                    state = "UNAVAILABLE"
+            else:
+                state = "UNAVAILABLE"
+            display_state = {
+                "READY": "已配置",
+                "ERROR": "配置有误",
+                "UNAVAILABLE": "需要配置",
+            }.get(state, "配置有误")
+            col.metric(label, display_state)
+            if state != "READY":
                 missing.append(label)
         if missing:
             st.info("AI 功能尚未配置。你仍可先编辑内容；需要生成时再配置对应模型。")

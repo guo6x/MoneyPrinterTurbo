@@ -196,6 +196,7 @@ def test_gemini_interactions_contract_preserves_exact_inputs_and_deletes_remote_
     analysis = _provider(transport).analyze(request=request)
 
     assert len(transport.uploads) == 4
+    assert len(transport.payloads) == 1
     assert [item["mime_type"] for item in transport.uploads] == [
         "video/mp4",
         "image/jpeg",
@@ -226,6 +227,8 @@ def test_gemini_interactions_contract_preserves_exact_inputs_and_deletes_remote_
         "files/file-1",
     ]
     assert analysis.metrics["SHOT_COMPLIANCE"]["status"] == "PASS"
+    assert set(analysis.metrics) == set(METRIC_NAMES)
+    assert len(analysis.metrics) == 7
     assert analysis.metadata["model"] == "gemini-3.7-flash"
     assert analysis.metadata["interaction_id"] == "interaction_123"
     assert analysis.metadata["remote_file_lifecycle"]["deleted_file_count"] == 4

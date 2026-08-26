@@ -14,7 +14,7 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 from ..ai_capabilities import (
@@ -28,7 +28,7 @@ from ..ai_capabilities import (
 
 @dataclass(frozen=True)
 class OpenAIImageProviderConfig:
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-image-2"
     timeout_seconds: int = 120
@@ -45,7 +45,10 @@ class OpenAIImageProvider(ImageGenerationProvider):
         *,
         env: Mapping[str, str] | None = None,
     ) -> None:
-        values = env or os.environ
+        # An explicitly supplied mapping (including an empty one) is a
+        # deterministic configuration boundary; never fall through to process
+        # secrets merely because the mapping has no entries.
+        values = os.environ if env is None else env
         self.config = config or OpenAIImageProviderConfig(
             api_key=str(values.get("OPENAI_API_KEY", "")).strip(),
             base_url=str(values.get("OPENAI_BASE_URL", "https://api.openai.com/v1")).strip(),
@@ -75,6 +78,7 @@ class OpenAIImageProvider(ImageGenerationProvider):
                 "endpoint_class": "OPENAI_PUBLIC",
                 "endpoint_profile_id": "runtime:IMAGE:OPENAI_IMAGE:OPENAI_PUBLIC",
                 "credential_reference": "OPENAI_API_KEY",
+                "credential_present": bool(self.config.api_key),
                 "verification_state": "NOT_VERIFIED",
             },
             configured=bool(self.config.api_key),
@@ -92,12 +96,13 @@ class OpenAIImageProvider(ImageGenerationProvider):
             raise CapabilityUnavailable("image prompt 不能为空")
         if not self.status.available:
             raise CapabilityUnavailable(self.status.reason)
+        # GPT Image always returns base64 image data.  ``response_format`` is
+        # a DALL-E-only request field and must be omitted for this adapter.
         body = json.dumps(
             {
                 "model": self.config.model,
                 "prompt": prompt,
                 "n": 1,
-                "response_format": "b64_json",
             },
             ensure_ascii=False,
         ).encode("utf-8")
@@ -138,7 +143,13 @@ class OpenAIImageProvider(ImageGenerationProvider):
             prompt=prompt,
             content=content,
             mime_type="image/png",
-            metadata={"model": self.config.model, **dict(metadata or {})},
+            metadata={
+                **dict(metadata or {}),
+                # These values describe the request actually sent.  Caller
+                # metadata must never be able to replace provider provenance.
+                "model": self.config.model,
+                "request_parameters": {"n": 1},
+            },
         )
 
     def _download_result(self, url: str) -> bytes:

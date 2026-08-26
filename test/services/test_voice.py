@@ -316,6 +316,23 @@ class TestVoiceService(unittest.TestCase):
             self.assertEqual(len(sub_maker.events), 1)
             self.assertEqual(sub_maker.events[0]["type"], "WordBoundary")
 
+    def test_azure_tts_v1_bounded_smoke_stops_after_one_failed_submission(self):
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+            vs,
+            "create_edge_tts_communicate",
+            side_effect=RuntimeError("offline failure"),
+        ) as create:
+            result = vs.azure_tts_v1(
+                text="bounded smoke",
+                voice_name="zh-CN-XiaoyiNeural-Female",
+                voice_file=str(Path(tmp_dir) / "bounded.mp3"),
+                voice_rate=1.0,
+                max_attempts=1,
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(create.call_count, 1)
+
     def test_azure_tts_v1_times_out_hanging_stream_sync(self):
         """
         验证 Azure TTS V1 在 edge_tts 同步流卡住时能够快速失败。

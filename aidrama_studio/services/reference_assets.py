@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
 from pathlib import Path
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from aidrama_studio.domain import (
     ReferenceAsset, ReferenceAssetBinding, ReferenceAssetType, ReferenceAssetVersion,
@@ -19,10 +21,81 @@ from aidrama_studio.storage.reference_assets import (
     store_immutable_blob,
     validate_image_input,
 )
+from .security import sanitize_persistent_metadata
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+_UNSAFE_IMAGE_PARAMETER_KEY = re.compile(
+    r"(?:^|[_\-.])(?:api[_\-.]?key|access[_\-.]?token|authorization|bearer|"
+    r"client[_\-.]?secret|credential(?:[_\-.]?reference)?|password|private[_\-.]?key|"
+    r"refresh[_\-.]?token|secret|signature|signed[_\-.]?url|token|url)(?:$|[_\-.])",
+    re.IGNORECASE,
+)
+_UNSAFE_IMAGE_PARAMETER_VALUE = re.compile(
+    r"(?i)(?:bearer\s+|https?://|[a-z][a-z0-9+.-]*://|\bsk-[a-z0-9_-]{8,}\b|"
+    r"(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|secret|signature|token)\s*[:=])"
+)
+
+
+def _contains_unsafe_image_parameter(value: object) -> bool:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            normalized = str(key).strip()
+            compact = re.sub(r"[^A-Za-z0-9_.-]", "", normalized)
+            if _UNSAFE_IMAGE_PARAMETER_KEY.search(compact):
+                return True
+            if _contains_unsafe_image_parameter(child):
+                return True
+        return False
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_contains_unsafe_image_parameter(item) for item in value)
+    if isinstance(value, str):
+        return bool(_UNSAFE_IMAGE_PARAMETER_VALUE.search(value))
+    return False
+
+
+def _safe_image_request_parameters(value: object) -> dict[str, object]:
+    """Validate provider parameters before they contribute to durable hashes.
+
+    Candidate provenance is intentionally credential-free.  Sanitizing and
+    then requiring an unchanged JSON-safe mapping rejects secret-bearing keys,
+    signed URLs, and token-like values instead of persisting a value or a
+    secret-derived request hash.  The provider adapter remains responsible for
+    deciding which ordinary parameters are semantically valid.
+    """
+
+    if not isinstance(value, dict):
+        # ``Mapping`` implementations are normalized by callers before this
+        # helper; rejecting other objects keeps the persistence boundary
+        # deterministic.
+        raise ReferenceAssetServiceError(
+            "image request parameters 必须是 JSON object"
+        )
+    if _contains_unsafe_image_parameter(value):
+        raise ReferenceAssetServiceError(
+            "image request parameters 不得包含 secret、URL 或 token"
+        )
+    safe = sanitize_persistent_metadata(value)
+    if not isinstance(safe, dict) or safe != value:
+        raise ReferenceAssetServiceError(
+            "image request parameters 不得包含 secret、URL 或不可安全持久化值"
+        )
+    try:
+        json.dumps(
+            safe,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ReferenceAssetServiceError(
+            "image request parameters 必须可持久化"
+        ) from exc
+    return dict(safe)
 
 
 class ReferenceAssetServiceError(RuntimeError):
@@ -49,13 +122,95 @@ class ReferenceAssetService:
 
     def _require_project(self, project_id: str):
         project = self.repository.get_project(project_id)
-        if project is None: raise ReferenceAssetServiceError(f"项目不存在: {project_id}")
+        if project is None:
+            raise ReferenceAssetServiceError(f"项目不存在: {project_id}")
         return project
 
     def create_asset(self, project_id: str, asset_type: ReferenceAssetType) -> ReferenceAsset:
         self._require_project(project_id)
         now = _now()
         return self.repository.create_reference_asset(ReferenceAsset(id=uuid4().hex, project_id=project_id, asset_type=asset_type, created_at=now, updated_at=now))
+
+    @staticmethod
+    def _workspace_asset_id(
+        project_id: str,
+        binding_type: ReferenceBindingType,
+        binding_id: str,
+    ) -> str:
+        """Return the stable pre-promotion workspace identity for a subject."""
+
+        return uuid5(
+            NAMESPACE_URL,
+            f"aidrama-reference-workspace:{project_id}:{binding_type.value}:{binding_id}",
+        ).hex
+
+    def find_workspace_asset(
+        self,
+        project_id: str,
+        binding_type: ReferenceBindingType,
+        binding_id: str,
+    ) -> ReferenceAsset | None:
+        """Find a bound asset or its durable pre-promotion workspace asset.
+
+        A generated candidate cannot be bound to a subject until a human
+        promotes it to a version.  The stable workspace identity keeps those
+        Draft candidates discoverable across UI restarts without pretending a
+        version or binding already exists.
+        """
+
+        self._require_project(project_id)
+        bound = self.find_asset_for_binding(project_id, binding_type, binding_id)
+        if bound is not None:
+            return bound
+        workspace_id = self._workspace_asset_id(
+            project_id,
+            binding_type,
+            binding_id,
+        )
+        candidate = self.repository.get_reference_asset(workspace_id)
+        if candidate is None:
+            return None
+        expected_type = {
+            ReferenceBindingType.CHARACTER: ReferenceAssetType.CHARACTER_REFERENCE,
+            ReferenceBindingType.LOCATION: ReferenceAssetType.LOCATION_REFERENCE,
+        }.get(binding_type)
+        if (
+            expected_type is None
+            or candidate.project_id != project_id
+            or candidate.asset_type is not expected_type
+        ):
+            raise ReferenceAssetServiceError("Reference workspace asset provenance 无效")
+        return candidate
+
+    def ensure_workspace_asset(
+        self,
+        project_id: str,
+        binding_type: ReferenceBindingType,
+        binding_id: str,
+    ) -> ReferenceAsset:
+        """Create the subject's empty candidate workspace, never a version."""
+
+        existing = self.find_workspace_asset(project_id, binding_type, binding_id)
+        if existing is not None:
+            return existing
+        asset_type = {
+            ReferenceBindingType.CHARACTER: ReferenceAssetType.CHARACTER_REFERENCE,
+            ReferenceBindingType.LOCATION: ReferenceAssetType.LOCATION_REFERENCE,
+        }.get(binding_type)
+        if asset_type is None:
+            raise ReferenceAssetServiceError("该 binding type 不支持 reference workspace")
+        if not self._binding_target_exists(project_id, binding_type, binding_id):
+            raise ReferenceAssetServiceError("Reference workspace target 不存在")
+        now = _now()
+        return self.repository.create_reference_asset(
+            ReferenceAsset(
+                id=self._workspace_asset_id(project_id, binding_type, binding_id),
+                project_id=project_id,
+                asset_type=asset_type,
+                created_at=now,
+                updated_at=now,
+            )
+        )
 
     def create_version(
         self, project_id: str, asset_id: str, *, filename: str, mime_type: str,
@@ -64,8 +219,10 @@ class ReferenceAssetService:
     ) -> ReferenceAssetVersion:
         self._require_project(project_id)
         asset = self.repository.get_reference_asset(asset_id)
-        if asset is None: raise ReferenceAssetServiceError(f"ReferenceAsset 不存在: {asset_id}")
-        if asset.project_id != project_id: raise ReferenceAssetServiceError("asset 不属于该项目")
+        if asset is None:
+            raise ReferenceAssetServiceError(f"ReferenceAsset 不存在: {asset_id}")
+        if asset.project_id != project_id:
+            raise ReferenceAssetServiceError("asset 不属于该项目")
         if metadata is not None and "source_story_revision_id" in metadata:
             source_id = metadata["source_story_revision_id"]
             if not isinstance(source_id, str) or not source_id:
@@ -85,22 +242,27 @@ class ReferenceAssetService:
     def list_versions(self, project_id: str, asset_id: str) -> list[ReferenceAssetVersion]:
         self._require_project(project_id)
         asset = self.repository.get_reference_asset(asset_id)
-        if asset is None or asset.project_id != project_id: raise ReferenceAssetServiceError("asset 不属于该项目")
+        if asset is None or asset.project_id != project_id:
+            raise ReferenceAssetServiceError("asset 不属于该项目")
         return self.repository.list_reference_asset_versions(asset_id)
 
     def get_current_version(self, project_id: str, asset_id: str) -> ReferenceAssetVersion | None:
         self._require_project(project_id)
         asset = self.repository.get_reference_asset(asset_id)
-        if asset is None or asset.project_id != project_id: raise ReferenceAssetServiceError("asset 不属于该项目")
-        if not asset.current_version_id: return None
+        if asset is None or asset.project_id != project_id:
+            raise ReferenceAssetServiceError("asset 不属于该项目")
+        if not asset.current_version_id:
+            return None
         return self.repository.get_reference_asset_version(asset.current_version_id)
 
     def activate_version(self, project_id: str, asset_id: str, version_id: str) -> ReferenceAsset:
         self._require_project(project_id)
         asset = self.repository.get_reference_asset(asset_id)
         version = self.repository.get_reference_asset_version(version_id)
-        if asset is None or asset.project_id != project_id: raise ReferenceAssetServiceError("asset 不属于该项目")
-        if version is None or version.asset_id != asset_id or version.project_id != project_id: raise ReferenceAssetServiceError("version 不属于该 asset")
+        if asset is None or asset.project_id != project_id:
+            raise ReferenceAssetServiceError("asset 不属于该项目")
+        if version is None or version.asset_id != asset_id or version.project_id != project_id:
+            raise ReferenceAssetServiceError("version 不属于该 asset")
         return self.repository.set_current_reference_version(asset_id, version_id, updated_at=_now())
 
     def record_image_candidate(
@@ -154,6 +316,9 @@ class ReferenceAssetService:
             digest,
             suffix,
         )
+        safe_request_parameters = _safe_image_request_parameters(
+            dict(request_parameters or {})
+        )
         request_truth = {
             "project_id": project_id,
             "asset_id": asset_id,
@@ -163,7 +328,7 @@ class ReferenceAssetService:
             "endpoint_profile_id": endpoint_profile_id.strip(),
             "deployment_region": deployment_region.strip(),
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-            "parameters": request_parameters or {},
+            "parameters": safe_request_parameters,
         }
         try:
             request_json = json.dumps(
@@ -378,7 +543,8 @@ class ReferenceAssetService:
     def bind_version(self, project_id: str, version_id: str, binding_type: ReferenceBindingType, binding_id: str) -> ReferenceAssetBinding:
         self._require_project(project_id)
         version = self.repository.get_reference_asset_version(version_id)
-        if version is None or version.project_id != project_id: raise ReferenceAssetServiceError("version 不属于该项目")
+        if version is None or version.project_id != project_id:
+            raise ReferenceAssetServiceError("version 不属于该项目")
         asset = self.repository.get_reference_asset(version.asset_id)
         if asset is None or asset.project_id != project_id:
             raise ReferenceAssetServiceError("version 的 asset 不属于该项目")

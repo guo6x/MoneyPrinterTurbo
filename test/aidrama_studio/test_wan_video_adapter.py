@@ -9,12 +9,19 @@ import pytest
 import requests
 
 from aidrama_studio.domain import (
+    ProviderTask,
     ProductionInputSnapshot,
     ReferenceAsset,
     ReferenceAssetType,
     ReferenceAssetVersion,
 )
-from aidrama_studio.services import ProductionExecutionService
+from aidrama_studio.services import (
+    CapabilityRegistry,
+    ProductionExecutionService,
+    ProductionRuntimeResolutionError,
+    ProductionRuntimeResolver,
+    RuntimeVideoProvider,
+)
 from aidrama_studio.services.adapters import (
     RuntimeContentRejectedError,
     WanAdapterError,
@@ -123,7 +130,9 @@ def test_wan_adapter_submit_status_and_result_download(tmp_path):
     client = FakeWanClient()
     adapter = WanProductionAdapter(
         client,
-        config=WanProviderConfig(api_key="test-key"),
+        config=WanProviderConfig(
+            api_key="test-key", allow_paid_live_tests=True
+        ),
         reference_resolver=FakeResolver(image),
     )
     snapshot = _snapshot()
@@ -178,7 +187,9 @@ def test_wan_adapter_rejects_malformed_video_result(tmp_path):
 
     adapter = WanProductionAdapter(
         BadClient(),
-        config=WanProviderConfig(api_key="test-key"),
+        config=WanProviderConfig(
+            api_key="test-key", allow_paid_live_tests=True
+        ),
         reference_resolver=FakeResolver(image),
     )
     adapter.submit(_snapshot())
@@ -234,7 +245,9 @@ def test_wan_provider_failure_is_not_treated_as_a_result(tmp_path):
     client = FakeWanClient()
     adapter = WanProductionAdapter(
         client,
-        config=WanProviderConfig(api_key="test-key"),
+        config=WanProviderConfig(
+            api_key="test-key", allow_paid_live_tests=True
+        ),
         reference_resolver=FakeResolver(image),
     )
     adapter.submit(_snapshot())
@@ -316,10 +329,182 @@ def test_wan_client_uses_async_header_without_exposing_key():
             return Response()
 
     session = Session()
-    client = WanVideoClient(WanProviderConfig(api_key="secret-key"), session=session)
+    client = WanVideoClient(
+        WanProviderConfig(api_key="secret-key", allow_paid_live_tests=True),
+        session=session,
+    )
     assert client.create_task({"model": "wan2.7-i2v-2026-04-25"}) == "wan-task-1"
     assert session.kwargs["headers"]["X-DashScope-Async"] == "enable"
     assert session.kwargs["headers"]["Authorization"] == "Bearer secret-key"
+
+
+def test_wan_paid_create_gate_blocks_all_create_calls_but_allows_reconciliation(
+    tmp_path,
+):
+    image = tmp_path / "reference.jpg"
+    image.write_bytes(JPEG)
+    fake_client = FakeWanClient()
+    adapter = WanProductionAdapter(
+        fake_client,
+        config=WanProviderConfig(
+            api_key="test-key", allow_paid_live_tests=False
+        ),
+        reference_resolver=FakeResolver(image),
+    )
+
+    assert adapter.status.configured is True
+    assert adapter.status.available is False
+    with pytest.raises(WanAdapterError, match="AIDRAMA_ALLOW_PAID_LIVE_TESTS"):
+        adapter.submit(_snapshot())
+    assert fake_client.payload is None
+
+    # Existing provider task IDs remain pollable without paid-create
+    # authorization. No resubmission is attempted during reconciliation.
+    fake_client.status = "RUNNING"
+    assert adapter.get_status("existing-wan-task") == "RUNNING"
+    assert fake_client.payload is None
+
+
+def test_wan_runtime_resolution_retains_poll_only_reconciliation_boundary():
+    adapter = WanProductionAdapter(
+        FakeWanClient(),
+        config=WanProviderConfig(
+            api_key="test-key", allow_paid_live_tests=False
+        ),
+    )
+    registry = CapabilityRegistry(
+        [RuntimeVideoProvider(adapter, provider_name="WAN_VIDEO")]
+    )
+    task = ProviderTask(
+        id="provider-task-1",
+        project_id="project-1",
+        execution_id="execution-1",
+        capability="VIDEO_GENERATIVE",
+        provider_id="WAN_VIDEO",
+        model_id=adapter.config.model,
+        idempotency_key="production:execution-1",
+        provider_task_id="existing-wan-task",
+        state="PROVIDER_RUNNING",
+        request_summary={"approved": True},
+        created_at="2026-08-26T00:00:00+00:00",
+        updated_at="2026-08-26T00:00:00+00:00",
+    )
+
+    resolved = ProductionRuntimeResolver(
+        registry=registry,
+        repository=object(),
+    ).resolve(task)
+
+    assert isinstance(resolved, WanProductionAdapter)
+    assert resolved.config.allow_paid_live_tests is False
+    assert resolved.status.available is False
+
+    # A task that has never received a provider task ID cannot use the
+    # poll-only reconciliation exception.  Without this guard an unavailable
+    # paid provider could be mistaken for a recoverable existing task.
+    without_provider_reference = task.model_copy(update={"provider_task_id": None})
+    with pytest.raises(ProductionRuntimeResolutionError, match="Provider 尚未就绪"):
+        ProductionRuntimeResolver(
+            registry=registry,
+            repository=object(),
+        ).resolve(without_provider_reference)
+
+    forged_state = task.model_copy(update={"state": "PENDING_SUBMISSION"})
+    with pytest.raises(ProductionRuntimeResolutionError, match="Provider 尚未就绪"):
+        ProductionRuntimeResolver(
+            registry=registry,
+            repository=object(),
+        ).resolve(forged_state)
+
+
+def test_wan_resolver_preserves_injected_poll_transport_without_paid_post():
+    class PollOnlyClient:
+        def __init__(self):
+            self.create_calls = 0
+            self.get_calls = []
+
+        def create_task(self, _payload):
+            self.create_calls += 1
+            raise AssertionError("poll-only reconciliation must not create a task")
+
+        def get_task(self, task_id):
+            self.get_calls.append(task_id)
+            return {"output": {"task_status": "RUNNING"}}
+
+    client = PollOnlyClient()
+    adapter = WanProductionAdapter(
+        client,
+        config=WanProviderConfig(api_key="test-key", allow_paid_live_tests=False),
+    )
+    registry = CapabilityRegistry(
+        [RuntimeVideoProvider(adapter, provider_name="WAN_VIDEO")]
+    )
+    task = ProviderTask(
+        id="provider-task-1",
+        project_id="project-1",
+        execution_id="execution-1",
+        capability="VIDEO_GENERATIVE",
+        provider_id="WAN_VIDEO",
+        model_id=adapter.config.model,
+        idempotency_key="production:execution-1",
+        provider_task_id="existing-wan-task",
+        state="PROVIDER_RUNNING",
+        request_summary={"approved": True},
+        created_at="2026-08-26T00:00:00+00:00",
+        updated_at="2026-08-26T00:00:00+00:00",
+    )
+
+    resolved = ProductionRuntimeResolver(
+        registry=registry,
+        repository=object(),
+    ).resolve(task)
+
+    assert isinstance(resolved, WanProductionAdapter)
+    assert resolved.client is client
+    assert resolved.get_status("existing-wan-task") == "RUNNING"
+    assert client.get_calls == ["existing-wan-task"]
+    assert client.create_calls == 0
+
+
+def test_wan_http_create_gate_is_environment_derived_and_polling_stays_enabled(
+    monkeypatch,
+):
+    class Response:
+        status_code = 200
+        headers = {}
+
+        def json(self):
+            return {
+                "output": {
+                    "task_id": "existing-wan-task",
+                    "task_status": "RUNNING",
+                }
+            }
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, *args, **kwargs):
+            self.calls.append((method, args, kwargs))
+            return Response()
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.delenv("AIDRAMA_ALLOW_PAID_LIVE_TESTS", raising=False)
+    blocked = WanProviderConfig.from_environment()
+    assert blocked.allow_paid_live_tests is False
+    session = Session()
+    client = WanVideoClient(blocked, session=session)
+    with pytest.raises(WanAdapterError, match="AIDRAMA_ALLOW_PAID_LIVE_TESTS"):
+        client.create_task({"model": blocked.model})
+    assert session.calls == []
+
+    response = client.get_task("existing-wan-task")
+    assert response["output"]["task_status"] == "RUNNING"
+    assert [call[0] for call in session.calls] == ["GET"]
+
+    monkeypatch.setenv("AIDRAMA_ALLOW_PAID_LIVE_TESTS", "1")
+    assert WanProviderConfig.from_environment().allow_paid_live_tests is True
 
 
 def test_wan_retry_after_is_exposed_as_transient_poll_failure():

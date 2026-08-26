@@ -73,11 +73,55 @@ page._render_provider_model_settings(Service(), project_id='project-1')
         for collection in (app.markdown, app.caption, app.info, app.warning)
         for element in collection
     )
-    for label in ("LLM", "图片生成", "视频生成", "视觉理解", "语音"):
+    for label in ("文本生成", "参考图生成", "视频生成", "画面分析", "配音"):
         assert label in rendered
     assert "MAINLAND_CHINA" in rendered
-    assert "已配置" in rendered
+    # The fixture deliberately models configured profiles whose runtime
+    # prerequisites are unavailable (``available=False``).  The normal-user
+    # surface must therefore avoid a false-ready claim and show the actionable
+    # three-state label instead.
+    assert "需要配置" in rendered
+    assert "已配置" not in rendered
     assert "未验证" in rendered
     assert "只影响新 RuntimePlan" in rendered
     assert "secret-value" not in rendered
     assert "API Key" not in rendered
+
+
+def test_normal_readiness_surface_uses_three_human_states_for_five_capabilities():
+    app = AppTest.from_string(
+        """
+from aidrama_studio.pages import _shared
+import aidrama_studio.services.provider_readiness as readiness_module
+
+class Readiness:
+    def snapshot(self, *, project_id=None):
+        assert project_id == 'project-1'
+        return {
+            'LLM': {'state': 'READY', 'ready': True, 'detail': 'configured'},
+            'IMAGE': {'state': 'UNAVAILABLE', 'ready': False, 'detail': 'credential missing'},
+            'VIDEO_GENERATIVE': {'state': 'ERROR', 'ready': False, 'detail': 'invalid endpoint'},
+            'VISION': {'state': 'READY', 'ready': True, 'detail': 'configured'},
+            'TTS': {'state': 'UNAVAILABLE', 'ready': False, 'detail': 'region missing'},
+        }
+
+_original_readiness = readiness_module.ProviderReadinessService
+readiness_module.ProviderReadinessService = Readiness
+try:
+    _shared.render_ai_readiness(project_id='project-1', compact=True)
+finally:
+    # AppTest executes this snippet in the importing interpreter.  Restore the
+    # module seam so later tests observe the production readiness service.
+    readiness_module.ProviderReadinessService = _original_readiness
+"""
+    ).run()
+
+    assert not app.exception
+    metrics = {item.label: item.value for item in app.metric}
+    assert metrics == {
+        "文本生成": "已配置",
+        "参考图生成": "需要配置",
+        "视频生成": "配置有误",
+        "画面分析": "已配置",
+        "配音": "需要配置",
+    }

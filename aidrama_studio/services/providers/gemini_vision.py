@@ -17,7 +17,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
 import requests
@@ -353,6 +353,7 @@ class GeminiVisionProvider(VisionAnalysisProvider):
                     "endpoint_class": "GOOGLE_GEMINI_PUBLIC",
                     "endpoint_profile_id": "runtime:VISION:GOOGLE_GEMINI_VISION:GOOGLE_GEMINI_PUBLIC",
                     "credential_reference": "GEMINI_API_KEY",
+                    "credential_present": bool(self.config.api_key),
                     "verification_state": "NOT_VERIFIED",
                 },
                 configured=bool(self.config.api_key),
@@ -381,6 +382,7 @@ class GeminiVisionProvider(VisionAnalysisProvider):
                 "endpoint_class": "GOOGLE_GEMINI_PUBLIC",
                 "endpoint_profile_id": "runtime:VISION:GOOGLE_GEMINI_VISION:GOOGLE_GEMINI_PUBLIC",
                 "credential_reference": "GEMINI_API_KEY",
+                "credential_present": bool(self.config.api_key),
                 "verification_state": "NOT_VERIFIED",
             },
             configured=bool(self.config.api_key),
