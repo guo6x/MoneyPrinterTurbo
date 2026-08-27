@@ -118,6 +118,8 @@ from .model_runtime import (
     Capability,
     CapabilityRequest,
     CapabilityResult,
+    MAINLAND_MANIFESTS,
+    MainlandProviderRuntime,
     ModelManifest,
     ModelResolver,
     ModelReadiness,
@@ -185,6 +187,7 @@ __all__ = [
     "WanTransientError",
     "SeedanceAdapterError", "SeedanceInputMapper", "SeedanceProductionAdapter", "SeedanceProviderConfig", "SeedanceTransientError",
     "Capability", "CapabilityRequest", "CapabilityResult", "ProtocolFamily",
+    "MAINLAND_MANIFESTS", "MainlandProviderRuntime",
     "ModelManifest", "ModelResolver", "ModelReadiness", "readiness_from_status",
     "RequestResponseDriver", "AsyncTaskDriver", "StreamDriver",
 ]

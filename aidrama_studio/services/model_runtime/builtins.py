@@ -1,9 +1,9 @@
 """Provider-neutral built-in manifest registry foundation.
 
-The entries here are deliberately metadata-only placeholders.  They make the
-registry usable in offline tooling and tests without claiming that a provider
-credential, SDK, or paid-create authorization exists.  The compatibility
-bridge remains the source for currently implemented providers.
+The registry contains immutable real-model metadata plus offline placeholders.
+Neither kind claims that a credential was verified or that paid create was
+authorized.  The compatibility bridge remains available for legacy providers
+that have not yet moved behind a native codec.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from .contracts import CapabilityKind, ProtocolFamily
+from .mainland_manifests import MAINLAND_MANIFESTS
 from .manifest import ModelManifest
 from .resolver import InMemoryManifestRegistry
 
@@ -52,15 +53,31 @@ BUILTIN_MANIFESTS: tuple[ModelManifest, ...] = (
 
 
 class BuiltinManifestRegistry(InMemoryManifestRegistry):
-    """Manifest registry preloaded with safe offline placeholders."""
+    """Registry preloaded with real model data and safe offline placeholders."""
 
-    def __init__(self, manifests: Iterable[object] | None = None, *, include_placeholders: bool = True) -> None:
-        initial = BUILTIN_MANIFESTS if include_placeholders else ()
+    def __init__(
+        self,
+        manifests: Iterable[object] | None = None,
+        *,
+        include_placeholders: bool = True,
+        include_mainland: bool = True,
+    ) -> None:
+        initial = (
+            *(MAINLAND_MANIFESTS if include_mainland else ()),
+            *(BUILTIN_MANIFESTS if include_placeholders else ()),
+        )
         super().__init__((*initial, *(manifests or ())))
 
 
-def default_manifest_registry(*, include_placeholders: bool = True) -> BuiltinManifestRegistry:
-    return BuiltinManifestRegistry(include_placeholders=include_placeholders)
+def default_manifest_registry(
+    *,
+    include_placeholders: bool = True,
+    include_mainland: bool = True,
+) -> BuiltinManifestRegistry:
+    return BuiltinManifestRegistry(
+        include_placeholders=include_placeholders,
+        include_mainland=include_mainland,
+    )
 
 
 builtin_manifest_registry = default_manifest_registry
@@ -68,6 +85,7 @@ builtin_manifest_registry = default_manifest_registry
 
 __all__ = [
     "BUILTIN_MANIFESTS",
+    "MAINLAND_MANIFESTS",
     "BuiltinManifestRegistry",
     "builtin_manifest_registry",
     "default_manifest_registry",

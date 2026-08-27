@@ -2,6 +2,7 @@
 
 from .builtins import (
     BUILTIN_MANIFESTS,
+    MAINLAND_MANIFESTS,
     BuiltinManifestRegistry,
     builtin_manifest_registry,
     default_manifest_registry,
@@ -20,6 +21,7 @@ from .protocol_registry import (
 
 __all__ = [
     "BUILTIN_MANIFESTS",
+    "MAINLAND_MANIFESTS",
     "BuiltinManifestRegistry",
     "InMemoryManifestRegistry",
     "ModelManifestRegistry",
