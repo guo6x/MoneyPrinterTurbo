@@ -134,12 +134,14 @@ from .mainland_manifests import (
 )
 from .mainland_runtime import (
     ContentAddressedArtifactSink,
+    DASHSCOPE_WORKSPACE_BASE_URL_KEY,
     FrozenFileInputResolver,
     MAINLAND_ENDPOINT_PROFILES,
     MainlandEndpointProfile,
     MainlandHTTPTransport,
     MainlandProviderBinding,
     MainlandProviderRuntime,
+    dashscope_workspace_endpoint_profile,
 )
 from .readiness import (
     ModelReadiness,
@@ -300,6 +302,7 @@ __all__ = [
     "MAINLAND_PRIMARY_MANIFEST_IDS",
     "ArkSeedanceCodec",
     "ContentAddressedArtifactSink",
+    "DASHSCOPE_WORKSPACE_BASE_URL_KEY",
     "FrozenFileInputResolver",
     "DashScopeQwenChatCodec",
     "DashScopeQwenTTSCodec",
@@ -310,6 +313,7 @@ __all__ = [
     "MainlandHTTPTransport",
     "MainlandProviderBinding",
     "MainlandProviderRuntime",
+    "dashscope_workspace_endpoint_profile",
     "OpenAIChatCodec",
     "ProviderArtifactSink",
     "ProviderInputResolver",

@@ -200,7 +200,7 @@ def _render_model_scheme(snapshots: tuple[object, ...], project_id: str | None =
     st.info("要更换模型方案，请先让运行时声明可用选项；这里不会猜测或自动跨区切换。")
 
 
-def _credential_requirements() -> tuple[dict[str, str], ...]:
+def _credential_requirements() -> tuple[dict[str, object], ...]:
     """Return runtime-declared credential requirements, if supplied.
 
     Universal runtimes can install a list in session state while retaining
@@ -218,22 +218,28 @@ def _credential_requirements() -> tuple[dict[str, str], ...]:
         source = tuple(source.values())
     if isinstance(source, (str, bytes)) or source is None:
         source = ()
-    requirements: list[dict[str, str]] = []
+    requirements: list[dict[str, object]] = []
     for index, item in enumerate(source or ()):
         if isinstance(item, dict):
             key = str(item.get("key") or item.get("id") or "").strip()
             label = str(item.get("label") or item.get("name") or "").strip()
             description = str(item.get("description") or "").strip()
+            secret = item.get("secret", True) is not False
+            input_label = str(item.get("input_label") or "").strip()
         else:
             key = str(getattr(item, "key", getattr(item, "id", "")) or "").strip()
             label = str(getattr(item, "label", getattr(item, "name", "")) or "").strip()
             description = str(getattr(item, "description", "") or "").strip()
+            secret = getattr(item, "secret", True) is not False
+            input_label = str(getattr(item, "input_label", "") or "").strip()
         if not key:
             continue
         requirements.append({
             "key": key,
             "label": label or f"安全连接 {index + 1}",
             "description": description,
+            "secret": secret,
+            "input_label": input_label,
         })
     return tuple(requirements)
 
@@ -242,7 +248,7 @@ def _render_credentials(paths: object, snapshots: tuple[object, ...]) -> None:
     """Render generic secure credentials/connections, driven by declarations."""
 
     st.subheader("凭据与连接")
-    st.caption("凭据只保存在当前 Windows 用户的安全存储中；保存状态不会显示完整值，也不会自动发起请求。")
+    st.caption("凭据与连接地址只保存在当前 Windows 用户的安全存储中；保存状态不会显示完整值，也不会自动发起请求。")
     requirements = _credential_requirements()
     try:
         store = WindowsCredentialStore(getattr(paths, "root", None))
@@ -283,11 +289,18 @@ def _render_credentials(paths: object, snapshots: tuple[object, ...]) -> None:
             with st.form(
                 f"runtime-credential-form-{key}", clear_on_submit=True
             ):
+                secret_input = item.get("secret", True) is not False
                 secret = st.text_input(
-                    "安全凭据",
-                    type="password",
+                    str(item.get("input_label") or (
+                        "安全凭据" if secret_input else "连接地址"
+                    )),
+                    type="password" if secret_input else "default",
                     key=f"runtime-credential-{key}",
-                    help="保存后输入框会清空；完整值不会再次显示。",
+                    help=(
+                        "保存后输入框会清空；完整值不会再次显示。"
+                        if secret_input
+                        else "请输入控制台显示的完整 HTTPS Base URL；保存后输入框会清空。"
+                    ),
                 )
                 save = st.form_submit_button("安全保存", type="primary")
             if save:

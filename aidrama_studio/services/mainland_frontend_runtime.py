@@ -20,7 +20,9 @@ from aidrama_studio.services.model_runtime import (
     CapabilityRequest,
     CapabilityResult,
     ContentAddressedArtifactSink,
+    DASHSCOPE_WORKSPACE_BASE_URL_KEY,
     MainlandProviderRuntime,
+    dashscope_workspace_endpoint_profile,
 )
 from aidrama_studio.services.reference_assets import ReferenceAssetService
 from aidrama_studio.storage.database import DatabasePaths, get_default_paths
@@ -31,6 +33,16 @@ DASHSCOPE_CREDENTIAL_REQUIREMENT = {
     "key": "DASHSCOPE_API_KEY",
     "label": "阿里云百炼 / DashScope",
     "description": "用于中国大陆的 Z-Image 参考图与 Wan 视频生成。保存不会发起请求。",
+}
+DASHSCOPE_WORKSPACE_BASE_URL_REQUIREMENT = {
+    "key": DASHSCOPE_WORKSPACE_BASE_URL_KEY,
+    "label": "百炼业务空间 Base URL",
+    "description": (
+        "使用 sk-ws- 业务空间 Key 时必填；格式为 "
+        "https://<WorkspaceId>.cn-beijing.maas.aliyuncs.com/api/v1。"
+    ),
+    "secret": False,
+    "input_label": "业务空间 Base URL",
 }
 
 
@@ -61,8 +73,11 @@ class MainlandFrontendRuntimeBridge:
         self.env = dict(os.environ if env is None else env)
 
     @staticmethod
-    def credential_requirements() -> tuple[dict[str, str], ...]:
-        return (dict(DASHSCOPE_CREDENTIAL_REQUIREMENT),)
+    def credential_requirements() -> tuple[dict[str, object], ...]:
+        return (
+            dict(DASHSCOPE_CREDENTIAL_REQUIREMENT),
+            dict(DASHSCOPE_WORKSPACE_BASE_URL_REQUIREMENT),
+        )
 
     def capability_snapshot(
         self, project_id: str | None = None
@@ -115,6 +130,7 @@ class MainlandFrontendRuntimeBridge:
         credential = self.credential_store.get("DASHSCOPE_API_KEY")
         if not credential:
             raise MainlandFrontendRuntimeError("请先在设置中保存阿里云百炼连接")
+        workspace_base_url = self._workspace_base_url(credential)
 
         prompt = str(payload.get("prompt") or "").strip()
         subject_id = str(payload.get("subject_id") or "").strip()
@@ -134,10 +150,15 @@ class MainlandFrontendRuntimeBridge:
         sink = self.artifact_sink_factory(
             self.paths.root / "provider_artifacts" / "mainland"
         )
+        runtime_options: dict[str, object] = {
+            "credentials": {"DASHSCOPE_API_KEY": credential},
+            "create_authorized": True,
+            "artifact_sink": sink,
+        }
+        if workspace_base_url:
+            runtime_options["dashscope_workspace_base_url"] = workspace_base_url
         runtime = self.runtime_factory(
-            credentials={"DASHSCOPE_API_KEY": credential},
-            create_authorized=True,
-            artifact_sink=sink,
+            **runtime_options,
         )
         manifest = runtime.primary_manifest(CapabilityKind.IMAGE)
         request = CapabilityRequest(
@@ -207,6 +228,38 @@ class MainlandFrontendRuntimeBridge:
         except Exception:
             return False
 
+    def _workspace_base_url(self, credential: str) -> str | None:
+        configured: set[str] = set()
+        try:
+            configured = set(self.credential_store.configured_providers())
+        except Exception:
+            pass
+        raw = ""
+        if DASHSCOPE_WORKSPACE_BASE_URL_KEY in configured:
+            try:
+                raw = str(
+                    self.credential_store.get(DASHSCOPE_WORKSPACE_BASE_URL_KEY)
+                    or ""
+                ).strip()
+            except Exception:
+                raw = ""
+        if not raw:
+            raw = str(
+                self.env.get(DASHSCOPE_WORKSPACE_BASE_URL_KEY, "") or ""
+            ).strip()
+        if not raw:
+            if str(credential).startswith("sk-ws-"):
+                raise MainlandFrontendRuntimeError(
+                    "sk-ws- Key 需要先配置百炼业务空间 Base URL"
+                )
+            return None
+        try:
+            return dashscope_workspace_endpoint_profile(raw).base_url
+        except Exception as exc:
+            raise MainlandFrontendRuntimeError(
+                "百炼业务空间 Base URL 无效或不属于华北2（北京）"
+            ) from exc
+
     def _image_resolution(self, project_id: str) -> str:
         project = self.repository.get_project(project_id)
         if project is None:
@@ -234,6 +287,7 @@ def install_mainland_frontend_runtime() -> MainlandFrontendRuntimeBridge:
 
 __all__ = [
     "DASHSCOPE_CREDENTIAL_REQUIREMENT",
+    "DASHSCOPE_WORKSPACE_BASE_URL_REQUIREMENT",
     "MainlandFrontendRuntimeBridge",
     "MainlandFrontendRuntimeError",
     "install_mainland_frontend_runtime",

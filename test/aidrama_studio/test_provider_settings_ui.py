@@ -173,3 +173,51 @@ page._render_credentials(SimpleNamespace(root='unused'), ())
     )
     assert "已配置" in rendered
     assert "unit-test-secret" not in rendered
+
+
+def test_runtime_workspace_base_url_uses_non_secret_connection_input():
+    app = AppTest.from_string(
+        """
+from types import SimpleNamespace
+import streamlit as st
+from aidrama_studio.pages import settings as page
+
+class Store:
+    def __init__(self):
+        self.values = {}
+    def configured(self, key):
+        return bool(self.values.get(key))
+    def configured_providers(self):
+        return tuple(self.values)
+    def set(self, key, value):
+        self.values[key] = value
+    def delete(self, key):
+        self.values.pop(key, None)
+
+store = st.session_state.setdefault('_test-workspace-store', Store())
+page.WindowsCredentialStore = lambda root: store
+page._credential_requirements = lambda: ({
+    'key': 'DASHSCOPE_WORKSPACE_BASE_URL',
+    'label': '百炼业务空间 Base URL',
+    'description': '使用 sk-ws- Key 时必填。',
+    'secret': False,
+    'input_label': '业务空间 Base URL',
+},)
+page._render_credentials(SimpleNamespace(root='unused'), ())
+"""
+    ).run()
+
+    assert not app.exception
+    assert app.text_input[0].label == "业务空间 Base URL"
+    workspace_url = "https://ws-test.cn-beijing.maas.aliyuncs.com/api/v1"
+    app.text_input[0].set_value(workspace_url)
+    next(button for button in app.button if button.label == "安全保存").click().run()
+
+    assert not app.exception
+    rendered = "\n".join(
+        str(element.value)
+        for collection in (app.markdown, app.caption, app.success)
+        for element in collection
+    )
+    assert "已配置" in rendered
+    assert workspace_url not in rendered

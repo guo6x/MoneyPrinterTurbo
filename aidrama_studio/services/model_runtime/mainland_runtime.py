@@ -15,6 +15,7 @@ import hashlib
 import ipaddress
 import os
 from pathlib import Path
+import re
 import socket
 import tempfile
 from types import MappingProxyType
@@ -115,6 +116,54 @@ MAINLAND_ENDPOINT_PROFILES: Mapping[str, MainlandEndpointProfile] = MappingProxy
         ),
     }
 )
+
+
+DASHSCOPE_WORKSPACE_BASE_URL_KEY = "DASHSCOPE_WORKSPACE_BASE_URL"
+_DASHSCOPE_WORKSPACE_HOST_SUFFIX = ".cn-beijing.maas.aliyuncs.com"
+
+
+def dashscope_workspace_endpoint_profile(
+    base_url: str,
+) -> MainlandEndpointProfile:
+    """Build the pinned Beijing workspace endpoint without allowing key exfiltration."""
+
+    candidate = str(base_url or "").strip().rstrip("/")
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError as exc:
+        raise DriverError("DashScope workspace base URL is invalid") from exc
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    workspace_label = (
+        host[: -len(_DASHSCOPE_WORKSPACE_HOST_SUFFIX)]
+        if host.endswith(_DASHSCOPE_WORKSPACE_HOST_SUFFIX)
+        else ""
+    )
+    if (
+        parsed.scheme.casefold() != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path.rstrip("/") != "/api/v1"
+        or not workspace_label
+        or "." in workspace_label
+        or re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", workspace_label
+        )
+        is None
+    ):
+        raise DriverError(
+            "DashScope workspace base URL must be a Beijing workspace /api/v1 endpoint"
+        )
+    return MainlandEndpointProfile(
+        id=DASHSCOPE_CN_ENDPOINT_PROFILE,
+        deployment_region="MAINLAND_CHINA",
+        base_url=f"https://{host}/api/v1",
+        credential_reference="DASHSCOPE_API_KEY",
+        task_path_template="/tasks/{reference}",
+    )
 
 
 class MainlandHTTPTransport:
@@ -616,6 +665,7 @@ class MainlandProviderRuntime:
         artifact_sink: ProviderArtifactSink | None = None,
         input_resolver: ProviderInputResolver | None = None,
         sessions: Mapping[str, object] | None = None,
+        dashscope_workspace_base_url: str | None = None,
     ) -> None:
         self._credentials = {
             str(key): str(value or "").strip()
@@ -632,11 +682,17 @@ class MainlandProviderRuntime:
             artifact_sink=artifact_sink,
             input_resolver=input_resolver,
         )
+        endpoint_profiles = dict(MAINLAND_ENDPOINT_PROFILES)
+        if dashscope_workspace_base_url:
+            endpoint_profiles[DASHSCOPE_CN_ENDPOINT_PROFILE] = (
+                dashscope_workspace_endpoint_profile(dashscope_workspace_base_url)
+            )
+        self.endpoint_profiles = MappingProxyType(endpoint_profiles)
         supplied_sessions = dict(sessions or {})
         bindings: dict[str, MainlandProviderBinding] = {}
         for manifest in self.manifests:
             endpoint_id = manifest.endpoint_profile_id
-            endpoint = MAINLAND_ENDPOINT_PROFILES.get(str(endpoint_id))
+            endpoint = self.endpoint_profiles.get(str(endpoint_id))
             if endpoint is None:
                 raise DriverError("manifest endpoint profile is not registered")
             self._assert_endpoint_identity(manifest, endpoint)
@@ -685,6 +741,10 @@ class MainlandProviderRuntime:
             artifact_sink=artifact_sink,
             input_resolver=input_resolver,
             sessions=sessions,
+            dashscope_workspace_base_url=str(
+                values.get(DASHSCOPE_WORKSPACE_BASE_URL_KEY, "") or ""
+            ).strip()
+            or None,
         )
 
     @staticmethod

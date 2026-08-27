@@ -23,10 +23,12 @@ from aidrama_studio.services.model_runtime import (
     CapabilityResult,
     ContentAddressedArtifactSink,
     ContentRef,
+    DASHSCOPE_WORKSPACE_BASE_URL_KEY,
     DriverSubmission,
     FrozenFileInputResolver,
     MainlandProviderRuntime,
     RuntimeOutcome,
+    dashscope_workspace_endpoint_profile,
 )
 from aidrama_studio.services.model_runtime.mainland_manifests import (
     build_mainland_manifests,
@@ -86,6 +88,9 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
         self.env = dict(os.environ if env is None else env)
         self._environment_credential = str(
             self.env.pop("DASHSCOPE_API_KEY", "") or ""
+        ).strip()
+        self._environment_workspace_base_url = str(
+            self.env.pop(DASHSCOPE_WORKSPACE_BASE_URL_KEY, "") or ""
         ).strip()
         self.reference_resolver = WanReferenceResolver(
             ReferenceAssetService(self.repository)
@@ -154,6 +159,10 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
         child_env = dict(self.env)
         if self._environment_credential:
             child_env["DASHSCOPE_API_KEY"] = self._environment_credential
+        if self._environment_workspace_base_url:
+            child_env[DASHSCOPE_WORKSPACE_BASE_URL_KEY] = (
+                self._environment_workspace_base_url
+            )
         return type(self)(
             self.repository,
             paths=self.paths,
@@ -195,12 +204,16 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
         input_resolver = FrozenFileInputResolver(
             {reference.version_id: reference.path}
         )
-        runtime = self.runtime_factory(
-            credentials={"DASHSCOPE_API_KEY": credential},
-            create_authorized=True,
-            artifact_sink=sink,
-            input_resolver=input_resolver,
-        )
+        runtime_options: dict[str, object] = {
+            "credentials": {"DASHSCOPE_API_KEY": credential},
+            "create_authorized": True,
+            "artifact_sink": sink,
+            "input_resolver": input_resolver,
+        }
+        workspace_base_url = self._workspace_base_url(credential)
+        if workspace_base_url:
+            runtime_options["dashscope_workspace_base_url"] = workspace_base_url
+        runtime = self.runtime_factory(**runtime_options)
         manifest = runtime.primary_manifest(CapabilityKind.VIDEO)
         request = self._build_request(snapshot, manifest)
         result = runtime.submit(
@@ -339,12 +352,16 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
             request = self._build_request(snapshot, self._manifest())
         if require_input and (request is None or input_resolver is None):
             raise MainlandWanAdapterError("Wan recovery input context is unavailable")
-        runtime = self.runtime_factory(
-            credentials={"DASHSCOPE_API_KEY": credential},
-            create_authorized=False,
-            artifact_sink=sink,
-            input_resolver=input_resolver,
-        )
+        runtime_options: dict[str, object] = {
+            "credentials": {"DASHSCOPE_API_KEY": credential},
+            "create_authorized": False,
+            "artifact_sink": sink,
+            "input_resolver": input_resolver,
+        }
+        workspace_base_url = self._workspace_base_url(credential)
+        if workspace_base_url:
+            runtime_options["dashscope_workspace_base_url"] = workspace_base_url
+        runtime = self.runtime_factory(**runtime_options)
         self._runtimes[runtime_reference] = runtime
         self._sinks[runtime_reference] = sink
         if request is not None:
@@ -456,6 +473,35 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
         except Exception:
             stored = None
         return str(stored or self._environment_credential).strip()
+
+    def _workspace_base_url(self, credential: str) -> str | None:
+        configured: set[str] = set()
+        try:
+            configured = set(self.credential_store.configured_providers())
+        except Exception:
+            pass
+        raw = ""
+        if DASHSCOPE_WORKSPACE_BASE_URL_KEY in configured:
+            try:
+                raw = str(
+                    self.credential_store.get(DASHSCOPE_WORKSPACE_BASE_URL_KEY)
+                    or ""
+                ).strip()
+            except Exception:
+                raw = ""
+        raw = raw or self._environment_workspace_base_url
+        if not raw:
+            if str(credential).startswith("sk-ws-"):
+                raise MainlandWanAdapterError(
+                    "sk-ws- Key requires a DashScope workspace Base URL"
+                )
+            return None
+        try:
+            return dashscope_workspace_endpoint_profile(raw).base_url
+        except Exception as exc:
+            raise MainlandWanAdapterError(
+                "DashScope workspace Base URL is invalid"
+            ) from exc
 
     @staticmethod
     def _manifest():

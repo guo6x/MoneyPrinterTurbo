@@ -29,18 +29,25 @@ MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"video"
 
 
 class _CredentialStore:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        secret: str = "unit-test-secret",
+        workspace_base_url: str | None = None,
+    ) -> None:
         self.read_count = 0
         self.presence_count = 0
+        self.values = {"DASHSCOPE_API_KEY": secret}
+        if workspace_base_url:
+            self.values["DASHSCOPE_WORKSPACE_BASE_URL"] = workspace_base_url
 
     def configured_providers(self):
         self.presence_count += 1
-        return ("DASHSCOPE_API_KEY",)
+        return tuple(self.values)
 
     def get(self, key):
-        assert key == "DASHSCOPE_API_KEY"
         self.read_count += 1
-        return "unit-test-secret"
+        return self.values.get(key)
 
 
 class _ReferenceResolver:
@@ -69,11 +76,14 @@ class _OfflineMainlandWanRuntime:
         create_authorized,
         artifact_sink,
         input_resolver=None,
+        dashscope_workspace_base_url=None,
     ) -> None:
-        assert credentials == {"DASHSCOPE_API_KEY": "unit-test-secret"}
+        assert set(credentials) == {"DASHSCOPE_API_KEY"}
+        assert credentials["DASHSCOPE_API_KEY"]
         self.create_authorized = create_authorized
         self.artifact_sink = artifact_sink
         self.input_resolver = input_resolver
+        self.dashscope_workspace_base_url = dashscope_workspace_base_url
         self.requests = []
         self.poll_references = []
         self.outcome = RuntimeOutcome.SUBMITTED
@@ -212,10 +222,17 @@ def _snapshot() -> ProductionInputSnapshot:
     )
 
 
-def _adapter(tmp_path: Path, *, plan=None, provider_task=None, repository=None):
+def _adapter(
+    tmp_path: Path,
+    *,
+    plan=None,
+    provider_task=None,
+    repository=None,
+    credential_store=None,
+):
     image = tmp_path / "reference.png"
     image.write_bytes(png_bytes())
-    store = _CredentialStore()
+    store = credential_store or _CredentialStore()
     adapter = MainlandWanProductionAdapter(
         repository=repository or object(),
         paths=_paths(tmp_path),
@@ -267,6 +284,38 @@ def test_submit_uses_exact_mainland_manifest_one_reference_and_one_create(tmp_pa
     }
     assert request.authorization_required is True
     assert request.create_authorized is True
+
+
+def test_workspace_key_and_base_url_are_pinned_into_wan_runtime(tmp_path):
+    _OfflineMainlandWanRuntime.instances.clear()
+    workspace_base_url = (
+        "https://ws-unit-test.cn-beijing.maas.aliyuncs.com/api/v1"
+    )
+    store = _CredentialStore(
+        secret="sk-ws-unit-test",
+        workspace_base_url=workspace_base_url,
+    )
+    adapter, _store = _adapter(tmp_path, credential_store=store)
+
+    adapter.submit(_snapshot())
+
+    runtime = _OfflineMainlandWanRuntime.instances[-1]
+    assert runtime.dashscope_workspace_base_url == workspace_base_url
+
+
+def test_workspace_key_without_base_url_stops_before_wan_runtime(tmp_path):
+    _OfflineMainlandWanRuntime.instances.clear()
+    _OfflineMainlandWanRuntime.submit_count = 0
+    adapter, _store = _adapter(
+        tmp_path,
+        credential_store=_CredentialStore(secret="sk-ws-unit-test"),
+    )
+
+    with pytest.raises(MainlandWanAdapterError, match="workspace Base URL"):
+        adapter.submit(_snapshot())
+
+    assert _OfflineMainlandWanRuntime.instances == []
+    assert _OfflineMainlandWanRuntime.submit_count == 0
 
 
 def test_submit_requires_explicit_authorization_and_never_creates_when_blocked(

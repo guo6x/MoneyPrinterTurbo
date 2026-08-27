@@ -10,9 +10,11 @@ from aidrama_studio.services.model_runtime.contracts import (
     CapabilityKind,
     CapabilityRequest,
     DriverResponse,
+    EncodedRequest,
     ProtocolFamily,
 )
 from aidrama_studio.services.model_runtime.drivers import (
+    DriverError,
     RequestResponseDriver,
     TransportError,
 )
@@ -25,7 +27,9 @@ from aidrama_studio.services.model_runtime.mainland_manifests import (
 )
 from aidrama_studio.services.model_runtime.mainland_runtime import (
     ContentAddressedArtifactSink,
+    MainlandHTTPTransport,
     MainlandProviderRuntime,
+    dashscope_workspace_endpoint_profile,
 )
 
 
@@ -62,6 +66,25 @@ class Session:
         return self.responses.pop(0)
 
 
+class JsonResponse:
+    status_code = 200
+    headers = {"Content-Type": "application/json"}
+    content = b""
+
+    @staticmethod
+    def json():
+        return {"output": {}}
+
+
+class TransportSession:
+    def __init__(self):
+        self.calls = []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return JsonResponse()
+
+
 def _image_manifest():
     return next(
         manifest
@@ -95,6 +118,7 @@ def test_zimage_contract_supports_landscape_and_portrait_without_n(resolution):
         _request(manifest, resolution=resolution), manifest
     )
 
+    assert encoded.path == "/services/aigc/multimodal-generation/generation"
     parameters = encoded.payload["parameters"]
     assert parameters == {"size": resolution}
     assert "n" not in parameters
@@ -137,6 +161,59 @@ def test_mainland_quality_profile_and_paid_create_retry_count_are_frozen():
         and binding.driver.max_retries == 0
         for binding in request_response_bindings
     )
+
+
+def test_dashscope_workspace_endpoint_pins_host_path_and_bearer_header():
+    base_url = "https://ws-unit-test.cn-beijing.maas.aliyuncs.com/api/v1"
+    profile = dashscope_workspace_endpoint_profile(base_url)
+    session = TransportSession()
+    transport = MainlandHTTPTransport(
+        profile,
+        "unit-test-secret",
+        session=session,
+    )
+
+    transport.create(
+        EncodedRequest(
+            payload={"model": "z-image-turbo"},
+            method="POST",
+            path="/services/aigc/multimodal-generation/generation",
+        )
+    )
+
+    method, url, kwargs = session.calls[0]
+    assert method == "POST"
+    assert url == (
+        "https://ws-unit-test.cn-beijing.maas.aliyuncs.com/api/v1/"
+        "services/aigc/multimodal-generation/generation"
+    )
+    assert kwargs["headers"]["Authorization"] == "Bearer unit-test-secret"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://dashscope.aliyuncs.com/api/v1",
+        "https://ws-test.cn-shanghai.maas.aliyuncs.com/api/v1",
+        "https://ws-test.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "https://ws-test.cn-beijing.maas.aliyuncs.com.evil.example/api/v1",
+        "http://ws-test.cn-beijing.maas.aliyuncs.com/api/v1",
+    ],
+)
+def test_dashscope_workspace_endpoint_rejects_non_workspace_destinations(base_url):
+    with pytest.raises(DriverError, match="workspace /api/v1 endpoint"):
+        dashscope_workspace_endpoint_profile(base_url)
+
+
+def test_mainland_runtime_uses_workspace_endpoint_for_dashscope_manifests():
+    base_url = "https://ws-unit-test.cn-beijing.maas.aliyuncs.com/api/v1"
+    runtime = MainlandProviderRuntime(
+        credentials={},
+        dashscope_workspace_base_url=base_url,
+    )
+    image = runtime.primary_manifest(CapabilityKind.IMAGE)
+
+    assert runtime.binding_for(image.id).endpoint.base_url == base_url
 
 
 @pytest.mark.parametrize(
