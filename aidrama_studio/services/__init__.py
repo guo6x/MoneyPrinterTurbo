@@ -46,6 +46,7 @@ from .diagnostics import DiagnosticsError, DiagnosticsService, DiskSpaceService
 from .tts_runtime import TTS_LIVE_SMOKE_TEXT, TTSRuntimeError, TTSRuntimeService
 from .production_queue import ProductionAuthorizationPreview, ProductionQueueError, ProductionQueueService
 from .production_runtime_resolver import ProductionRuntimeResolutionError, ProductionRuntimeResolver
+from .auto_orchestrator import AutoOrchestratorError, AutoOrchestratorService
 from .security import (
     configure_runtime_logging,
     sanitize_error,
@@ -170,6 +171,7 @@ __all__ = [
     "TTS_LIVE_SMOKE_TEXT", "TTSRuntimeError", "TTSRuntimeService",
     "ProductionAuthorizationPreview", "ProductionQueueError", "ProductionQueueService",
     "ProductionRuntimeResolutionError", "ProductionRuntimeResolver",
+    "AutoOrchestratorError", "AutoOrchestratorService",
     "configure_runtime_logging", "sanitize_error", "sanitize_persistent_metadata",
     "ProviderReadinessService", "CapabilityReadiness", "ReadinessState",
     "OfflineLivePreflightService", "OfflineProfilePreflight",

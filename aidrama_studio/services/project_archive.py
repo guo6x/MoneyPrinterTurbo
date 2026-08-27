@@ -94,6 +94,10 @@ class ProjectArchiveService:
         "provider_selection_settings",
         "heavy_jobs",
         "heavy_job_events",
+        "auto_orchestrator_runs",
+        "auto_agent_events",
+        "auto_paid_authorizations",
+        "auto_paid_consumptions",
     )
 
     # Rows with NULL project_id (global provider defaults/settings) are
@@ -138,6 +142,9 @@ class ProjectArchiveService:
             "vision_analysis_results",
             "provider_selection_settings",
             "heavy_jobs",
+            "auto_orchestrator_runs",
+            "auto_agent_events",
+            "auto_paid_authorizations",
         }
     )
 
@@ -158,6 +165,10 @@ class ProjectArchiveService:
             "reference_image_candidates",
         ),
         "heavy_job_events": ("heavy_job_id", "heavy_jobs"),
+        "auto_paid_consumptions": (
+            "authorization_id",
+            "auto_paid_authorizations",
+        ),
     }
 
     # ALTER TABLE additions without SQLite FK clauses are still project graph
@@ -219,6 +230,8 @@ class ProjectArchiveService:
             {"input_snapshot_json", "output_provenance_json"}
         ),
         "heavy_job_events": frozenset({"payload_json"}),
+        "auto_orchestrator_runs": frozenset({"metadata_json"}),
+        "auto_paid_authorizations": frozenset({"authorization_json"}),
     }
     SANITIZED_TEXT_COLUMNS = {
         "provider_tasks": frozenset({"error_message"}),

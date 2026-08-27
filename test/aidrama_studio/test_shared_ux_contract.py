@@ -24,8 +24,9 @@ from aidrama_studio.pages._shared import (
 
 def test_navigation_exposes_single_creative_and_story_routes_in_target_order():
     keys = [item[0] for item in PAGE_DEFINITIONS]
-    assert keys[:3] == ["dashboard", "creative", "story"]
+    assert keys[:4] == ["dashboard", "auto", "creative", "story"]
     assert keys[-1] == "settings"
+    assert keys.count("auto") == 1
     assert keys.count("creative") == 1
     assert canonical_page_key("creative-intake") == "creative"
     assert canonical_page_key("story-script") == "story"

@@ -59,6 +59,16 @@ from .runtime_operations import (
     VisionAnalysisRecord,
     VisionFrameManifest,
 )
+from .auto_orchestrator import (
+    AutoAction,
+    AutoAgentEvent,
+    AutoDecision,
+    AutoOrchestrationState,
+    AutoPaidAuthorization,
+    AutoPaidAuthorizationPreview,
+    AutoRunStatus,
+    AutoStage,
+)
 
 __all__ = [
     "AspectRatio",
@@ -95,4 +105,6 @@ __all__ = [
     "CapabilityProfile", "ProviderDeploymentRegion", "ProviderPreset",
     "ProviderSelectionSettings", "ProviderTask", "ProviderVerificationState",
     "VisionFrameManifest", "VisionAnalysisRecord",
+    "AutoAction", "AutoAgentEvent", "AutoDecision", "AutoOrchestrationState",
+    "AutoPaidAuthorization", "AutoPaidAuthorizationPreview", "AutoRunStatus", "AutoStage",
 ]

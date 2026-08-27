@@ -80,6 +80,14 @@ from aidrama_studio.domain.runtime_operations import (
     VisionAnalysisRecord,
     VisionFrameManifest,
 )
+from aidrama_studio.domain.auto_orchestrator import (
+    AutoAction,
+    AutoAgentEvent,
+    AutoOrchestrationState,
+    AutoPaidAuthorization,
+    AutoRunStatus,
+    AutoStage,
+)
 
 from .database import DatabasePaths, connect, initialize_database, transaction
 
@@ -4044,3 +4052,330 @@ class ProjectRepository:
         with connect(self.paths.database) as connection:
             rows = connection.execute(query, tuple(args)).fetchall()
         return [self._vision_analysis_from_row(row) for row in rows]
+
+    @staticmethod
+    def _auto_state_from_row(row) -> AutoOrchestrationState:
+        return AutoOrchestrationState(
+            project_id=row["project_id"],
+            status=AutoRunStatus(row["status"]),
+            current_stage=AutoStage(row["current_stage"]),
+            next_action=AutoAction(row["next_action"]),
+            why=row["why"],
+            blocking_reason=row["blocking_reason"],
+            requires_human=bool(row["requires_human"]),
+            requires_paid_authorization=bool(row["requires_paid_authorization"]),
+            requested_action=row["requested_action"],
+            resume_token=row["resume_token"],
+            completed_stages=tuple(
+                AutoStage(value)
+                for value in json.loads(row["completed_stages_json"])
+            ),
+            input_state_hash=row["input_state_hash"],
+            metadata=json.loads(row["metadata_json"]),
+            last_result=row["last_result"],
+            actor=row["actor"],
+            state_version=row["state_version"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def get_auto_orchestration_state(
+        self, project_id: str
+    ) -> AutoOrchestrationState | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM auto_orchestrator_runs WHERE project_id=?",
+                (project_id,),
+            ).fetchone()
+        return self._auto_state_from_row(row) if row else None
+
+    def record_auto_transition(
+        self,
+        state: AutoOrchestrationState,
+        event: AutoAgentEvent,
+    ) -> tuple[AutoOrchestrationState, AutoAgentEvent]:
+        if state.project_id != event.project_id:
+            raise ValueError("AUTO state/event project mismatch")
+        with self.transaction() as connection:
+            if not self._project_exists(connection, state.project_id):
+                raise ValueError("AUTO project does not exist")
+            current = connection.execute(
+                "SELECT created_at,state_version FROM auto_orchestrator_runs "
+                "WHERE project_id=?",
+                (state.project_id,),
+            ).fetchone()
+            created_at = current["created_at"] if current else state.created_at
+            state_version = int(current["state_version"]) + 1 if current else 1
+            connection.execute(
+                """
+                INSERT INTO auto_orchestrator_runs(
+                    project_id,status,current_stage,next_action,why,blocking_reason,
+                    requires_human,requires_paid_authorization,requested_action,
+                    resume_token,completed_stages_json,input_state_hash,metadata_json,
+                    last_result,actor,state_version,created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    status=excluded.status,current_stage=excluded.current_stage,
+                    next_action=excluded.next_action,why=excluded.why,
+                    blocking_reason=excluded.blocking_reason,
+                    requires_human=excluded.requires_human,
+                    requires_paid_authorization=excluded.requires_paid_authorization,
+                    requested_action=excluded.requested_action,
+                    resume_token=excluded.resume_token,
+                    completed_stages_json=excluded.completed_stages_json,
+                    input_state_hash=excluded.input_state_hash,
+                    metadata_json=excluded.metadata_json,
+                    last_result=excluded.last_result,actor=excluded.actor,
+                    state_version=excluded.state_version,updated_at=excluded.updated_at
+                """,
+                (
+                    state.project_id,
+                    state.status.value,
+                    state.current_stage.value,
+                    state.next_action.value,
+                    state.why,
+                    state.blocking_reason,
+                    int(state.requires_human),
+                    int(state.requires_paid_authorization),
+                    state.requested_action,
+                    state.resume_token,
+                    json.dumps(
+                        [item.value for item in state.completed_stages],
+                        ensure_ascii=False,
+                    ),
+                    state.input_state_hash,
+                    json.dumps(state.metadata, ensure_ascii=False, sort_keys=True),
+                    state.last_result,
+                    state.actor,
+                    state_version,
+                    created_at,
+                    state.updated_at,
+                ),
+            )
+            sequence = connection.execute(
+                "SELECT COALESCE(MAX(sequence_number),0)+1 "
+                "FROM auto_agent_events WHERE project_id=?",
+                (event.project_id,),
+            ).fetchone()[0]
+            connection.execute(
+                """
+                INSERT INTO auto_agent_events(
+                    id,project_id,sequence_number,decision,action,reason,
+                    input_state_hash,result,timestamp,actor
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    event.id,
+                    event.project_id,
+                    sequence,
+                    event.decision,
+                    event.action,
+                    event.reason,
+                    event.input_state_hash,
+                    event.result,
+                    event.timestamp,
+                    event.actor,
+                ),
+            )
+        stored_state = self.get_auto_orchestration_state(state.project_id)
+        if stored_state is None:
+            raise RuntimeError("AUTO state transition did not persist")
+        stored_event = event.model_copy(update={"sequence_number": int(sequence)})
+        return stored_state, stored_event
+
+    @staticmethod
+    def _auto_event_from_row(row) -> AutoAgentEvent:
+        return AutoAgentEvent(
+            id=row["id"],
+            project_id=row["project_id"],
+            sequence_number=row["sequence_number"],
+            decision=row["decision"],
+            action=row["action"],
+            reason=row["reason"],
+            input_state_hash=row["input_state_hash"],
+            result=row["result"],
+            timestamp=row["timestamp"],
+            actor=row["actor"],
+        )
+
+    def list_auto_agent_events(self, project_id: str) -> list[AutoAgentEvent]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(
+                "SELECT * FROM auto_agent_events WHERE project_id=? "
+                "ORDER BY sequence_number",
+                (project_id,),
+            ).fetchall()
+        return [self._auto_event_from_row(row) for row in rows]
+
+    @staticmethod
+    def _auto_paid_authorization_from_row(row) -> AutoPaidAuthorization:
+        return AutoPaidAuthorization(
+            id=row["id"],
+            project_id=row["project_id"],
+            action=AutoAction(row["action"]),
+            resource_key=row["resource_key"],
+            input_state_hash=row["input_state_hash"],
+            authorization_fingerprint=row["authorization_fingerprint"],
+            authorization=json.loads(row["authorization_json"]),
+            global_max=row["global_max"],
+            per_item_max=row["per_item_max"],
+            retry_limit=row["retry_limit"],
+            consumed_count=row["consumed_count"],
+            status=row["status"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def create_auto_paid_authorization(
+        self, authorization: AutoPaidAuthorization
+    ) -> AutoPaidAuthorization:
+        with connect(self.paths.database) as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM auto_paid_authorizations
+                WHERE project_id=? AND action=? AND resource_key=?
+                    AND input_state_hash=?
+                """,
+                (
+                    authorization.project_id,
+                    authorization.action.value,
+                    authorization.resource_key,
+                    authorization.input_state_hash,
+                ),
+            ).fetchone()
+            if existing is not None:
+                stored = self._auto_paid_authorization_from_row(existing)
+                if (
+                    stored.authorization_fingerprint
+                    == authorization.authorization_fingerprint
+                ):
+                    return stored
+                if stored.status != "ACTIVE" or stored.consumed_count != 0:
+                    return stored
+                connection.execute(
+                    "UPDATE auto_paid_authorizations SET "
+                    "authorization_fingerprint=?,authorization_json=?,"
+                    "global_max=?,per_item_max=?,retry_limit=?,updated_at=? "
+                    "WHERE id=? AND status='ACTIVE' AND consumed_count=0",
+                    (
+                        authorization.authorization_fingerprint,
+                        json.dumps(
+                            authorization.authorization,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        authorization.global_max,
+                        authorization.per_item_max,
+                        authorization.retry_limit,
+                        authorization.updated_at,
+                        stored.id,
+                    ),
+                )
+                refreshed = connection.execute(
+                    "SELECT * FROM auto_paid_authorizations WHERE id=?",
+                    (stored.id,),
+                ).fetchone()
+                return self._auto_paid_authorization_from_row(refreshed)
+            connection.execute(
+                """
+                INSERT INTO auto_paid_authorizations(
+                    id,project_id,action,resource_key,input_state_hash,
+                    authorization_fingerprint,authorization_json,global_max,
+                    per_item_max,retry_limit,consumed_count,status,created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    authorization.id,
+                    authorization.project_id,
+                    authorization.action.value,
+                    authorization.resource_key,
+                    authorization.input_state_hash,
+                    authorization.authorization_fingerprint,
+                    json.dumps(
+                        authorization.authorization,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    authorization.global_max,
+                    authorization.per_item_max,
+                    authorization.retry_limit,
+                    authorization.consumed_count,
+                    authorization.status,
+                    authorization.created_at,
+                    authorization.updated_at,
+                ),
+            )
+        return authorization
+
+    def find_auto_paid_authorization(
+        self,
+        project_id: str,
+        action: AutoAction,
+        resource_key: str,
+        input_state_hash: str,
+        *,
+        include_inactive: bool = False,
+    ) -> AutoPaidAuthorization | None:
+        status_clause = "" if include_inactive else " AND status='ACTIVE'"
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                f"""
+                SELECT * FROM auto_paid_authorizations
+                WHERE project_id=? AND action=? AND resource_key=?
+                    AND input_state_hash=?{status_clause}
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (project_id, action.value, resource_key, input_state_hash),
+            ).fetchone()
+        return self._auto_paid_authorization_from_row(row) if row else None
+
+    def consume_auto_paid_authorization(
+        self,
+        authorization_id: str,
+        operation_key: str,
+        count: int,
+        *,
+        consumption_id: str,
+        created_at: str,
+    ) -> AutoPaidAuthorization:
+        if count < 1:
+            raise ValueError("AUTO paid consumption must be positive")
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM auto_paid_authorizations WHERE id=?",
+                (authorization_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("AUTO paid authorization does not exist")
+            existing = connection.execute(
+                "SELECT 1 FROM auto_paid_consumptions "
+                "WHERE authorization_id=? AND operation_key=?",
+                (authorization_id, operation_key),
+            ).fetchone()
+            if existing is not None:
+                return self._auto_paid_authorization_from_row(row)
+            if row["status"] != "ACTIVE":
+                raise ValueError("AUTO paid authorization is not active")
+            consumed = int(row["consumed_count"])
+            maximum = int(row["global_max"])
+            if consumed + count > maximum:
+                raise ValueError("AUTO paid authorization global max exceeded")
+            connection.execute(
+                "INSERT INTO auto_paid_consumptions("
+                "id,authorization_id,operation_key,consumed_count,created_at) "
+                "VALUES (?,?,?,?,?)",
+                (consumption_id, authorization_id, operation_key, count, created_at),
+            )
+            new_count = consumed + count
+            status = "CONSUMED" if new_count >= maximum else "ACTIVE"
+            connection.execute(
+                "UPDATE auto_paid_authorizations SET consumed_count=?,status=?,"
+                "updated_at=? WHERE id=?",
+                (new_count, status, created_at, authorization_id),
+            )
+        with connect(self.paths.database) as connection:
+            updated = connection.execute(
+                "SELECT * FROM auto_paid_authorizations WHERE id=?",
+                (authorization_id,),
+            ).fetchone()
+        return self._auto_paid_authorization_from_row(updated)

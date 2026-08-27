@@ -1847,6 +1847,102 @@ def _migration_032_shot_source_selection_kind_forward_repair(
         )
 
 
+def _migration_033_auto_mode_orchestrator(connection: sqlite3.Connection) -> None:
+    """Persist AUTO Mode truth, explainability events, and bounded create budgets."""
+
+    connection.execute(
+        """
+        CREATE TABLE auto_orchestrator_runs (
+            project_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL CHECK (status IN (
+                'IDLE','RUNNING','WAITING_PROVIDER','WAITING_HUMAN',
+                'BLOCKED','FAILED','SUCCEEDED','CANCELLED'
+            )),
+            current_stage TEXT NOT NULL,
+            next_action TEXT NOT NULL,
+            why TEXT NOT NULL,
+            blocking_reason TEXT,
+            requires_human INTEGER NOT NULL CHECK (requires_human IN (0,1)),
+            requires_paid_authorization INTEGER NOT NULL
+                CHECK (requires_paid_authorization IN (0,1)),
+            requested_action TEXT,
+            resume_token TEXT,
+            completed_stages_json TEXT NOT NULL,
+            input_state_hash TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            last_result TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            state_version INTEGER NOT NULL CHECK (state_version >= 1),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE auto_agent_events (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            sequence_number INTEGER NOT NULL CHECK (sequence_number >= 1),
+            decision TEXT NOT NULL,
+            action TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            input_state_hash TEXT NOT NULL,
+            result TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            UNIQUE(project_id, sequence_number),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_auto_agent_events_project "
+        "ON auto_agent_events(project_id, sequence_number)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE auto_paid_authorizations (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            resource_key TEXT NOT NULL,
+            input_state_hash TEXT NOT NULL,
+            authorization_fingerprint TEXT NOT NULL,
+            authorization_json TEXT NOT NULL,
+            global_max INTEGER NOT NULL CHECK (global_max >= 1),
+            per_item_max INTEGER NOT NULL CHECK (per_item_max >= 1),
+            retry_limit INTEGER NOT NULL CHECK (retry_limit >= 0),
+            consumed_count INTEGER NOT NULL DEFAULT 0 CHECK (consumed_count >= 0),
+            status TEXT NOT NULL CHECK (status IN ('ACTIVE','CONSUMED','REVOKED')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(project_id, action, resource_key, input_state_hash),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_auto_paid_authorizations_project "
+        "ON auto_paid_authorizations(project_id, status, updated_at DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE auto_paid_consumptions (
+            id TEXT PRIMARY KEY,
+            authorization_id TEXT NOT NULL,
+            operation_key TEXT NOT NULL,
+            consumed_count INTEGER NOT NULL CHECK (consumed_count >= 1),
+            created_at TEXT NOT NULL,
+            UNIQUE(authorization_id, operation_key),
+            FOREIGN KEY(authorization_id) REFERENCES auto_paid_authorizations(id)
+                ON DELETE CASCADE
+        )
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1880,6 +1976,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (30, _migration_030_final_duration_control),
     (31, _migration_031_runtime_plan_schema_forward_repair),
     (32, _migration_032_shot_source_selection_kind_forward_repair),
+    (33, _migration_033_auto_mode_orchestrator),
 )
 
 
