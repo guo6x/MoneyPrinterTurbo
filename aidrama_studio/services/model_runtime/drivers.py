@@ -246,10 +246,19 @@ class RequestResponseDriver:
         request: CapabilityRequest,
         codec: ProviderCodec,
         manifest: ModelManifest | None = None,
+        *,
+        authorization: object | None = None,
     ) -> CapabilityResult:
         _validate_family(request, self.family)
         selected_manifest = _manifest_from(
             codec, manifest if manifest is not None else self.manifest
+        )
+        # A request/response generation call is still a provider CREATE even
+        # though it has no separate task identity.  Apply the same explicit
+        # authorization gate used by async creates before encoding or any
+        # transport call; non-gated/free models remain unaffected.
+        AsyncTaskDriver._check_create_authorization(
+            request, selected_manifest, authorization
         )
         validate_request_against_manifest(request, selected_manifest, codec_id=getattr(codec, "codec_id", None))
         _codec_validate(codec, request, selected_manifest)
@@ -661,7 +670,24 @@ class StreamDriver:
             # Accept the same small HTTP-shaped envelope as the other
             # drivers.  Provider-specific stream event decoding still belongs
             # entirely to the codec.
-            if isinstance(opened, DriverResponse) or (
+            if isinstance(opened, Mapping):
+                # A mapping returned directly by a stream transport is only
+                # valid when it is an explicit HTTP-shaped envelope.  Treat
+                # an ordinary provider object/mapping as malformed instead
+                # of iterating its keys as fake stream chunks.
+                if not any(
+                    key in opened for key in ("status_code", "payload", "body", "headers")
+                ):
+                    raise MalformedProviderResult(
+                        "stream transport returned a mapping without an envelope"
+                    )
+                response = _transport_response(opened)
+                if response.status_code < 200 or response.status_code >= 300:
+                    raise TransportError(
+                        f"stream transport returned {response.status_code}"
+                    )
+                iterable = response.payload
+            elif isinstance(opened, DriverResponse) or (
                 isinstance(opened, tuple)
                 and len(opened) == 2
                 and isinstance(opened[0], int)

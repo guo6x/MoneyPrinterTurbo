@@ -15,6 +15,8 @@ from aidrama_studio.services.model_runtime import (
     ResolverRequest,
     ProtocolDriverRegistry,
     RegionResolutionError,
+    UnsupportedCapabilityError,
+    UnsupportedProtocolError,
     JsonProviderCodec,
     DriverResponse,
     MalformedProviderResult,
@@ -256,3 +258,34 @@ def test_request_protocol_alias_conflict_fails_closed() -> None:
             protocol_family="REQUEST_RESPONSE",
             protocol="STREAM",
         )
+
+
+def test_duck_manifest_identity_and_protocol_alias_conflicts_fail_closed() -> None:
+    class ConflictingManifest:
+        id = "canonical-id"
+        manifest_id = "alias-id"
+        capability = "LLM"
+        capabilities = ("LLM",)
+        protocol = "REQUEST_RESPONSE"
+        protocol_family = "STREAM"
+
+    with pytest.raises(ModelResolutionError, match="identity aliases conflict"):
+        ModelResolver(InMemoryManifestRegistry((ConflictingManifest(),)))
+
+    class ConflictingCapabilityManifest:
+        id = "capability-conflict"
+        capability = "LLM"
+        capabilities = ("IMAGE",)
+        protocol = "REQUEST_RESPONSE"
+
+    with pytest.raises(UnsupportedCapabilityError, match="capability.*conflict"):
+        ModelResolver(InMemoryManifestRegistry((ConflictingCapabilityManifest(),)))
+
+    class ConflictingProtocolManifest:
+        id = "protocol-conflict"
+        capability = "LLM"
+        protocol = "REQUEST_RESPONSE"
+        protocol_family = "STREAM"
+
+    with pytest.raises(UnsupportedProtocolError, match="protocol.*aliases conflict"):
+        ModelResolver(InMemoryManifestRegistry((ConflictingProtocolManifest(),)))

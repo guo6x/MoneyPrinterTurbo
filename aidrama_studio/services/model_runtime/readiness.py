@@ -329,26 +329,32 @@ def readiness_from_status(
     if runtime_value is None:
         runtime_value = status_value("available", False)
 
-    required_value = authorization_required
-    if required_value is None:
-        required_value = auth_metadata.get("requires_create_authorization")
-    if required_value is None:
-        required_value = manifest_auth.get("requires_create_authorization")
-    if required_value is None:
-        required_value = manifest_auth.get("required")
-    if required_value is None:
-        required_value = status_metadata.get("authorization_required")
-    if required_value is None:
-        required_value = status_metadata.get("requires_create_authorization")
-    if required_value is None:
-        required_value = False
-
-    # A manifest's declaration is authoritative for the create lifecycle.
-    # A status object may omit the field entirely (or carry a stale false
-    # default), but it must not erase an explicit paid-create requirement.
-    manifest_required = manifest_auth.get("requires_create_authorization")
-    if _gate_required(manifest_required, False):
+    # Gather every independent requirement declaration.  A true (or
+    # malformed/unknown) value wins over a false value so a stale default on a
+    # status object cannot disable a paid-create gate.  An explicit
+    # ``authorization_required=False`` is still preserved when no other
+    # source declares a requirement.
+    status_required_values = (
+        status_value("authorization_required"),
+        status_value("requires_create_authorization"),
+    )
+    requirement_values = (
+        authorization_required,
+        auth_metadata.get("requires_create_authorization"),
+        auth_metadata.get("required"),
+        *status_required_values,
+        manifest_auth.get("requires_create_authorization"),
+        manifest_auth.get("required"),
+        status_metadata.get("authorization_required"),
+        status_metadata.get("requires_create_authorization"),
+    )
+    if any(value is not None and _gate_required(value, False) for value in requirement_values):
         required_value = True
+    else:
+        required_value = next(
+            (value for value in requirement_values if value is not None),
+            False,
+        )
 
     configured = _bool(configured_value)
     # Authorization requirements are security-sensitive: only an explicit

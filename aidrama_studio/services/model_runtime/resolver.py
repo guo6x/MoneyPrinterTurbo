@@ -93,7 +93,6 @@ class RegionPolicy(StrEnum):
             "GLOBAL": cls.INTERNATIONAL,
             "CUSTOM": cls.CUSTOM,
             "ANY": cls.ANY,
-            "UNSPECIFIED": cls.ANY,
         }
         if normalized in aliases:
             return aliases[normalized]
@@ -348,6 +347,60 @@ def _manifest_value(manifest: object, *names: str, default: object = None) -> ob
     return default
 
 
+_MISSING_MANIFEST_VALUE = object()
+
+
+def _declared_manifest_value(manifest: object, name: str) -> tuple[bool, object]:
+    """Read one manifest field while preserving whether it was declared."""
+
+    if isinstance(manifest, Mapping):
+        if name not in manifest:
+            return False, None
+        return True, manifest[name]
+    try:
+        value = getattr(manifest, name, _MISSING_MANIFEST_VALUE)
+    except Exception as exc:
+        raise ModelResolutionError(f"manifest field {name} could not be read") from exc
+    if value is _MISSING_MANIFEST_VALUE:
+        return False, None
+    return True, value
+
+
+def _coalesce_manifest_text(
+    manifest: object,
+    label: str,
+    *names: str,
+    default: str = "",
+    normalizer: Callable[[object], object] | None = None,
+    error_type: type[ModelResolutionError] = ModelResolutionError,
+) -> str:
+    """Read schema aliases without silently accepting conflicting identity."""
+
+    selected: str | None = None
+    for name in names:
+        declared, raw = _declared_manifest_value(manifest, name)
+        if not declared or raw is None:
+            continue
+        try:
+            normalized_value = normalizer(raw) if normalizer is not None else raw
+        except ModelResolutionError:
+            raise
+        except Exception as exc:
+            raise error_type(f"manifest {label} is malformed") from exc
+        if hasattr(normalized_value, "value"):
+            normalized_value = getattr(normalized_value, "value")
+        normalized = _text(normalized_value)
+        if not normalized:
+            continue
+        if selected is None:
+            selected = normalized
+        elif selected != normalized:
+            raise error_type(
+                f"manifest {label} aliases conflict: {selected!r} vs {normalized!r}"
+            )
+    return selected if selected is not None else default
+
+
 def normalize_capability(value: object) -> CapabilityKind:
     try:
         if isinstance(value, Enum) and not isinstance(value, CapabilityKind):
@@ -371,38 +424,40 @@ def normalize_protocol(value: object) -> ProtocolFamily:
 
 
 def manifest_id(manifest: object) -> str:
-    return _text(_manifest_value(manifest, "manifest_id", "id", default=""))
+    return _coalesce_manifest_text(manifest, "identity", "manifest_id", "id")
 
 
 def manifest_provider_id(manifest: object) -> str:
-    return _text(_manifest_value(manifest, "provider_id", "provider", default=""))
+    return _coalesce_manifest_text(
+        manifest, "provider identity", "provider_id", "provider"
+    )
 
 
 def manifest_model_id(manifest: object) -> str:
-    return _text(_manifest_value(manifest, "model_id", "model", default=""))
+    return _coalesce_manifest_text(manifest, "model identity", "model_id", "model")
 
 
 def manifest_endpoint_id(manifest: object) -> str:
-    return _text(
-        _manifest_value(
-            manifest,
-            "endpoint_profile_id",
-            "profile_id",
-            "endpoint_id",
-            default="",
-        )
+    return _coalesce_manifest_text(
+        manifest,
+        "endpoint profile identity",
+        "endpoint_profile_id",
+        "profile_id",
+        "endpoint_id",
     )
 
 
 def manifest_region(manifest: object) -> str:
-    value = _manifest_value(
+    return _coalesce_manifest_text(
         manifest,
+        "deployment region",
         "deployment_region",
         "region",
         "deployment",
         default="UNSPECIFIED",
+        normalizer=_normalize_region_value,
+        error_type=RegionResolutionError,
     )
-    return _normalize_region_value(value)
 
 
 def manifest_endpoint_class(manifest: object) -> str:
@@ -435,32 +490,53 @@ def manifest_hash(manifest: object) -> str:
 
 
 def manifest_capabilities(manifest: object) -> tuple[CapabilityKind, ...]:
-    raw = _manifest_value(manifest, "capabilities", "capability", default=())
-    if isinstance(raw, (str, bytes)):
-        raw = (raw,)
-    try:
-        values = tuple(raw)
-    except TypeError:
-        values = ()
-    result: list[CapabilityKind] = []
-    for value in values:
-        try:
-            item = normalize_capability(value)
-        except UnsupportedCapabilityError as exc:
-            # A manifest with one unknown capability is malformed, even when
-            # it also happens to list a known capability.  Silently dropping
-            # the unknown value would make a typo look like a valid fallback.
-            raise UnsupportedCapabilityError(
-                f"manifest declares unsupported capability: {value!r}"
-            ) from exc
-        if item not in result:
-            result.append(item)
-    return tuple(result)
+    def normalize_many(raw: object, *, plural: bool) -> tuple[CapabilityKind, ...]:
+        if not plural:
+            values = (raw,)
+        elif isinstance(raw, (str, bytes)):
+            values = (raw,)
+        else:
+            try:
+                values = tuple(raw)  # type: ignore[arg-type]
+            except TypeError as exc:
+                raise UnsupportedCapabilityError(
+                    "manifest capabilities must be a sequence"
+                ) from exc
+        result: list[CapabilityKind] = []
+        for value in values:
+            try:
+                item = normalize_capability(value)
+            except UnsupportedCapabilityError as exc:
+                # A manifest with one unknown capability is malformed, even
+                # when it also lists a known capability.
+                raise UnsupportedCapabilityError(
+                    f"manifest declares unsupported capability: {value!r}"
+                ) from exc
+            if item not in result:
+                result.append(item)
+        return tuple(result)
+
+    has_plural, raw_plural = _declared_manifest_value(manifest, "capabilities")
+    has_singular, raw_singular = _declared_manifest_value(manifest, "capability")
+    plural = normalize_many(raw_plural, plural=True) if has_plural else ()
+    singular = normalize_many(raw_singular, plural=False) if has_singular else ()
+    if has_plural and has_singular and plural != singular:
+        raise UnsupportedCapabilityError(
+            "manifest capability and capabilities aliases conflict"
+        )
+    return plural or singular
 
 
 def manifest_protocol(manifest: object) -> ProtocolFamily:
-    raw = _manifest_value(manifest, "protocol", "protocol_family", default=None)
-    return normalize_protocol(raw)
+    normalized = _coalesce_manifest_text(
+        manifest,
+        "protocol",
+        "protocol",
+        "protocol_family",
+        normalizer=lambda value: normalize_protocol(value).value,
+        error_type=UnsupportedProtocolError,
+    )
+    return normalize_protocol(normalized)
 
 
 def _manifest_public_dict(manifest: object) -> dict[str, object]:
@@ -634,9 +710,22 @@ class ResolverRequest:
             self.region,
             normalizer=_normalize_region_value,
         )
+        custom_selector = _coalesce_selector(
+            "custom region",
+            self.custom_region,
+            normalizer=_normalize_region_value,
+        )
+        # A custom-region selector is itself an exact deployment declaration.
+        # Carry it into the canonical field so a caller does not need to also
+        # repeat ``deployment_region`` to avoid an implicit multi-region
+        # lookup.  Keeping both fields populated preserves the compatibility
+        # spelling while making matching deterministic.
+        if deployment_selector is None and custom_selector is not None:
+            deployment_selector = custom_selector
         object.__setattr__(self, "deployment_region", deployment_selector)
-        if self.custom_region and deployment_selector:
-            custom = _normalize_region_value(self.custom_region)
+        object.__setattr__(self, "custom_region", custom_selector)
+        if custom_selector and deployment_selector:
+            custom = _normalize_region_value(custom_selector)
             if custom != _normalize_region_value(deployment_selector):
                 raise RegionResolutionError(
                     "deployment_region and custom_region selectors conflict"
@@ -644,7 +733,34 @@ class ResolverRequest:
         if self.protocol is not None:
             object.__setattr__(self, "protocol", normalize_protocol(self.protocol))
         if self.region_policy is not None:
-            object.__setattr__(self, "region_policy", RegionPolicy.coerce(self.region_policy))
+            normalized_policy = RegionPolicy.coerce(self.region_policy)
+            object.__setattr__(self, "region_policy", normalized_policy)
+            # A broad policy and an exact region are constraints, not ranked
+            # preferences.  Reject contradictory declarations instead of
+            # silently letting the exact field override the policy (or vice
+            # versa), which could cross a provider deployment boundary.
+            if normalized_policy is not None and normalized_policy is not RegionPolicy.ANY:
+                for label, value in (
+                    ("deployment_region", deployment_selector),
+                    ("custom_region", custom_selector),
+                ):
+                    if value is None:
+                        continue
+                    normalized_value = _normalize_region_value(value)
+                    if normalized_policy is RegionPolicy.MAINLAND:
+                        matches = normalized_value == "MAINLAND_CHINA"
+                    elif normalized_policy is RegionPolicy.INTERNATIONAL:
+                        matches = normalized_value == "INTERNATIONAL"
+                    else:  # CUSTOM: unknown/local/custom deployments only.
+                        matches = normalized_value not in {
+                            "MAINLAND_CHINA",
+                            "INTERNATIONAL",
+                            "UNSPECIFIED",
+                        }
+                    if not matches:
+                        raise RegionResolutionError(
+                            f"{label} {value!r} conflicts with region policy {normalized_policy.value}"
+                        )
 
     @property
     def explicit(self) -> bool:
@@ -1015,6 +1131,27 @@ class ModelResolver:
                 f"no model manifests support capability {request.capability.value}"
             )
 
+        # A frozen RuntimePlan identity is an exact selector, not merely a
+        # post-selection assertion.  Narrow the candidate set before region
+        # ambiguity checks so a persisted plan can be resumed without a new
+        # region preference, while still rejecting any identity drift.
+        frozen_identity = None
+        if request.frozen_identity is not None:
+            frozen_identity = FrozenModelIdentity.from_value(request.frozen_identity)
+            if frozen_identity.is_empty:
+                raise FrozenIdentityError("frozen model identity is empty or malformed")
+            frozen_candidates = [
+                item
+                for item in candidates
+                if self._matches_frozen_identity(item, frozen_identity)
+            ]
+            if not frozen_candidates:
+                raise FrozenIdentityError(
+                    "frozen model identity is not present in the manifest registry; "
+                    "selection cannot mutate"
+                )
+            candidates = frozen_candidates
+
         candidates = [item for item in candidates if self._matches_identity(item, request)]
         if not candidates:
             raise ModelResolutionError("explicit model/provider/profile selection is unavailable; no fallback")
@@ -1239,6 +1376,67 @@ class ModelResolver:
         return all(not expected or _text(expected).casefold() == observed.casefold() for expected, observed in checks)
 
     @staticmethod
+    def _matches_frozen_identity(
+        manifest: object,
+        identity: FrozenModelIdentity,
+    ) -> bool:
+        """Return whether *manifest* exactly satisfies a frozen identity.
+
+        The helper mirrors :meth:`assert_frozen` but is used before scoring so
+        a frozen plan cannot accidentally select a different region/provider
+        and only fail after doing unnecessary readiness work.  Unknown or
+        malformed identity values fail closed by returning ``False``.
+        """
+
+        try:
+            checks: tuple[tuple[str, str, str], ...] = (
+                ("manifest_id", identity.manifest_id, manifest_id(manifest)),
+                ("manifest_hash", identity.manifest_hash, manifest_hash(manifest)),
+                ("provider_id", identity.provider_id, manifest_provider_id(manifest)),
+                ("model_id", identity.model_id, manifest_model_id(manifest)),
+                (
+                    "endpoint_profile_id",
+                    identity.endpoint_profile_id,
+                    manifest_endpoint_id(manifest),
+                ),
+                (
+                    "endpoint_class",
+                    identity.endpoint_class,
+                    manifest_endpoint_class(manifest),
+                ),
+            )
+            for name, expected, observed in checks:
+                if not expected:
+                    continue
+                if name in {"endpoint_profile_id", "endpoint_class"} and expected.upper() in {
+                    "UNSPECIFIED",
+                    "LEGACY",
+                }:
+                    continue
+                if name == "manifest_hash":
+                    if expected.casefold() != observed.casefold():
+                        return False
+                elif expected != observed:
+                    return False
+
+            if identity.deployment_region and identity.deployment_region.upper() not in {
+                "UNSPECIFIED",
+                "LEGACY",
+            }:
+                if _normalize_region_value(identity.deployment_region) != manifest_region(manifest):
+                    return False
+            if identity.capability:
+                expected_capability = normalize_capability(identity.capability)
+                if expected_capability not in manifest_capabilities(manifest):
+                    return False
+            if identity.protocol:
+                if normalize_protocol(identity.protocol) is not manifest_protocol(manifest):
+                    return False
+            return True
+        except (ModelResolutionError, ValueError, TypeError):
+            return False
+
+    @staticmethod
     def _matches_region(manifest: object, request: ResolverRequest) -> bool:
         region = manifest_region(manifest)
         if _text(request.deployment_region):
@@ -1302,9 +1500,101 @@ class ModelResolver:
         providers; an explicitly supplied mismatch fails closed.
         """
 
-        metadata = _map(
-            status.get("metadata") if isinstance(status, Mapping) else getattr(status, "metadata", None)
+        # Legacy status objects usually put endpoint identity under a nested
+        # ``metadata`` mapping, while newer readiness snapshots may expose the
+        # same fields directly on the status object/mapping.  Merge both
+        # spellings without allowing a stale nested value (or a conflicting
+        # alias) to silently make a different provider appear ready.
+        raw_metadata = (
+            status.get("metadata")
+            if isinstance(status, Mapping)
+            else getattr(status, "metadata", None)
         )
+        metadata = dict(_map(raw_metadata))
+        identity_aliases = (
+            ("provider_id", ("provider_id", "provider")),
+            ("model", ("model", "model_id")),
+            (
+                "endpoint_profile_id",
+                ("endpoint_profile_id", "endpoint_id", "profile_id"),
+            ),
+            ("endpoint_class", ("endpoint_class",)),
+            (
+                "deployment_region",
+                ("deployment_region", "region", "deployment"),
+            ),
+            ("protocol", ("protocol", "protocol_family")),
+            ("capability", ("capability",)),
+        )
+        missing = object()
+
+        def declared_status_field(name: str) -> tuple[bool, object]:
+            if isinstance(status, Mapping):
+                if name not in status:
+                    return False, None
+                return True, status[name]
+            try:
+                value = getattr(status, name, missing)
+            except Exception as exc:
+                raise RegionResolutionError(
+                    f"runtime status field {name} could not be read"
+                ) from exc
+            return (False, None) if value is missing else (True, value)
+
+        def normalize_identity_value(name: str, value: object) -> str:
+            try:
+                if name == "deployment_region":
+                    return _normalize_region_value(value)
+                if name == "protocol":
+                    return normalize_protocol(value).value
+                if name == "capability":
+                    return normalize_capability(value).value
+                return _text(value)
+            except ModelResolutionError:
+                raise
+            except Exception as exc:
+                raise RegionResolutionError(
+                    f"runtime status {name} identity is malformed"
+                ) from exc
+
+        for canonical, aliases in identity_aliases:
+            top_values: list[object] = []
+            for alias in aliases:
+                present, value = declared_status_field(alias)
+                if present and value is not None and _text(value):
+                    top_values.append(value)
+            if top_values:
+                top_normalized = normalize_identity_value(canonical, top_values[0])
+                if any(
+                    normalize_identity_value(canonical, value) != top_normalized
+                    for value in top_values[1:]
+                ):
+                    raise RegionResolutionError(
+                        f"runtime status {canonical} aliases conflict; "
+                        "cross-provider fallback is disabled"
+                    )
+                nested_values = [
+                    metadata[alias]
+                    for alias in aliases
+                    if alias in metadata
+                    and metadata[alias] is not None
+                    and _text(metadata[alias])
+                ]
+                if nested_values:
+                    nested_normalized = normalize_identity_value(
+                        canonical, nested_values[0]
+                    )
+                    if any(
+                        normalize_identity_value(canonical, value)
+                        != nested_normalized
+                        for value in nested_values[1:]
+                    ) or nested_normalized != top_normalized:
+                        raise RegionResolutionError(
+                            f"runtime status {canonical} does not match its "
+                            "top-level identity; cross-provider fallback is disabled"
+                        )
+                else:
+                    metadata[canonical] = top_values[0]
         manifest_capability_values = manifest_capabilities(manifest)
         checks = (
             (

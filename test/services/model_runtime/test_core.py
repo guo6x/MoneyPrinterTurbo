@@ -92,6 +92,33 @@ def test_request_response_driver_and_malformed_result_fail_closed() -> None:
         RequestResponseDriver(BadTransport()).invoke(_request(manifest), JsonProviderCodec(), manifest)
 
 
+def test_request_response_paid_create_authorization_blocks_before_transport() -> None:
+    class Transport:
+        calls = 0
+
+        def send(self, encoded):
+            self.calls += 1
+            return {"outcome": "SUCCEEDED"}
+
+    manifest = _manifest(
+        authorization={
+            "create_is_paid": True,
+            "requires_create_authorization": True,
+        },
+        readiness={
+            "configured": True,
+            "runtime_available": True,
+            "create_authorized": False,
+        },
+    )
+    transport = Transport()
+    with pytest.raises(CreateAuthorizationError):
+        RequestResponseDriver(transport).invoke(
+            _request(manifest), JsonProviderCodec(), manifest
+        )
+    assert transport.calls == 0
+
+
 def test_async_create_identity_poll_and_reconcile_never_resubmit() -> None:
     class Transport:
         create_calls = 0
@@ -173,3 +200,26 @@ def test_stream_driver_decodes_incremental_output() -> None:
     result = StreamDriver(Transport()).invoke(_request(manifest), JsonStreamCodec(), manifest)
     assert result.succeeded
     assert result.safe_metadata["chunk_count"] == 3
+
+
+def test_stream_driver_accepts_http_envelope_and_rejects_bare_mapping() -> None:
+    manifest = _manifest(protocol="STREAM")
+    request = _request(manifest)
+
+    class EnvelopeTransport:
+        def open(self, encoded):
+            return {"status_code": 200, "payload": ["a", "b"]}
+
+    result = StreamDriver(EnvelopeTransport()).invoke(
+        request, JsonStreamCodec(), manifest
+    )
+    assert result.safe_metadata["chunk_count"] == 2
+
+    class MalformedTransport:
+        def open(self, encoded):
+            return {"status": "RUNNING"}
+
+    with pytest.raises(MalformedProviderResult):
+        StreamDriver(MalformedTransport()).invoke(
+            request, JsonStreamCodec(), manifest
+        )

@@ -151,3 +151,23 @@ def test_explicit_no_authorization_requirement_is_not_replaced_by_reason_text():
 
     assert status.authorization_required is False
     assert status.create_authorized is True
+
+
+def test_object_level_authorization_requirement_survives_readiness_bridge():
+    status = CapabilityStatus(
+        CapabilityKind.VIDEO_GENERATIVE,
+        "PAID_OBJECT_STATUS",
+        False,
+        "paid live authorization is required",
+        {"configured": True, "live_authorized": False},
+        configured=True,
+        authorization_required=True,
+    )
+
+    readiness = readiness_from_status(status)
+
+    assert readiness.configured is True
+    assert readiness.runtime_available is True
+    assert readiness.authorization_required is True
+    assert readiness.create_authorized is False
+    assert readiness.ready_for_create is False
