@@ -9,6 +9,7 @@ are read only when a user explicitly submits a paid generation action.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -48,6 +49,7 @@ class MainlandFrontendRuntimeBridge:
         credential_store: WindowsCredentialStore | None = None,
         runtime_factory: Callable[..., object] = MainlandProviderRuntime,
         artifact_sink_factory: Callable[[Path], object] = ContentAddressedArtifactSink,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         self.paths = paths or get_default_paths()
         self.repository = repository or ProjectRepository(self.paths)
@@ -56,6 +58,7 @@ class MainlandFrontendRuntimeBridge:
         )
         self.runtime_factory = runtime_factory
         self.artifact_sink_factory = artifact_sink_factory
+        self.env = dict(os.environ if env is None else env)
 
     @staticmethod
     def credential_requirements() -> tuple[dict[str, str], ...]:
@@ -104,6 +107,8 @@ class MainlandFrontendRuntimeBridge:
 
         if operation != "REFERENCE_IMAGE_CANDIDATE":
             raise MainlandFrontendRuntimeError("当前后台活动类型尚未连接")
+        if self.env.get("AIDRAMA_ALLOW_PAID_LIVE_TESTS") != "1":
+            raise MainlandFrontendRuntimeError("当前未启用受控付费创建")
         if payload.get("create_authorized") is not True:
             raise MainlandFrontendRuntimeError("生成前需要明确确认本次付费创建")
 

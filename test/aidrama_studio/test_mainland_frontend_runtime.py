@@ -85,6 +85,7 @@ def _bridge(repository, store):
         paths=repository.paths,
         credential_store=store,
         runtime_factory=_OfflineMainlandRuntime,
+        env={"AIDRAMA_ALLOW_PAID_LIVE_TESTS": "1"},
     )
 
 
@@ -118,6 +119,35 @@ def test_reference_image_action_requires_explicit_paid_authorization(context):
                 "source_story_revision_id": "story_001",
                 "prompt": "rainy bus terminal",
                 "create_authorized": False,
+            },
+        )
+
+    assert store.read_count == 0
+    assert _OfflineMainlandRuntime.requests == []
+
+
+def test_reference_image_action_requires_process_live_gate(context):
+    repository, project = context
+    store = _CredentialStore()
+    bridge = MainlandFrontendRuntimeBridge(
+        repository,
+        paths=repository.paths,
+        credential_store=store,
+        runtime_factory=_OfflineMainlandRuntime,
+        env={},
+    )
+    _OfflineMainlandRuntime.requests.clear()
+
+    with pytest.raises(MainlandFrontendRuntimeError, match="受控付费"):
+        bridge.handle_activity(
+            project.id,
+            "REFERENCE_IMAGE_CANDIDATE",
+            {
+                "subject_id": "char_001",
+                "binding_type": ReferenceBindingType.CHARACTER.value,
+                "source_story_revision_id": "story_001",
+                "prompt": "rainy bus terminal",
+                "create_authorized": True,
             },
         )
 
