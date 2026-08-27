@@ -51,6 +51,7 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
     name = "wan_video"
     provider_id = "WAN_VIDEO"
     model_id = "wan2.7-i2v-2026-04-25"
+    requires_paid_budget = True
     poll_interval_seconds = 5.0
     submission_uncertain_on_error = True
 

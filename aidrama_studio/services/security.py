@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import sys
 from collections.abc import Mapping
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 

@@ -227,8 +227,8 @@ def test_migration_029_adds_candidate_and_current_shot_source_truth() -> None:
 def test_migration_030_adds_final_duration_control_in_order_and_is_idempotent() -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
-    assert MIGRATIONS[-3][0] == 30
-    assert [version for version, _ in MIGRATIONS] == list(range(1, 33))
+    assert MIGRATIONS[-4][0] == 30
+    assert [version for version, _ in MIGRATIONS] == list(range(1, 34))
     prior = [(version, migration) for version, migration in MIGRATIONS if version < 30]
     for _, migration in prior:
         migration(connection)
@@ -435,7 +435,7 @@ def test_migration_032_repairs_recorded_legacy_source_decision_schema() -> None:
     }
     assert "selection_kind" not in before
 
-    assert apply_migrations(connection) == 1
+    assert apply_migrations(connection) == 2
     columns = {
         row[1]
         for row in connection.execute(
@@ -452,6 +452,17 @@ def test_migration_032_repairs_recorded_legacy_source_decision_schema() -> None:
         "artifact-legacy",
         "FINAL_ACCEPTED",
     )
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert {
+        "paid_budget_ledgers",
+        "paid_create_reservations",
+        "production_artifact_identities",
+    } <= tables
     assert apply_migrations(connection) == 0
 
 

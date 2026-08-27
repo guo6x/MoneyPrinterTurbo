@@ -59,6 +59,12 @@ from .runtime_operations import (
     VisionAnalysisRecord,
     VisionFrameManifest,
 )
+from .production_reliability import (
+    PaidBudgetLedger,
+    PaidBudgetProjection,
+    PaidCreateReservation,
+    PaidCreateStatus,
+)
 
 __all__ = [
     "AspectRatio",
@@ -94,5 +100,6 @@ __all__ = [
     "ReferenceProfile", "ReferenceProfileItem",
     "CapabilityProfile", "ProviderDeploymentRegion", "ProviderPreset",
     "ProviderSelectionSettings", "ProviderTask", "ProviderVerificationState",
+    "PaidBudgetLedger", "PaidBudgetProjection", "PaidCreateReservation", "PaidCreateStatus",
     "VisionFrameManifest", "VisionAnalysisRecord",
 ]

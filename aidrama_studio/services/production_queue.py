@@ -23,6 +23,7 @@ from .ai_capabilities import (
 from .production import ProductionService, ProductionServiceError
 from .production_orchestrator import ProductionOrchestrator
 from .production_execution import ProductionExecutionService, ProductionExecutionServiceError
+from .production_reliability import PaidBudgetError, PaidBudgetService
 from .provider_profiles import ProviderProfileError, ProviderProfileService
 from .runtime_foundation import (
     GenerationBriefCompiler,
@@ -89,6 +90,7 @@ class ProductionQueueService:
         self.brief_compiler = GenerationBriefCompiler(self.repository)
         self.generation_briefs = GenerationBriefService(self.repository)
         self.runtime_plans = RuntimePlanService(self.repository)
+        self.paid_budgets = PaidBudgetService(self.repository)
 
     def run_job(
         self,
@@ -367,6 +369,51 @@ class ProductionQueueService:
             "disclosure_version": "regional-provider-v1",
             "authorization_fingerprint": preview.authorization_fingerprint,
         }
+        # Persist the UI/production action intent before preparing plans. The
+        # stable authorization fingerprint makes double-click, page refresh,
+        # and repeated resume() converge on this one durable record.
+        intent_key = (
+            f"production-job:{job.id}:authorization:"
+            f"{preview.authorization_fingerprint}"
+        )
+        intent_now = _now()
+        intent, created_intent = self.repository.get_or_create_provider_task(
+            ProviderTask(
+                id=uuid4().hex,
+                project_id=project_id,
+                execution_id=None,
+                capability=CapabilityKind.VIDEO_GENERATIVE.value,
+                provider_id=preview.provider_id,
+                model_id=preview.model_id,
+                idempotency_key=intent_key,
+                state="PREPARING",
+                request_summary={
+                    "production_job_id": job.id,
+                    "attempt_number": 1,
+                    **frozen_authorization,
+                },
+                created_at=intent_now,
+                updated_at=intent_now,
+            )
+        )
+        if not created_intent and intent.state != "PREPARING":
+            return intent
+        if not created_intent:
+            frozen_authorization = {
+                key: intent.request_summary[key]
+                for key in frozen_authorization
+                if key in intent.request_summary
+            }
+        try:
+            self.paid_budgets.authorize_job(
+                project_id,
+                job.id,
+                authorization_fingerprint=preview.authorization_fingerprint,
+                planned_creates=preview.estimated_provider_requests,
+                authorized_max=preview.estimated_provider_requests,
+            )
+        except PaidBudgetError as exc:
+            raise ProductionQueueError(str(exc)) from exc
         try:
             provider_profile = self.provider_profiles.select(
                 project_id,
@@ -438,30 +485,84 @@ class ProductionQueueService:
             RuntimeFoundationError,
         ) as exc:
             raise ProductionQueueError(str(exc)) from exc
-        attempt_number = 1 + sum(1 for task in self.repository.list_provider_tasks(project_id) if task.execution_id is None and task.request_summary.get("production_job_id") == job.id)
         now = _now()
-        task = self.repository.create_provider_task(ProviderTask(
-            id=uuid4().hex, project_id=project_id, execution_id=None,
-            capability=CapabilityKind.VIDEO_GENERATIVE.value,
-            provider_id=preview.provider_id,
-            model_id=preview.model_id,
-            idempotency_key=f"production-job:{job.id}:attempt:{attempt_number}", state="QUEUED",
-            request_summary={
-                "production_job_id": job.id,
-                "attempt_number": attempt_number,
-                "runtime_plan_ids_by_shot": plan_ids,
-                "provider_profile_id": provider_profile.id,
-                "endpoint_profile_id": preview.endpoint_profile_id,
-                "deployment_region": preview.deployment_region,
-                "endpoint_class": preview.endpoint_class,
-                "shot_count": preview.shot_count,
-                **frozen_authorization,
-            },
-            created_at=now, updated_at=now,
-        ))
+        task = self.repository.update_provider_task(
+            intent.model_copy(
+                update={
+                    "state": "QUEUED",
+                    "request_summary": {
+                        **dict(intent.request_summary),
+                        "production_job_id": job.id,
+                        "attempt_number": 1,
+                        "runtime_plan_ids_by_shot": plan_ids,
+                        "provider_profile_id": provider_profile.id,
+                        "endpoint_profile_id": preview.endpoint_profile_id,
+                        "deployment_region": preview.deployment_region,
+                        "endpoint_class": preview.endpoint_class,
+                        "shot_count": preview.shot_count,
+                        **frozen_authorization,
+                    },
+                    "error_message": None,
+                    "updated_at": now,
+                }
+            )
+        )
         if job.status not in {ProductionJobStatus.QUEUED, ProductionJobStatus.RUNNING}:
             self.repository.update_production_job_status(job.id, ProductionJobStatus.QUEUED, updated_at=now)
         return task
+
+    def budget_projection(
+        self,
+        project_id: str,
+        production_job_id: str,
+        *,
+        execution_id: str | None = None,
+    ):
+        shots = self.repository.list_production_shots(production_job_id)
+        return self.paid_budgets.projection(
+            project_id,
+            production_job_id,
+            execution_id=execution_id,
+            planned_fallback=len(shots),
+        )
+
+    def resume_preparing_tasks(
+        self, project_id: str | None = None
+    ) -> list[ProviderTask]:
+        """Finish durable UI intents interrupted before queue publication."""
+
+        projects = (
+            [project_id]
+            if project_id is not None
+            else [project.id for project in self.repository.list_projects()]
+        )
+        resumed: list[ProviderTask] = []
+        for scoped_project_id in projects:
+            for task in self.repository.list_provider_tasks(scoped_project_id):
+                if task.execution_id is not None or task.state != "PREPARING":
+                    continue
+                job_id = str(
+                    task.request_summary.get("production_job_id") or ""
+                )
+                if not job_id:
+                    continue
+                authorization = dict(task.request_summary)
+                resumed.append(
+                    self.enqueue_job(
+                        scoped_project_id,
+                        job_id,
+                        authorization=authorization,
+                        provider_id=str(
+                            task.request_summary.get("provider_id")
+                            or task.provider_id
+                        ),
+                        endpoint_profile_id=str(
+                            task.request_summary.get("endpoint_profile_id") or ""
+                        )
+                        or None,
+                    )
+                )
+        return resumed
 
     def prepare_generation_briefs(self, project_id: str, production_job_id: str):
         return self.generation_briefs.prepare_for_job(project_id, production_job_id)

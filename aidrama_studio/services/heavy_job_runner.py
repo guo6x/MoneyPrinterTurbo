@@ -250,6 +250,37 @@ class HeavyJobRunner:
     def reconcile(self) -> list[HeavyJob]:
         return self.service.recover_interrupted()
 
+    def resume_pending_work(
+        self,
+        project_id: str | None = None,
+        *,
+        max_jobs: int = 100,
+    ) -> dict[str, list[HeavyJob]]:
+        """Recover deterministic local renders after a fresh-process restart."""
+
+        interrupted = self.reconcile()
+        recovered: list[HeavyJob] = []
+        for job in interrupted:
+            if project_id is not None and job.project_id != project_id:
+                continue
+            if job.job_type not in {
+                HeavyJobType.FINAL_ASSEMBLY_RENDER,
+                HeavyJobType.POST_RENDER,
+            }:
+                continue
+            recovered.append(self.service.resume_interrupted(job.id))
+        completed: list[HeavyJob] = []
+        for _index in range(max(0, int(max_jobs))):
+            job = self.run_once(project_id)
+            if job is None:
+                break
+            completed.append(job)
+        return {
+            "interrupted": interrupted,
+            "recovered": recovered,
+            "completed": completed,
+        }
+
     def run_once(self, project_id: str | None = None) -> HeavyJob | None:
         with self.guard:
             job = self.repository.claim_next_heavy_job(

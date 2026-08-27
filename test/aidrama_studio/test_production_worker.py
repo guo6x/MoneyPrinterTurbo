@@ -6,6 +6,7 @@ from aidrama_studio.domain import ProductionEventType, ProductionExecutionStatus
 from aidrama_studio.services import (
     BackgroundProductionRunner,
     GenerationBriefCompiler,
+    PaidBudgetService,
     ProductionExecutionService,
     ProductionExecutionServiceError,
     ProductionRuntimeAdapter,
@@ -294,7 +295,7 @@ def test_worker_failure_is_durable_and_retry_creates_new_execution(context):
     assert len(service.list_executions(project.id, job.id)) == 2
 
 
-def test_worker_adapter_error_marks_execution_failed(context):
+def test_worker_adapter_error_after_submit_gate_is_uncertain(context):
     repository, project = context
     job = _ready_job(repository, project)
     service = ProductionExecutionService(repository)
@@ -302,8 +303,14 @@ def test_worker_adapter_error_marks_execution_failed(context):
 
     result = ProductionWorker(service, RaisingAdapter()).run(project.id, execution.id)
 
-    assert result.status is ProductionExecutionStatus.FAILED
-    assert service.list_events(project.id, execution.id)[-1].payload_json["error"]
+    assert result.status is ProductionExecutionStatus.QUEUED
+    task = next(
+        item
+        for item in repository.list_provider_tasks(project.id)
+        if item.execution_id == execution.id
+    )
+    assert task.state == "UNCERTAIN_CREATE"
+    assert task.error_message
 
 
 def test_provider_task_intent_is_durable_and_submission_is_not_repeated(context):
@@ -576,6 +583,13 @@ def test_content_rejected_retry_requires_explicit_new_attempt(context):
         )
 
     first_plan = create_plan("authorization-1", "a" * 64)
+    PaidBudgetService(repository).authorize_job(
+        project.id,
+        job.id,
+        authorization_fingerprint="a" * 64,
+        planned_creates=1,
+        authorized_max=3,
+    )
     first_snapshot = base_snapshot.model_copy(
         update={
             "runtime_plan_id": first_plan.id,

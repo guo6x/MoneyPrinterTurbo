@@ -16,7 +16,7 @@ from uuid import uuid4
 from aidrama_studio.domain import ProductionExecutionStatus, ProviderTask
 from aidrama_studio.services.adapters.production_adapter import ProductionRuntimeAdapter
 from aidrama_studio.services.active_work import TERMINAL_PROVIDER_STATES
-from aidrama_studio.services.production_worker import ProductionWorker, ProductionWorkerError
+from aidrama_studio.services.production_worker import ProductionWorker
 from aidrama_studio.services.production_orchestrator import ProductionOrchestrator
 from aidrama_studio.services.production import ProductionService
 from aidrama_studio.services.production_execution import ProductionExecutionService
@@ -128,7 +128,7 @@ class BackgroundProductionRunner:
         if existing is not None:
             return existing
         now = _now()
-        return self.repository.create_provider_task(
+        task, _created = self.repository.get_or_create_provider_task(
             ProviderTask(
                 id=uuid4().hex, project_id=project_id, execution_id=execution.id,
                 capability="VIDEO_GENERATIVE", provider_id="RUNTIME_BOUNDARY", model_id="PINNED",
@@ -136,6 +136,7 @@ class BackgroundProductionRunner:
                 created_at=now, updated_at=now,
             )
         )
+        return task
 
     def run_once(self, project_id: str | None = None) -> list[ProviderTask]:
         """Process currently queued tasks without blocking a Streamlit request."""
@@ -148,6 +149,7 @@ class BackgroundProductionRunner:
                 if task.state in {
                     "SUBMITTING",
                     "SUBMISSION_UNCERTAIN",
+                    "UNCERTAIN_CREATE",
                     "RECONCILIATION_REQUIRED",
                 }:
                     # Never automatically retry an uncertain paid side effect.
@@ -217,6 +219,7 @@ class BackgroundProductionRunner:
                                     in {
                                         "PROVIDER_SUCCEEDED_ARTIFACT_PENDING",
                                         "POLLING_INTERRUPTED",
+                                        "UNCERTAIN_CREATE",
                                         "RECONCILIATION_REQUIRED",
                                     }
                                 ),
@@ -225,7 +228,11 @@ class BackgroundProductionRunner:
                             if pending is not None:
                                 state = (
                                     "RECONCILIATION_REQUIRED"
-                                    if pending.state == "RECONCILIATION_REQUIRED"
+                                    if pending.state
+                                    in {
+                                        "UNCERTAIN_CREATE",
+                                        "RECONCILIATION_REQUIRED",
+                                    }
                                     else "QUEUED"
                                 )
                                 metadata["not_before"] = pending.metadata.get(
@@ -335,6 +342,7 @@ class BackgroundProductionRunner:
                     child.state in {
                         "SUBMITTING",
                         "SUBMISSION_UNCERTAIN",
+                        "UNCERTAIN_CREATE",
                         "RECONCILIATION_REQUIRED",
                     }
                     for child in child_tasks
@@ -366,6 +374,7 @@ class BackgroundProductionRunner:
                 item.state in {
                     "SUBMITTING",
                     "SUBMISSION_UNCERTAIN",
+                    "UNCERTAIN_CREATE",
                     "RECONCILIATION_REQUIRED",
                 }
                 for item in related
@@ -410,6 +419,7 @@ class BackgroundProductionRunner:
             and item.state in {
                 "SUBMITTING",
                 "SUBMISSION_UNCERTAIN",
+                "UNCERTAIN_CREATE",
                 "RECONCILIATION_REQUIRED",
             }
             for item in self.repository.list_provider_tasks(task.project_id)

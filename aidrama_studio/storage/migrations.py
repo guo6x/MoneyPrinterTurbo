@@ -1847,6 +1847,101 @@ def _migration_032_shot_source_selection_kind_forward_repair(
         )
 
 
+def _migration_033_paid_create_ledger_and_artifact_identity(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add fail-closed paid-create accounting and content artifact identity."""
+
+    connection.execute(
+        """
+        CREATE TABLE paid_budget_ledgers (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            production_job_id TEXT NOT NULL UNIQUE,
+            authorization_fingerprint TEXT NOT NULL,
+            planned_creates INTEGER NOT NULL CHECK (planned_creates >= 0),
+            authorized_max INTEGER NOT NULL CHECK (authorized_max >= planned_creates),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(production_job_id) REFERENCES production_jobs(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_paid_budget_ledgers_project "
+        "ON paid_budget_ledgers(project_id,created_at,id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE paid_create_reservations (
+            id TEXT PRIMARY KEY,
+            ledger_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            production_job_id TEXT NOT NULL,
+            execution_id TEXT NOT NULL UNIQUE,
+            provider_task_record_id TEXT NOT NULL UNIQUE,
+            idempotency_key TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('RESERVED','CONSUMED','UNCERTAIN')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(project_id,idempotency_key),
+            FOREIGN KEY(ledger_id) REFERENCES paid_budget_ledgers(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(production_job_id) REFERENCES production_jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id) ON DELETE CASCADE,
+            FOREIGN KEY(provider_task_record_id) REFERENCES provider_tasks(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_paid_create_reservations_ledger "
+        "ON paid_create_reservations(ledger_id,status,created_at,id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE production_artifact_identities (
+            execution_id TEXT NOT NULL,
+            artifact_type TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            artifact_id TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(execution_id,artifact_type,sha256),
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id) ON DELETE CASCADE,
+            FOREIGN KEY(artifact_id) REFERENCES production_artifacts(id) ON DELETE CASCADE
+        )
+        """
+    )
+    rows = connection.execute(
+        "SELECT id,execution_id,artifact_type,metadata_json,created_at "
+        "FROM production_artifacts ORDER BY created_at,rowid"
+    ).fetchall()
+    for row in rows:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        digest = metadata.get("sha256") if isinstance(metadata, dict) else None
+        if not isinstance(digest, str) or len(digest) != 64:
+            continue
+        try:
+            int(digest, 16)
+        except ValueError:
+            continue
+        connection.execute(
+            "INSERT OR IGNORE INTO production_artifact_identities("
+            "execution_id,artifact_type,sha256,artifact_id,created_at"
+            ") VALUES (?,?,?,?,?)",
+            (
+                row["execution_id"],
+                row["artifact_type"],
+                digest.lower(),
+                row["id"],
+                row["created_at"],
+            ),
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1880,6 +1975,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (30, _migration_030_final_duration_control),
     (31, _migration_031_runtime_plan_schema_forward_repair),
     (32, _migration_032_shot_source_selection_kind_forward_repair),
+    (33, _migration_033_paid_create_ledger_and_artifact_identity),
 )
 
 

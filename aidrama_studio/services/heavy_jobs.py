@@ -21,7 +21,6 @@ from aidrama_studio.storage.repositories import ProjectRepository
 
 from .final_assembly_runtime import FinalAssemblyRuntimeService
 from .postproduction import PostProductionService
-from .security import sanitize_error
 
 
 def _now() -> str:
@@ -497,6 +496,44 @@ class HeavyJobService:
         return self.repository.recover_interrupted_heavy_jobs(
             finished_at=_now(),
             event_ids={job.id: uuid4().hex for job in running},
+        )
+
+    def resume_interrupted(self, job_id: str) -> HeavyJob:
+        """Create one deterministic local recovery job from frozen inputs."""
+
+        original = self.get(job_id)
+        if original.status is not HeavyJobStatus.INTERRUPTED:
+            raise HeavyJobServiceError(
+                "只有 INTERRUPTED HeavyJob 可以进行 crash recovery"
+            )
+        key = f"crash-recovery:{original.id}"
+        existing = self.repository.get_heavy_job_by_idempotency(
+            original.project_id, key
+        )
+        if existing is not None:
+            return existing
+        snapshot = original.input_snapshot
+        if original.job_type is HeavyJobType.FINAL_ASSEMBLY_RENDER:
+            return self.enqueue_final_assembly(
+                str(original.project_id),
+                str(snapshot.get("assembly_id") or ""),
+                idempotency_key=key,
+                retry_of_job_id=original.id,
+            )
+        if original.job_type is HeavyJobType.POST_RENDER:
+            return self.enqueue_post_render(
+                str(original.project_id),
+                str(snapshot.get("plan_id") or ""),
+                subtitle_track_id=self._optional_id(
+                    snapshot, "subtitle_track_id"
+                ),
+                music_track_id=self._optional_id(snapshot, "music_track_id"),
+                voice_track_id=self._optional_id(snapshot, "voice_track_id"),
+                idempotency_key=key,
+                retry_of_job_id=original.id,
+            )
+        raise HeavyJobServiceError(
+            "该 HeavyJob 可能包含外部副作用，不能自动 crash retry"
         )
 
     @staticmethod
