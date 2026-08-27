@@ -184,6 +184,11 @@ class ProductionQCService:
             self.get_result(project_id, result_id)
         return self.repository.list_production_reviews(project_id, result_id)
 
+    def resolve_artifact_path(self, project_id: str, relative_path: str) -> Path:
+        """Resolve one persisted project-relative artifact for local playback."""
+
+        return self._resolve_artifact_path(project_id, relative_path)
+
     def _run_checks(self, project_id: str, execution, artifact: ProductionArtifact | None) -> list[dict[str, object]]:
         checks: list[dict[str, object]] = []
         if artifact is None:

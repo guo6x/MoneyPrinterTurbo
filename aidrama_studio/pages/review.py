@@ -394,8 +394,13 @@ def _render_result(
             media_path = _value(artifact, "media_path", _value(artifact, "path"))
         if media_path:
             try:
-                st.video(str(media_path))
-            except Exception:
+                playback_path = (
+                    service.resolve_artifact_path(project.id, str(media_path))
+                    if artifact is not None
+                    else media_path
+                )
+                st.video(str(playback_path))
+            except (ProductionQCServiceError, OSError, TypeError, ValueError):
                 st.caption("预览暂不可用")
         else:
             st.info("暂无可预览媒体；可以先查看检查结果。")

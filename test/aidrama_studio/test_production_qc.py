@@ -100,6 +100,16 @@ def test_valid_artifact_passes_and_persists_report_and_metrics(context):
     assert all(metric.status.value in {"PASS", "SKIPPED"} for metric in metrics)
 
 
+def test_project_relative_artifact_resolves_for_local_playback(context):
+    repository, project, _execution, artifact = _artifact_context(context)
+    service = ProductionQCService(repository)
+
+    resolved = service.resolve_artifact_path(project.id, artifact.path)
+
+    assert resolved.is_file()
+    assert resolved.is_relative_to((repository.paths.projects / project.id).resolve())
+
+
 def test_missing_artifact_fails_without_crashing_and_writes_report(context):
     repository, project, execution, artifact = _artifact_context(context, create_file=False)
     result = ProductionQCService(repository).run_qc(project.id, execution.id, artifact.id)
