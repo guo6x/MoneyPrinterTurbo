@@ -11,6 +11,8 @@ from aidrama_studio.domain import (
 from aidrama_studio.pages._shared import current_project_or_stop, render_project_context
 from aidrama_studio.services import (
     CreativeIntakeService,
+    ReferenceAgentError,
+    ReferenceAgentService,
     ReferenceAssetService,
     ReferenceAssetServiceError,
     ReferenceAssetStorageError,
@@ -199,6 +201,50 @@ def _readiness(service, project, subjects, binding_type, story_revision_id):
     )
     stats = service.calculate_readiness(project.id, story_revision_id)[key]
     return int(stats["locked"]), list(stats["missing_names"])
+
+
+def _render_autonomous_reference_status(project, service) -> None:
+    """Show the read-only Agent projection without creating any provider work."""
+
+    try:
+        agent = ReferenceAgentService(
+            service.repository,
+            reference_assets=service,
+        )
+        readiness = agent.reference_readiness(project.id)
+    except (AttributeError, ReferenceAgentError, ReferenceAssetServiceError, ValueError, KeyError):
+        # The existing workspace remains usable if historical data has not yet
+        # reached an exact approved Story -> Script -> Shot Plan chain.
+        return
+    if readiness.blocked:
+        st.caption("自动参考检查等待完整的已确认 Story / Script / Shot Plan。")
+        return
+    character_total = sum(
+        item.subject_type.value == "CHARACTER" for item in readiness.required
+    )
+    location_total = sum(
+        item.subject_type.value == "LOCATION" for item in readiness.required
+    )
+    satisfied = len(readiness.covered)
+    pending_generation = len(readiness.missing)
+    st.markdown("### 自动参考检查")
+    st.caption(
+        f"系统识别到：角色 {character_total} · 场景 {location_total} · "
+        f"已满足 {satisfied} · 待生成 {pending_generation}"
+    )
+    waiting_human = [
+        item
+        for item in readiness.next_actions
+        if item.kind.value == "WAITING_HUMAN_REFERENCE_APPROVAL"
+    ]
+    if waiting_human:
+        st.warning(f"已有 {len(waiting_human)} 个候选图：WAITING_HUMAN")
+    elif readiness.stale:
+        st.warning(f"{len(readiness.stale)} 个已锁定参考需要人工复核。")
+    elif pending_generation:
+        st.info("缺失参考已规划；需显式付费授权后才会生成候选图。")
+    else:
+        st.success("当前已锁定参考满足已确认分镜的生产覆盖。")
 
 
 def _render_card(service, project, subject, binding_type, story_revision_id):
@@ -776,6 +822,8 @@ def render() -> None:
     missing_locations = list(location_readiness["missing_names"])
     if missing_characters or missing_locations:
         st.caption("待补齐：" + "、".join(missing_characters + missing_locations))
+
+    _render_autonomous_reference_status(project, service)
 
     _render_source_promotions(project, story_revision, service)
     tabs = st.tabs(["资产总览", "角色详情", "场景详情", "候选对比 / 锁定"])
