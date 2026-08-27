@@ -238,8 +238,18 @@ def _render_vision_summary(
     key = f"review-vision-result-{_value(execution, 'id', 'execution')}"
     result = st.session_state.get(key)
     if result is None:
+        latest = getattr(vision_service, "latest", None)
+        if callable(latest):
+            try:
+                result = latest(project.id, _value(execution, "id"))
+            except (VisionQCError, ValueError, TypeError):
+                result = None
+    if result is None:
         st.info("Vision QC 尚未运行。")
-        if st.button("运行 Vision QC", key=f"run-vision-{_value(execution, 'id', 'execution')}"):
+        if st.button(
+            "运行 Vision QC",
+            key=f"run-vision-{_value(execution, 'id', 'execution')}",
+        ):
             try:
                 result = vision_service.analyze(
                     project.id,
@@ -263,7 +273,21 @@ def _render_vision_summary(
     if isinstance(metrics, Mapping):
         for name, metric in metrics.items():
             score = metric.get("score") if isinstance(metric, Mapping) else None
-            st.caption(f"{str(name).replace('_', ' ')} · {score if score is not None else '有建议'}")
+            severity = (
+                metric.get("severity", metric.get("status", "建议"))
+                if isinstance(metric, Mapping)
+                else "建议"
+            )
+            reason = (
+                metric.get("reason", metric.get("summary", ""))
+                if isinstance(metric, Mapping)
+                else ""
+            )
+            detail = f" · {reason}" if reason else ""
+            st.caption(
+                f"{str(name).replace('_', ' ')} · {severity} · "
+                f"{score if score is not None else '有建议'}{detail}"
+            )
     with st.expander("Vision 诊断详情", expanded=False):
         st.caption("分析来源、帧清单和模型标识仅供排障；不会影响人工审片决定。")
         public = getattr(result, "__dict__", result)

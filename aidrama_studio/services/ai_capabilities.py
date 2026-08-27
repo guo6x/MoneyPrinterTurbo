@@ -17,6 +17,7 @@ from pathlib import Path
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Mapping, Sequence
 
 from aidrama_studio.domain import ProductionInputSnapshot
@@ -347,6 +348,30 @@ class VisionAnalysis:
     metadata: Mapping[str, object] = field(default_factory=dict)
 
 
+def _freeze_vision_value(value: object) -> object:
+    """Deep-freeze one already-sanitized Vision input snapshot."""
+
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_vision_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_vision_value(item) for item in value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    raise ValueError("Vision creative context 必须是可持久化数据")
+
+
+def _thaw_vision_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _thaw_vision_value(item) for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return [_thaw_vision_value(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class VisionMediaInput:
     """One immutable local input selected for a Vision request.
@@ -412,6 +437,11 @@ class VisionAnalysisRequest:
             or any(character not in "0123456789abcdef" for character in self.generation_brief_hash)
         ):
             raise ValueError("Vision GenerationBrief hash 无效")
+        object.__setattr__(
+            self,
+            "creative_context",
+            _freeze_vision_value(dict(self.creative_context)),
+        )
 
     @property
     def reference_version_ids(self) -> tuple[str, ...]:
@@ -428,6 +458,7 @@ class VisionAnalysisRequest:
             "video": self.video.public_dict(),
             "frames": [item.public_dict() for item in self.frames],
             "references": [item.public_dict() for item in self.references],
+            "creative_context": _thaw_vision_value(self.creative_context),
         }
 
 
@@ -1101,14 +1132,21 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
         MPTProductionAdapter,
         SeedanceProductionAdapter,
     )
-    from .providers import GeminiVisionProvider, OpenAIImageProvider
+    from .providers import (
+        GeminiVisionProvider,
+        OpenAIImageProvider,
+        build_universal_vision_providers,
+    )
+    from aidrama_studio.storage.repositories import ProjectRepository
 
     values = dict(os.environ if env is None else env)
+    credential_store = None
     if env is None:
         try:
             from .credentials import WindowsCredentialStore
             from aidrama_studio.storage.database import get_default_paths
             store = WindowsCredentialStore(get_default_paths().root)
+            credential_store = store
             for key in ("OPENAI_API_KEY", "DASHSCOPE_API_KEY", "ARK_API_KEY", "GEMINI_API_KEY"):
                 secret = store.get(key)
                 if secret:
@@ -1117,6 +1155,21 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
             # Environment configuration remains a development fallback. A
             # locked/corrupt credential store must not prevent offline use.
             pass
+
+    class _RegistryCredentialStore:
+        def __init__(self, snapshot: Mapping[str, str]) -> None:
+            self._snapshot = dict(snapshot)
+
+        def get(self, provider_id: str) -> str | None:
+            return str(self._snapshot.get(provider_id, "") or "") or None
+
+        def configured_providers(self) -> tuple[str, ...]:
+            return tuple(
+                sorted(key for key, value in self._snapshot.items() if value)
+            )
+
+    if credential_store is None:
+        credential_store = _RegistryCredentialStore(values)
     from .adapters.seedance_video import SeedanceProviderConfig
 
     wan_adapter = MainlandWanProductionAdapter(env=values)
@@ -1137,6 +1190,18 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
     tts_provider = (
         MPTTTSProvider() if env is None else MPTTTSProvider(env=values)
     )
+    vision_env = {
+        key: str(values.get(key, "") or "")
+        for key in (
+            "AIDRAMA_ALLOW_PAID_LIVE_TESTS",
+            "DASHSCOPE_WORKSPACE_BASE_URL",
+        )
+    }
+    universal_vision = build_universal_vision_providers(
+        ProjectRepository(),
+        credential_store=credential_store,
+        env=vision_env,
+    )
     return CapabilityRegistry(
         [
             MPTLLMProvider(config_snapshot=llm_snapshot, env=values),
@@ -1144,6 +1209,7 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
             seedance,
             stock,
             OpenAIImageProvider(env=values),
+            *universal_vision,
             GeminiVisionProvider(env=values),
             tts_provider,
         ]

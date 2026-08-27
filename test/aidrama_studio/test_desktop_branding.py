@@ -56,7 +56,8 @@ def test_provider_readiness_never_returns_secret_values():
     assert snapshot["VIDEO_GENERATIVE"]["state"] == ReadinessState.READY.value
     assert secret not in repr(snapshot)
     assert snapshot["IMAGE"]["state"] == ReadinessState.UNAVAILABLE.value
-    assert snapshot["VISION"]["state"] == ReadinessState.UNAVAILABLE.value
+    assert snapshot["VISION"]["state"] == ReadinessState.READY.value
+    assert snapshot["VISION"]["provider"] == "alibaba_model_studio"
 
 
 def test_provider_readiness_keeps_production_and_explicit_env_resolution_distinct(
