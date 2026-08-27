@@ -102,6 +102,19 @@ def _latest_rejected_review(reviews: Sequence[Any]) -> Any | None:
     return None
 
 
+def _result_shot_id(result: Any, execution: Any) -> str:
+    """Recover the canonical Shot identity from persisted review provenance."""
+
+    direct = str(_value(result, "shot_id", "") or "").strip()
+    if direct:
+        return direct
+    snapshot = _value(execution, "input_snapshot")
+    parameters = _value(snapshot, "shot_parameters", {}) if snapshot is not None else {}
+    if isinstance(parameters, Mapping) and len(parameters) == 1:
+        return str(next(iter(parameters))).strip()
+    return ""
+
+
 def _run_qc(
     service: ProductionQCService,
     project: Any,
@@ -594,7 +607,7 @@ def render() -> None:
             st.session_state[selected_result_key] = _value(selected_result, "id")
         shot = None
         if canonical_state is not None:
-            result_shot_id = str(_value(selected_result, "shot_id", ""))
+            result_shot_id = _result_shot_id(selected_result, selected_execution)
             if result_shot_id:
                 shot = next(
                     (
@@ -675,4 +688,11 @@ def render() -> None:
             )
 
 
-__all__ = ["render", "_render_result", "_run_qc", "_request_creative_regeneration", "_safe_path"]
+__all__ = [
+    "render",
+    "_render_result",
+    "_request_creative_regeneration",
+    "_result_shot_id",
+    "_run_qc",
+    "_safe_path",
+]
