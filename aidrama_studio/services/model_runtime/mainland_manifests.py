@@ -200,7 +200,7 @@ def build_mainland_manifests(
             },
             lifecycle={
                 "persist_remote_identity_before_poll": True,
-                "poll_without_create_authorization": True,
+                "poll_without_paid_create": True,
                 "reconcile_resubmits": False,
             },
             pricing={"status": "PRICE_UNVERIFIED", "unit": "GENERATED_SECOND"},
@@ -327,7 +327,7 @@ def build_mainland_manifests(
             },
             lifecycle={
                 "persist_remote_identity_before_poll": True,
-                "poll_without_create_authorization": True,
+                "poll_without_paid_create": True,
                 "reconcile_resubmits": False,
             },
             pricing={"status": "PRICE_UNVERIFIED", "unit": "PROVIDER_USAGE"},

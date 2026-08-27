@@ -459,6 +459,7 @@ def _render_locked_shot_board(readiness: Mapping[str, object]) -> None:
 
 
 def _render_locked_production_workspace(readiness: Mapping[str, object]) -> None:
+    st.warning("Production 尚未就绪。请先完成下方前置步骤后再创建制作任务。")
     _render_locked_shot_board(readiness)
     prerequisites = _locked_prerequisites(readiness)
     rows = "".join(
@@ -476,6 +477,11 @@ def _render_locked_production_workspace(readiness: Mapping[str, object]) -> None
         '<section class="aidrama-production-prereqs">'
         '<h3>开始制作前</h3>' + rows + '</section>',
         unsafe_allow_html=True,
+    )
+    st.button(
+        "Create Production Job",
+        disabled=True,
+        key=f"create-production-job-{readiness.get('project_id') or 'project'}",
     )
     next_item = next((item for item in prerequisites if not item[3]), None)
     if next_item is None:
