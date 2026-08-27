@@ -1031,12 +1031,33 @@ class ProductionExecutionService:
             payload_json=payload_json or {},
             created_at=now,
         )
+        # A canonical per-shot execution is only one fact in the aggregate
+        # ProductionJob lifecycle.  Its matching ProductionAttempt updates
+        # the ProductionShot and derives the job status after QC; completing
+        # the runtime execution itself must not terminalize the whole job.
+        # Legacy whole-job executions are retained for compatibility and are
+        # identified by their QUEUED event having no frozen shot identity.
+        queued_event = next(
+            (
+                item
+                for item in self.repository.list_production_events(execution.id)
+                if item.event_type is ProductionEventType.QUEUED
+            ),
+            None,
+        )
+        is_per_shot_execution = bool(
+            queued_event is not None and queued_event.payload_json.get("shot_id")
+        )
         result = self.repository.transition_production_execution_atomic(
             execution.id,
             expected_status=ProductionExecutionStatus.RUNNING,
             status=ProductionExecutionStatus.SUCCEEDED,
             finished_at=now,
-            job_status=ProductionJobStatus.SUCCEEDED,
+            job_status=(
+                None
+                if is_per_shot_execution
+                else ProductionJobStatus.SUCCEEDED
+            ),
             event=event,
         )
         self._sync_provider_task_terminal(project_id, execution.id, "SUCCEEDED")

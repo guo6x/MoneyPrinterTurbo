@@ -5,11 +5,8 @@ from pathlib import Path
 import pytest
 
 from aidrama_studio.domain import (
-    AspectRatio,
     Character,
     Location,
-    Project,
-    ProjectStatus,
     ReferenceAssetType,
     ReferenceBindingType,
     ScriptBeat,
@@ -25,6 +22,7 @@ from aidrama_studio.domain import (
     StructuredScript,
     World,
     ProductionExecutionStatus,
+    ProductionInputSnapshot,
     ProductionJobStatus,
     ProductionShotStatus,
     ProductionReviewDecision,
@@ -166,6 +164,49 @@ def test_three_shots_run_in_canonical_order_with_separate_execution_and_snapshot
     assert [next(iter(item.input_snapshot.shot_parameters)) for item in executions] == ["shot_1", "shot_2", "shot_3"]
     assert len({item.id for item in executions}) == 3
     assert [next(iter(item.input_snapshot.reference_asset_versions.values())) for item in executions]
+
+
+def test_per_shot_execution_completion_waits_for_aggregate_shot_completion(context):
+    repository, project, job = context
+    production = ProductionService(repository)
+    shots = production.create_production_shots(project.id, job.id)
+    execution_service = ProductionExecutionService(
+        repository,
+        production_service=production,
+    )
+    full_snapshot = execution_service.create_input_snapshot(project.id, job.id)
+
+    for index, shot in enumerate(shots):
+        snapshot_json = full_snapshot.to_json_dict()
+        snapshot_json["shot_parameters"] = {
+            shot.shot_id: snapshot_json["shot_parameters"][shot.shot_id]
+        }
+        shot_snapshot = ProductionInputSnapshot.model_validate(
+            snapshot_json
+        )
+        execution, attempt = execution_service.enqueue_shot_execution_with_attempt(
+            project.id,
+            job.id,
+            shot_snapshot,
+            worker_type="offline-aggregate-regression",
+        )
+        execution_service.start_execution(project.id, execution.id)
+        execution_service.complete_execution(project.id, execution.id)
+
+        # Runtime completion is not aggregate Production completion.  The
+        # matching attempt/QC path owns the canonical shot and job projection.
+        assert production.get_job(project.id, job.id).status is ProductionJobStatus.RUNNING
+        production.complete_attempt(
+            project.id,
+            attempt.id,
+            output_artifact_json={"execution_id": execution.id},
+        )
+        expected = (
+            ProductionJobStatus.SUCCEEDED
+            if index == len(shots) - 1
+            else ProductionJobStatus.RUNNING
+        )
+        assert production.get_job(project.id, job.id).status is expected
 
 
 def test_runtime_failure_stops_later_shots_and_preserves_attempt(context):
