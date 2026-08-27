@@ -635,7 +635,7 @@ def _shot_source_candidates(
                     "qualified": (
                         _status_value(execution) == ProductionExecutionStatus.SUCCEEDED.value
                         and _status_value(qc_result, "status", "QC_PENDING") == ProductionQCStatus.QC_PASS.value
-                        and review_status != ProductionReviewDecision.REJECTED.value
+                        and review_status == ProductionReviewDecision.APPROVED.value
                     ),
                 }
             )
@@ -759,7 +759,14 @@ def _render_shot_sources(source_service, execution_service, qc_service, project,
             and _value(current, "production_artifact_id") == artifact_id
         )
         role_label = "PREVIEW" if candidate["is_preview"] else "FINAL"
-        status_label = "CURRENT" if is_current else ("QUALIFIED" if candidate["qualified"] else "NOT QUALIFIED")
+        status_label = "CURRENT" if is_current else (
+            "FINAL ELIGIBLE" if candidate["qualified"] else (
+                "WAITING HUMAN REVIEW"
+                if candidate["technically_qualified"]
+                and candidate["review_status"] == ProductionReviewDecision.PENDING.value
+                else "NOT QUALIFIED"
+            )
+        )
         with st.container(border=True):
             st.markdown(f"**Candidate #{index} · {role_label} · {status_label}**")
             st.caption(
@@ -770,6 +777,11 @@ def _render_shot_sources(source_service, execution_service, qc_service, project,
                 f"QC · {_status_value(candidate.get('qc_result'), 'status', 'QC_PENDING')} · "
                 f"Review · {candidate['review_status']}"
             )
+            if (
+                candidate["technically_qualified"]
+                and candidate["review_status"] == ProductionReviewDecision.PENDING.value
+            ):
+                st.info("技术检查通过，等待人工审片；不能选择为最终来源。")
             if candidate["is_preview"]:
                 st.info("Preview source 不能自动进入最终成片，必须显式 Promote。")
             action_cols = st.columns(2)

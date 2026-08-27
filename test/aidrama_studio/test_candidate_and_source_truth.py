@@ -473,17 +473,28 @@ def test_preview_requires_explicit_promotion_before_final_selection(context):
     ).production_artifact_id == preview[1].id
 
 
-def test_creative_rejection_requires_explicit_attempt_two_and_resolves_new_source(context):
+def test_creative_regeneration_requires_a_new_human_review_for_the_new_artifact(context):
     repository, project = context
     job, shots = _shots(repository, project, 1)
-    first_execution, first_artifact, first_qc, rejected = _source(
+    first_execution, first_artifact, first_qc, first_approved = _source(
         repository,
         project,
         job,
         shots[0],
         suffix="1",
-        review=ProductionReviewDecision.REJECTED,
+        review=ProductionReviewDecision.APPROVED,
     )
+    rejected = repository.create_production_review(
+        ProductionReview(
+            id=uuid4().hex,
+            project_id=project.id,
+            qc_result_id=first_qc.id,
+            decision=ProductionReviewDecision.REJECTED,
+            reviewer="human-second-pass",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    assert first_approved is not None
     assert rejected is not None
     repository.create_production_attempt(
         ProductionAttempt(
@@ -545,6 +556,17 @@ def test_creative_rejection_requires_explicit_attempt_two_and_resolves_new_sourc
             created_at="2026-01-01T00:00:00+00:00",
         )
     )
+    source_service = FinalAssemblyService(repository)
+    with pytest.raises(FinalAssemblyServiceError, match="等待人工审片"):
+        source_service.select_qualified_source(project.id, job.id, shots[0].id)
+    with pytest.raises(FinalAssemblyServiceError, match="等待人工审片"):
+        source_service.select_shot_source(
+            project.id,
+            job.id,
+            shots[0].id,
+            production_execution_id=second_execution.id,
+            production_artifact_id=second_artifact.id,
+        )
     approved = repository.create_production_review(
         ProductionReview(
             id=uuid4().hex,
@@ -555,7 +577,6 @@ def test_creative_rejection_requires_explicit_attempt_two_and_resolves_new_sourc
             created_at="2026-01-01T00:00:01+00:00",
         )
     )
-    source_service = FinalAssemblyService(repository)
     source_service.select_shot_source(
         project.id,
         job.id,
@@ -566,5 +587,6 @@ def test_creative_rejection_requires_explicit_attempt_two_and_resolves_new_sourc
     current = source_service.select_qualified_source(project.id, job.id, shots[0].id)
     assert current.production_execution_id == second_execution.id
     assert current.review_id == approved.id
+    assert current.review_id != first_approved.id
     assert repository.get_production_review(rejected.id).decision is ProductionReviewDecision.REJECTED
     assert len(repository.list_production_attempts(shots[0].id)) == 2

@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
 from uuid import uuid4
 
 from aidrama_studio.domain import (
@@ -110,9 +109,10 @@ class FinalAssemblyService:
 
         Candidate order is the repository's canonical ``created_at,rowid``
         execution/artifact/QC order; filesystem timestamps and filenames are
-        never consulted.  A later APPROVED/ACCEPTED review takes precedence
-        over otherwise-qualified candidates, otherwise the most recent
-        qualified persisted execution is selected.
+        never consulted.  Every candidate must have a latest exact-artifact
+        human review of ``APPROVED``.  An older approval does not outlive a
+        later review decision, and QC or Vision results cannot substitute for
+        that human gate.
         """
         job = self._get_job(project_id, production_job_id)
         shot = self._resolve_shot(job.id, production_shot_id)
@@ -431,7 +431,7 @@ class FinalAssemblyService:
         allow_preview: bool = False,
     ):
         executions = self.repository.list_production_executions(job_id)
-        candidates: list[tuple[tuple[int, int, int], bool, FinalAssemblySource]] = []
+        candidates: list[tuple[tuple[int, int, int], FinalAssemblySource]] = []
         last_reason = "没有找到 qualified source"
         decisions = self.repository.list_production_shot_source_decisions(
             project_id, shot.id
@@ -504,16 +504,21 @@ class FinalAssemblyService:
                 reviews = self.repository.list_production_reviews(
                     project_id, qc_result.id
                 )
-                # Reviews are append-only.  The latest decision for this QC
-                # result is authoritative; an old rejection remains readable
-                # history but must not block a later explicit approval.
+                # Reviews are append-only.  The latest decision for this
+                # exact QC result (and therefore this exact artifact) is
+                # authoritative.  Technical and Vision QC are evidence, not
+                # an approval substitute.
                 latest_review = reviews[-1] if reviews else None
                 latest_decision = self._review_decision(latest_review) if latest_review else ""
+                if latest_review is None or latest_decision == "PENDING":
+                    last_reason = "技术检查通过，等待人工审片"
+                    continue
                 if latest_decision == "REJECTED":
                     last_reason = "human review rejected source"
                     continue
-                accepted_review = latest_review if latest_decision in {"APPROVED", "ACCEPTED"} else None
-                selected_review = latest_review
+                if latest_decision != ProductionReviewDecision.APPROVED.value:
+                    last_reason = "技术检查通过，等待人工审片"
+                    continue
                 source_duration = self._qualified_source_duration(
                     qc_result, artifact.metadata_json, execution, shot
                 )
@@ -522,14 +527,14 @@ class FinalAssemblyService:
                     production_execution_id=execution.id,
                     production_artifact_id=artifact.id,
                     qc_result_id=qc_result.id,
-                    review_id=selected_review.id if selected_review else None,
+                    review_id=latest_review.id,
                     source_path=artifact.path.replace("\\", "/"),
                     estimated_duration=source_duration,
                     source_sha256=actual_sha,
                     source_duration_seconds=source_duration,
                 )
                 candidates.append(
-                    ((execution_index, artifact_index, qc_results.index(qc_result)), accepted_review is not None, source)
+                    ((execution_index, artifact_index, qc_results.index(qc_result)), source)
                 )
         if not candidates:
             return (None, last_reason)
@@ -538,14 +543,14 @@ class FinalAssemblyService:
                 candidate
                 for candidate in candidates
                 if (
-                    candidate[2].production_execution_id,
-                    candidate[2].production_artifact_id,
+                    candidate[1].production_execution_id,
+                    candidate[1].production_artifact_id,
                 )
                 == required_source
             ]
             if not exact:
                 return (None, "指定的 shot source 当前不满足 qualification")
-            return max(exact, key=lambda candidate: candidate[0])[2], ""
+            return max(exact, key=lambda candidate: candidate[0])[1], ""
         if not ignore_explicit:
             if (
                 decisions
@@ -556,11 +561,11 @@ class FinalAssemblyService:
                 explicit = [
                     candidate
                     for candidate in candidates
-                    if candidate[2].production_execution_id
+                    if candidate[1].production_execution_id
                     == selected_decision.production_execution_id
-                    and candidate[2].production_artifact_id
+                    and candidate[1].production_artifact_id
                     == selected_decision.production_artifact_id
-                    and candidate[2].qc_result_id == selected_decision.qc_result_id
+                    and candidate[1].qc_result_id == selected_decision.qc_result_id
                 ]
                 if not explicit:
                     return (
@@ -573,13 +578,12 @@ class FinalAssemblyService:
                     != current_brief.sha256
                 ):
                     return (None, "显式选择的 shot source creative provenance 已过期")
-                source = max(explicit, key=lambda candidate: candidate[0])[2]
+                source = max(explicit, key=lambda candidate: candidate[0])[1]
                 return source.model_copy(
                     update={"source_decision_id": selected_decision.id}
                 ), ""
-        accepted_candidates = [candidate for candidate in candidates if candidate[1]]
-        selected = max(accepted_candidates or candidates, key=lambda candidate: candidate[0])
-        return selected[2], ""
+        selected = max(candidates, key=lambda candidate: candidate[0])
+        return selected[1], ""
 
     def _get_assembly(self, project_id: str, assembly_id: str) -> FinalAssembly:
         self._require_project(project_id)

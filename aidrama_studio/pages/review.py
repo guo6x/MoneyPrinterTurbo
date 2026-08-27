@@ -84,8 +84,8 @@ def _human_review_state(decision: str) -> str:
     return {
         ProductionReviewDecision.APPROVED.value: "已通过",
         ProductionReviewDecision.REJECTED.value: "需要修改",
-        ProductionReviewDecision.PENDING.value: "等待人工决定",
-    }.get(decision, "等待人工决定")
+        ProductionReviewDecision.PENDING.value: "等待人工审片",
+    }.get(decision, "等待人工审片")
 
 
 def _latest_review(reviews: Sequence[Any]) -> Any | None:
@@ -329,8 +329,14 @@ def _render_candidate_comparison(
                 if details:
                     st.caption(" · ".join(details))
             if qc_result is not None and _status(qc_result) == ProductionQCStatus.QC_PASS.value:
-                st.caption("候选已通过技术检查，可在人工审片后进入成片。")
                 latest_review = _latest_review(reviews)
+                latest_decision = _status(latest_review, "decision", "PENDING")
+                if latest_decision == ProductionReviewDecision.APPROVED.value:
+                    st.caption("候选已通过技术检查与人工审片，可作为最终来源。")
+                elif latest_decision == ProductionReviewDecision.REJECTED.value:
+                    st.caption("候选已通过技术检查，但人审要求修改，不能进入成片。")
+                else:
+                    st.caption("候选已通过技术检查，等待人工审片后才能进入成片。")
                 can_lock = (
                     source_service is not None
                     and job is not None
