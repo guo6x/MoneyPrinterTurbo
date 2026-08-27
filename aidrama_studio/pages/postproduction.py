@@ -170,7 +170,11 @@ def _job_label(job: Any, readiness: Any) -> str:
     return f"{_ASSEMBLY_LABELS.get(status, status)} · {total} 镜头"
 
 
-def _select_job(production_service: ProductionService, project: Any) -> tuple[Any | None, Any | None, list[Any]]:
+def _select_job(
+    production_service: ProductionService,
+    manifest_service: FinalAssemblyService,
+    project: Any,
+) -> tuple[Any | None, Any | None, list[Any]]:
     """Select the canonical current production job.
 
     ``CurrentProductionStateService`` owns newest-job and historical isolation
@@ -191,8 +195,8 @@ def _select_job(production_service: ProductionService, project: Any) -> tuple[An
             state = CurrentProductionStateService(repository).derive(project.id)
             selected_job = state.job
             if selected_job is not None:
-                readiness = production_service.validate_job_readiness(
-                    project.id, _value(selected_job, "shot_plan_revision_id", None)
+                readiness = manifest_service.calculate_readiness(
+                    project.id, _value(selected_job, "id", "")
                 )
                 return selected_job, readiness, jobs
         except Exception:
@@ -203,8 +207,8 @@ def _select_job(production_service: ProductionService, project: Any) -> tuple[An
     readiness_by_job: dict[str, Any] = {}
     for job in jobs:
         try:
-            readiness_by_job[str(_value(job, "id", ""))] = production_service.validate_job_readiness(
-                project.id, _value(job, "shot_plan_revision_id", None)
+            readiness_by_job[str(_value(job, "id", ""))] = manifest_service.calculate_readiness(
+                project.id, _value(job, "id", "")
             )
         except Exception:
             readiness_by_job[str(_value(job, "id", ""))] = {
@@ -946,7 +950,7 @@ def render() -> None:
     production_service = ProductionService()
     manifest_service = FinalAssemblyService()
     runtime_service = FinalAssemblyRuntimeService(repository=getattr(manifest_service, "repository", None))
-    job, readiness, _jobs = _select_job(production_service, project)
+    job, readiness, _jobs = _select_job(production_service, manifest_service, project)
     if job is None:
         st.subheader("成片准备度")
         st.warning("暂无可用于成片的制作任务，请先完成镜头生产与 QC。")

@@ -13,7 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from aidrama_studio.domain import ProductionJob, ProductionShot, ProductionShotStatus, ProjectStatus, ShotRevisionStatus, ScriptRevisionStatus, StoryRevisionStatus
+from aidrama_studio.domain import (
+    ProductionJob,
+    ProductionShot,
+    ProductionShotStatus,
+    ProjectStatus,
+)
 from aidrama_studio.storage.repositories import ProjectRepository
 
 from .final_assembly import FinalAssemblyService, FinalAssemblyServiceError
@@ -79,9 +84,11 @@ class CurrentProductionStateService:
                 qualified[shot.id] = source
             elif shot.status in {ProductionShotStatus.SUCCEEDED, ProductionShotStatus.FAILED}:
                 blockers.append(shot.shot_id)
-        production_complete = bool(shots) and all(
-            shot.status in {ProductionShotStatus.SUCCEEDED, ProductionShotStatus.SKIPPED} for shot in shots
-        ) and len(qualified) == len(shots)
+        # Qualified immutable sources are the canonical completion truth.  A
+        # historical QC failure may have left the mutable aggregate Shot/Job
+        # row in FAILED even after a later QC_PASS + human-approved source was
+        # locked.  Do not let that stale aggregate status poison Review/Final.
+        production_complete = bool(shots) and len(qualified) == len(shots)
         final_readiness = None
         try:
             final_readiness = self.final_assembly_service.calculate_readiness(project_id, job.id)

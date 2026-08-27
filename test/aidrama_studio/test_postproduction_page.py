@@ -58,11 +58,11 @@ project = SimpleNamespace(id='project-1', title='Blocked project')
 job = SimpleNamespace(id='job-1', status='FAILED', shot_plan_revision_id='plan-1')
 class Production:
     def list_jobs(self, project_id): return [job]
-    def validate_job_readiness(self, project_id, revision_id=None):
-        return {'ready': False, 'total_shots': 3, 'eligible_shots': 2, 'blocked_shots': 1,
-                'estimated_duration': 4, 'blocked_reasons': ['shot_003: QC result 不是 QC_PASS']}
 class Manifest:
     repository = None
+    def calculate_readiness(self, project_id, job_id):
+        return {'ready': False, 'total_shots': 3, 'eligible_shots': 2, 'blocked_shots': 1,
+                'estimated_duration': 4, 'blocked_reasons': ['shot_003: QC result 不是 QC_PASS']}
     def list_assemblies(self, project_id, job_id): return []
 class Runtime:
     def __init__(self, repository=None): pass
@@ -89,11 +89,11 @@ project = SimpleNamespace(id='project-1', title='Ready project')
 job = SimpleNamespace(id='job-1', status='SUCCEEDED', shot_plan_revision_id='plan-1')
 class Production:
     def list_jobs(self, project_id): return [job]
-    def validate_job_readiness(self, project_id, revision_id=None):
-        return {'ready': True, 'total_shots': 3, 'eligible_shots': 3, 'blocked_shots': 0,
-                'estimated_duration': 4, 'blocked_reasons': []}
 class Manifest:
     repository = None
+    def calculate_readiness(self, project_id, job_id):
+        return {'ready': True, 'total_shots': 3, 'eligible_shots': 3, 'blocked_shots': 0,
+                'estimated_duration': 4, 'blocked_reasons': []}
     def list_assemblies(self, project_id, job_id): return []
 class Runtime:
     def __init__(self, repository=None): pass
@@ -171,11 +171,11 @@ attempt = SimpleNamespace(id='attempt-1', attempt_number=1, status='SUCCEEDED',
     created_at='2026-08-24T10:00:00+00:00', finished_at='2026-08-24T10:01:00+00:00', error_message=None)
 class Production:
     def list_jobs(self, project_id): return [job]
-    def validate_job_readiness(self, project_id, revision_id=None):
-        return {{'ready': True, 'total_shots': 1, 'eligible_shots': 1, 'blocked_shots': 0,
-                 'estimated_duration': 3.2, 'blocked_reasons': []}}
 class Manifest:
     repository = None
+    def calculate_readiness(self, project_id, job_id):
+        return {{'ready': True, 'total_shots': 1, 'eligible_shots': 1, 'blocked_shots': 0,
+                 'estimated_duration': 3.2, 'blocked_reasons': []}}
     def list_assemblies(self, project_id, job_id): return [assembly]
 class Runtime:
     def __init__(self, repository=None): pass

@@ -13,13 +13,13 @@ from aidrama_studio.domain import (
     FinalAssemblyRenderAttempt,
     FinalAssemblyRenderAttemptStatus,
     FinalAssemblyStatus,
+    ProductionJobStatus,
+    ProductionShotStatus,
     ProjectStatus,
     ScriptBeat,
     ScriptBeatType,
     Scene,
     StructuredScript,
-    SubtitleTrack,
-    StoryRevisionStatus,
     ScriptRevisionStatus,
     Shot,
     ShotPlan,
@@ -33,7 +33,6 @@ from aidrama_studio.services import (
     PostProductionServiceError,
     ProductionService,
 )
-from aidrama_studio.storage.repositories import ProjectRepository
 from test.aidrama_studio.test_final_assembly import _shots, _source
 from test.aidrama_studio.test_production_execution import _ready_job, context as _execution_context
 
@@ -409,6 +408,27 @@ def test_current_state_rejects_tampered_final_or_post_output(context, tampered_s
 
     assert current_state.derive(project.id).post_production_ready is False
     assert current_state.workflow_stage(project.id) is not ProjectStatus.COMPLETED
+
+
+def test_current_state_uses_qualified_source_over_stale_failed_aggregate(context):
+    repository, project = context
+    job, shots = _shots(repository, project, 1)
+    _source(repository, project, job, shots[0], suffix="qualified-after-failure")
+    repository.update_production_shot_status(
+        shots[0].id, ProductionShotStatus.FAILED
+    )
+    repository.update_production_job_status(
+        job.id,
+        ProductionJobStatus.FAILED,
+        updated_at="2026-08-27T00:00:00+00:00",
+    )
+
+    current_state = CurrentProductionStateService(repository)
+    state = current_state.derive(project.id)
+
+    assert state.production_complete is True
+    assert state.final_readiness is not None and state.final_readiness.ready
+    assert current_state.workflow_stage(project.id) is ProjectStatus.POSTPRODUCTION
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None and not Path("D:/github/MoneyPrinterTurbo/.venv/Lib/site-packages/imageio_ffmpeg/binaries").exists(), reason="ffmpeg unavailable")
