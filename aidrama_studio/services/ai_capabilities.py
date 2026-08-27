@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import importlib
 import os
+import re
 import tempfile
 from pathlib import Path
 from abc import ABC, abstractmethod
@@ -26,6 +27,54 @@ from .adapters.production_adapter import ProductionRuntimeAdapter, RuntimeSubmis
 
 class CapabilityUnavailable(RuntimeError):
     """Raised when a provider boundary is known but not configured."""
+
+
+def _safe_status_metadata(value: object) -> dict[str, object]:
+    """Return a recursive, public-only projection of provider metadata."""
+
+    secret_markers = {
+        "api_key",
+        "apikey",
+        "access_token",
+        "refresh_token",
+        "password",
+        "secret",
+        "private_key",
+        "signed_url",
+        "raw_body",
+        "authorization",
+        "authorization_header",
+    }
+
+    def clean(item: object, key: str | None = None) -> object:
+        lowered_key = key.casefold() if key is not None else ""
+        if lowered_key in secret_markers or any(
+            lowered_key.endswith("_" + marker)
+            for marker in secret_markers
+            if marker not in {"authorization", "authorization_header"}
+        ):
+            return "<redacted>"
+        if isinstance(item, str):
+            lowered = item.casefold()
+            if (
+                item.startswith(("sk-", "rk-", "sess-"))
+                or "bearer " in lowered
+                or "-----begin " in lowered
+                or re.search(
+                    r"[?&](?:token|sig|signature|x-amz-signature|access[_-]?key|api[_-]?key|credential|auth|expires)=",
+                    lowered,
+                )
+            ):
+                return "<redacted>"
+            return item
+        if isinstance(item, Mapping):
+            return {str(raw_key): clean(child, str(raw_key)) for raw_key, child in item.items()}
+        if isinstance(item, (tuple, list, set, frozenset)):
+            return [clean(child) for child in item]
+        return item
+
+    result = clean(value)
+    return result if isinstance(result, dict) else {}
 
 
 class CapabilityKind(str, Enum):
@@ -46,17 +95,131 @@ class CapabilityStatus:
     metadata: Mapping[str, object] = field(default_factory=dict)
     configured: bool | None = None
     verified: bool = False
+    # Universal-runtime readiness dimensions.  These are additive projections
+    # for legacy providers; ``available`` remains the compatibility field used
+    # by existing UI/runtime code.  In particular, a paid provider may be
+    # configured and runtime-available while create authorization is pending.
+    runtime_available: bool | None = None
+    create_authorized: bool | None = None
+    authorization_required: bool | None = None
+    # Internal provenance bit used by the universal-runtime bridge.  Legacy
+    # providers omit ``runtime_available`` and rely on ``available``; an
+    # explicitly supplied ``False`` must not be mistaken for that legacy
+    # shape and promoted to ``True`` merely because a paid-create marker is
+    # present.  It is intentionally excluded from equality/repr/public data.
+    runtime_available_explicit: bool = field(
+        default=False, init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        metadata = self.metadata if isinstance(self.metadata, Mapping) else {}
+        reason_lower = str(self.reason or "").casefold()
+        paid_authorization_marker = any(
+            marker in reason_lower for marker in ("paid", "authoriz", "授权", "费用")
+        )
+        configured_value = self.configured
+        if configured_value is None:
+            configured_value = metadata.get("configured", self.available)
+        object.__setattr__(self, "configured", configured_value is True)
+        object.__setattr__(self, "verified", self.verified is True)
+        runtime_value = self.runtime_available
+        runtime_explicit = runtime_value is not None or "runtime_available" in metadata
+        if runtime_value is None:
+            runtime_value = metadata.get("runtime_available")
+        if runtime_value is None:
+            # A legacy status has no separate runtime signal, so preserve its
+            # historical availability value as the best compatibility
+            # projection.  New bridges can pass the explicit field.
+            runtime_value = self.available
+        object.__setattr__(self, "runtime_available_explicit", runtime_explicit)
+        object.__setattr__(self, "runtime_available", runtime_value is True)
+
+        required_value = self.authorization_required
+        required_explicit = required_value is not None
+        if required_value is None:
+            if "authorization_required" in metadata:
+                required_value = metadata["authorization_required"]
+                required_explicit = True
+            elif "requires_create_authorization" in metadata:
+                required_value = metadata["requires_create_authorization"]
+                required_explicit = True
+        if not required_explicit:
+            # Some existing paid adapters expose only a human-readable reason
+            # and ``live_authorized``.  Infer the *need for a gate* from that
+            # explicit marker, never from credential/configuration presence.
+            required_value = bool(
+                metadata.get("create_is_paid") is True
+                or paid_authorization_marker
+                and metadata.get("live_authorized") is not None
+            )
+        elif not isinstance(required_value, bool):
+            # A malformed value crossing a JSON/configuration boundary must
+            # never disable a paid-create gate.  Keep the status readable but
+            # fail closed until an explicit boolean is supplied.
+            required_value = True
+        object.__setattr__(self, "authorization_required", required_value is True)
+
+        if (
+            not runtime_explicit
+            and self.authorization_required
+            and configured_value is True
+            and paid_authorization_marker
+        ):
+            # ``available`` remains the legacy create-ready projection, while
+            # this additive field records that read-only runtime operations
+            # remain reachable before paid-create approval.
+            runtime_value = True
+        object.__setattr__(self, "runtime_available", runtime_value is True)
+
+        authorized_value = self.create_authorized
+        if authorized_value is None:
+            # Canonical readiness declarations are always authoritative.
+            # ``live_authorized``/``allow_paid_live_tests`` are legacy paid
+            # smoke hints, however, and must not override an explicit
+            # ``authorization_required=False`` declaration (a stale
+            # ``live_authorized=False`` marker is common on free endpoints).
+            for key in (
+                "create_authorized",
+                "authorized",
+                "approved",
+            ):
+                if key in metadata:
+                    authorized_value = metadata[key]
+                    break
+        if authorized_value is None and not (
+            required_explicit and required_value is False
+        ):
+            for key in ("live_authorized", "allow_paid_live_tests"):
+                if key in metadata:
+                    authorized_value = metadata[key]
+                    break
+        # Authorization is never inferred from configuration/credential
+        # presence.  Non-gated capabilities are trivially create-authorized;
+        # gated capabilities default to false until an explicit signal exists.
+        if authorized_value is None:
+            authorized_value = not self.authorization_required
+        object.__setattr__(self, "create_authorized", authorized_value is True)
 
     def public_dict(self) -> dict[str, object]:
         """Return safe readiness metadata (never key/token values)."""
+        configured = self.configured
+        if configured is None:
+            configured = (
+                self.metadata.get("configured", self.available)
+                if isinstance(self.metadata, Mapping)
+                else self.available
+            )
         return {
             "capability": self.capability.value,
             "provider": self.provider,
             "available": self.available,
             "reason": self.reason,
-            "metadata": dict(self.metadata),
-            "configured": self.available if self.configured is None else self.configured,
+            "metadata": _safe_status_metadata(self.metadata),
+            "configured": configured,
             "verified": self.verified,
+            "runtime_available": self.runtime_available,
+            "create_authorized": self.create_authorized,
+            "authorization_required": self.authorization_required,
         }
 
 

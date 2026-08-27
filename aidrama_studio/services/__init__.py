@@ -110,6 +110,23 @@ from .adapters import (
     SeedanceTransientError,
 )
 
+# Universal model-runtime foundation.  This is an additive export surface;
+# existing provider services above remain the compatibility implementation and
+# are not routed through these drivers until a later migration slice.
+from .model_runtime import (
+    AsyncTaskDriver,
+    Capability,
+    CapabilityRequest,
+    CapabilityResult,
+    ModelManifest,
+    ModelResolver,
+    ModelReadiness,
+    ProtocolFamily,
+    RequestResponseDriver,
+    StreamDriver,
+    readiness_from_status,
+)
+
 __all__ = [
     "DeleteProjectResult",
     "ProjectService",
@@ -167,4 +184,7 @@ __all__ = [
     "WanReferenceSelection", "WanVideoClient",
     "WanTransientError",
     "SeedanceAdapterError", "SeedanceInputMapper", "SeedanceProductionAdapter", "SeedanceProviderConfig", "SeedanceTransientError",
+    "Capability", "CapabilityRequest", "CapabilityResult", "ProtocolFamily",
+    "ModelManifest", "ModelResolver", "ModelReadiness", "readiness_from_status",
+    "RequestResponseDriver", "AsyncTaskDriver", "StreamDriver",
 ]
