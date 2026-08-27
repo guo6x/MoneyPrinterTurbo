@@ -425,12 +425,17 @@ def _render_brief(project, service: CreativeIntakeService, items: Iterable[objec
                 logger.exception("creative brief normalization failed")
                 st.error("规范化失败，请检查来源和 Brief 内容。")
         else:
-            st.session_state[_key(project.id, "confirmed")] = True
-            _remember_activity(project, "Creative Brief 已确认", "ready")
-            st.toast("创意已确认，可以继续建立 Story Bible")
-            from aidrama_studio.components.navigation import request_navigation
+            try:
+                approved = service.approve_brief(project.id, latest.id)
+                st.session_state[_key(project.id, "confirmed")] = True
+                st.session_state[_key(project.id, "normalized-id")] = approved.id
+                _remember_activity(project, "Creative Brief 已确认", "ready")
+                st.toast("创意已确认，可以继续建立 Story Bible")
+                from aidrama_studio.components.navigation import request_navigation
 
-            request_navigation("story")
+                request_navigation("story")
+            except (CreativeIntakeError, ValueError, KeyError) as exc:
+                st.error(_safe_error(exc, "Creative Brief 确认失败，请检查来源和内容。"))
 
     if normalized:
         st.caption("已保存的 Brief 可在这里继续调整；修改后再次点击“规范化创意”会创建新的本地版本。")

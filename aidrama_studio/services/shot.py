@@ -2,6 +2,7 @@ from __future__ import annotations
 from datetime import datetime,timezone
 import ast
 import json
+from typing import Mapping
 from uuid import uuid4
 from aidrama_studio.domain import *
 from aidrama_studio.services.llm_runtime import LLMInvocationError,LLMInvocationGateway
@@ -183,25 +184,47 @@ class ShotService:
         if self.is_outdated(rev): raise ValueError("该分镜基于旧版剧本，需重新同步后才能批准")
         self.validate_plan(rev,block_extreme=False); return self.repository.approve_shot_revision(rid,updated_at=_now())
     approve_plan = approve_revision
-    def generate_shot_plan(self,project):
-        script,story=self._story_script(project.id)
+    def generate_shot_plan(
+        self,
+        project,
+        *,
+        source_script_revision_id: str | None = None,
+        generation_provenance: Mapping[str, object] | None = None,
+    ):
+        script = (
+            self.repository.get_script_revision(source_script_revision_id)
+            if source_script_revision_id
+            else self._story_script(project.id)[0]
+        )
+        if script is not None and script["project_id"] != project.id:
+            raise ShotServiceError("Structured Script revision 不属于该项目")
         if not script: raise ShotServiceError("请先完成并确认结构化剧本。")
+        if script["status"] is not ScriptRevisionStatus.APPROVED:
+            raise ShotServiceError("Shot Planner AI 必须使用 APPROVED Structured Script")
+        story=self.repository.get_story_revision(script["source_story_revision_id"])
+        if story is None or story["project_id"] != project.id:
+            raise ShotServiceError("Shot Planner 缺少 source Story Bible provenance")
         prompt=build_shot_prompt(project,script["content"],story["content"]); input_source_ids=(script["id"],story["id"])
         def validate(raw):
-            plan=parse_shot_plan(raw); plan.validate_against(script["content"],story["content"]); self.recalculate_risk_if_needed(plan); return plan
+            plan=parse_shot_plan(raw)
+            # Revision provenance belongs to the product action, never to a
+            # model-supplied identifier that could drift from the approved
+            # Script selected above.
+            plan.source_script_revision_id=script["id"]
+            plan.validate_against(script["content"],story["content"]); self.recalculate_risk_if_needed(plan); return plan
         try:
-            plan=self._llm_gateway.generate_validated_json(project.id,prompt,operation="SHOT_PLAN_GENERATION",validator=validate,repair_prompt_builder=lambda raw,exc: build_shot_repair_prompt(raw,str(exc)),input_source_ids=input_source_ids)
+            plan=self._llm_gateway.generate_validated_json(project.id,prompt,operation="SHOT_PLAN_GENERATION",validator=validate,repair_prompt_builder=lambda raw,exc: build_shot_repair_prompt(raw,str(exc)),input_source_ids=input_source_ids,provenance=generation_provenance)
         except LLMInvocationError as e: raise ShotServiceError(str(e)) from e
         except Exception as e: raise ShotServiceError("Shot Plan 生成失败，请稍后重试。") from e
         latest=self.get_latest_revision(project.id)
-        if latest:
+        if latest and latest["source_script_revision_id"] == script["id"]:
             locked={item.id:item.model_copy(deep=True) for item in latest["content"].shots if item.status is ShotStatus.LOCKED}
             generated={item.id:item for item in plan.shots}
             missing=sorted(set(locked)-set(generated))
             if missing: raise ShotServiceError(f"AI proposal 丢失锁定镜头: {', '.join(missing)}")
             plan.shots=[locked.get(item.id,item) for item in plan.shots]
             self.recalculate_risk_if_needed(plan)
-        return self._create(project.id,script["id"],plan,{"target_duration_seconds":project.target_duration_seconds,"aspect_ratio":project.aspect_ratio.value})
+        return self._create(project.id,script["id"],plan,{"target_duration_seconds":project.target_duration_seconds,"aspect_ratio":project.aspect_ratio.value} | dict(generation_provenance or {}))
 
     def regenerate_shot(self,project,revision_id,shot_id):
         """Regenerate exactly one unlocked shot into a new DRAFT revision."""

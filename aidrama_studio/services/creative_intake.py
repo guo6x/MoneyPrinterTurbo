@@ -335,6 +335,16 @@ class CreativeIntakeService:
         now = _now()
         return self.repository.create_normalized_creative_brief(NormalizedCreativeBrief(id=uuid4().hex, project_id=project_id, created_at=now, updated_at=now, **content))
 
+    def approve_brief(self, project_id: str, brief_id: str) -> NormalizedCreativeBrief:
+        brief = self.repository.get_normalized_creative_brief(brief_id)
+        if brief is None or brief.project_id != project_id:
+            raise CreativeIntakeError("Normalized Creative Brief 不属于该项目")
+        if not brief.source_ids:
+            raise CreativeIntakeError("Creative Brief 缺少来源，不能确认")
+        return self.repository.approve_normalized_creative_brief(
+            brief_id, updated_at=_now()
+        )
+
     def promote_image_reference(
         self,
         project_id: str,

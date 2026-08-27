@@ -18,6 +18,10 @@ from aidrama_studio.services.security import configure_runtime_logging  # noqa: 
 from aidrama_studio.services.mainland_frontend_runtime import (  # noqa: E402
     install_mainland_frontend_runtime,
 )
+from aidrama_studio.services.creative_pipeline import (  # noqa: E402
+    CreativePipelineService,
+    ProductActivityAdapter,
+)
 
 
 st.set_page_config(
@@ -53,7 +57,14 @@ def main() -> None:
         st.stop()
 
     try:
-        install_mainland_frontend_runtime()
+        mainland_bridge = install_mainland_frontend_runtime()
+        # The Streamlit seam is now a real product adapter.  It owns Story,
+        # Script and Shot Plan actions, then delegates the already-integrated
+        # reference-image action to the Mainland runtime bridge.
+        st.session_state["_aidrama_activity_adapter"] = ProductActivityAdapter(
+            CreativePipelineService(),
+            fallback=mainland_bridge.handle_activity,
+        )
     except Exception:
         logger.exception("failed to initialize Mainland frontend runtime bridge")
         st.warning("中国大陆模型连接暂不可用；不会读取凭据或发起请求。")

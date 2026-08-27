@@ -642,6 +642,25 @@ def _render_shot_plan(project, *, view: str = "Storyboard") -> None:
         st.error("分镜服务暂不可用，请稍后重试。")
         return
     st.caption(f"当前依据：已确认的结构化剧本第 {approved['version']} 版")
+    ready, _detail = service.llm_readiness(project.id)
+    if ready and st.button(
+        "AI 生成分镜草稿",
+        type="primary",
+        key=f"generate-shot-plan-{project.id}",
+        help="基于当前已确认的结构化剧本创建一个新的可审核分镜版本。",
+    ):
+        result = _enqueue_shot_activity(
+            project,
+            "SHOT_PLAN_GENERATION",
+            {"source_script_revision_id": approved["id"]},
+        )
+        if isinstance(result, dict) and result.get("id"):
+            _set_director_state(project, "plan", result["id"])
+            st.toast("分镜草稿已生成，等待人工确认")
+            st.rerun()
+        _render_shot_activity(project)
+    elif not ready:
+        st.caption("文本生成能力尚未配置；你仍可创建手动分镜草稿。")
     if view == "Storyboard":
         _render_storyboard_board(project, service, plans, plan, approved)
     elif view == "镜头编辑器":

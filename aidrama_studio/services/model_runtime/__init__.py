@@ -154,6 +154,11 @@ from .readiness import (
     readiness_from_manifest,
     readiness_from_status,
 )
+from .llm import (
+    UniversalLLMRuntime,
+    UniversalLLMRuntimeError,
+    UniversalLLMSelection,
+)
 from .resolver import (
     Availability,
     AvailabilityPolicy,
@@ -335,6 +340,9 @@ __all__ = [
     "readiness_from_status",
     "coerce_readiness",
     "assess_readiness",
+    "UniversalLLMRuntime",
+    "UniversalLLMRuntimeError",
+    "UniversalLLMSelection",
     "AvailabilityPolicy",
     "Availability",
     "RegionPolicy",
