@@ -14,9 +14,9 @@ from .ai import AIDramaAIError
 from .ai_capabilities import (
     CapabilityKind,
     CapabilityRegistry,
-    LLMProvider,
     default_capability_registry,
 )
+from .model_runtime import UniversalLLMRuntime, UniversalLLMRuntimeError, UniversalLLMSelection
 from .provider_profiles import ProviderDisclosure, ProviderProfileService
 from .runtime_foundation import AIInvocationService
 from .security import sanitize_error, sanitize_persistent_metadata
@@ -45,7 +45,9 @@ class _OutputInvalid(Exception):
 
 @dataclass(frozen=True)
 class _FrozenLLMContext:
-    provider: LLMProvider
+    provider: object
+    universal_runtime: UniversalLLMRuntime
+    universal_selection: UniversalLLMSelection
     actual_provider_id: str
     boundary_provider_id: str
     model_id: str
@@ -82,6 +84,7 @@ class LLMInvocationGateway:
             self.repository,
             registry=self.registry,
         )
+        self.universal_runtime = UniversalLLMRuntime(self.registry)
         self.invocations = AIInvocationService(self.repository)
 
     def readiness(self, project_id: str) -> tuple[bool, str]:
@@ -167,6 +170,7 @@ class LLMInvocationGateway:
         attempt_kind: str = "PRIMARY",
         correlation_id: str | None = None,
         disclosure: ProviderDisclosure | Mapping[str, object] | None = None,
+        provenance: Mapping[str, object] | None = None,
     ) -> str:
         """Run one audited call whose only validation is non-empty text."""
 
@@ -190,6 +194,7 @@ class LLMInvocationGateway:
                 operation=operation,
                 attempt_kind=attempt_kind,
                 validator=validate,
+                provenance=provenance,
             )
         except _OutputInvalid as exc:
             raise LLMInvocationError(
@@ -207,6 +212,7 @@ class LLMInvocationGateway:
         input_source_ids: tuple[str, ...] | list[str] = (),
         correlation_id: str | None = None,
         disclosure: ProviderDisclosure | Mapping[str, object] | None = None,
+        provenance: Mapping[str, object] | None = None,
     ) -> ValidatedValue:
         """Return domain-validated structured output with at most one repair."""
 
@@ -226,6 +232,7 @@ class LLMInvocationGateway:
                 operation=operation,
                 attempt_kind="PRIMARY",
                 validator=validator,
+                provenance=provenance,
             )
         except _OutputInvalid as primary_invalid:
             if repair_prompt_builder is None:
@@ -249,6 +256,7 @@ class LLMInvocationGateway:
                     operation=operation,
                     attempt_kind="REPAIR",
                     validator=validator,
+                    provenance=provenance,
                 )
             except _OutputInvalid as repair_invalid:
                 raise LLMInvocationError(
@@ -284,7 +292,15 @@ class LLMInvocationGateway:
             raise LLMInvocationError(
                 "Provider disclosure 缺失或已过期；不会调用 Provider"
             ) from exc
-        provider, metadata = self._resolve_provider(profile)
+        try:
+            universal_selection = self.universal_runtime.resolve(profile)
+        except UniversalLLMRuntimeError as exc:
+            raise LLMInvocationError(str(exc)) from exc
+        provider = universal_selection.provider
+        try:
+            metadata = dict(getattr(provider.status, "metadata", {}) or {})
+        except Exception as exc:
+            raise LLMInvocationError("selected universal LLM provider status is unavailable") from exc
         actual_provider_id = str(
             metadata.get("upstream_provider_id") or profile.provider_id
         ).strip()
@@ -292,6 +308,8 @@ class LLMInvocationGateway:
             raise LLMInvocationError("LLM Provider 身份无效")
         return _FrozenLLMContext(
             provider=provider,
+            universal_runtime=self.universal_runtime,
+            universal_selection=universal_selection,
             actual_provider_id=actual_provider_id,
             boundary_provider_id=profile.provider_id,
             model_id=profile.model_id,
@@ -314,6 +332,7 @@ class LLMInvocationGateway:
         operation: str,
         attempt_kind: str,
         validator: Callable[[str], ValidatedValue],
+        provenance: Mapping[str, object] | None = None,
     ) -> ValidatedValue:
         if not isinstance(prompt, str) or not prompt.strip():
             raise LLMInvocationError("LLM prompt 不能为空")
@@ -345,6 +364,12 @@ class LLMInvocationGateway:
                 "endpoint_class": context.endpoint_class,
                 "credential_reference": context.credential_reference,
                 "provider_disclosure": dict(context.disclosure),
+                "llm_runtime": "UNIVERSAL",
+                "model_manifest_id": context.universal_selection.manifest_id,
+                "model_manifest_hash": context.universal_selection.manifest_hash,
+                "protocol": context.universal_selection.protocol.value,
+                "structured_output_state": "PENDING",
+                "provenance": dict(provenance or {}),
             }
         )
         summary = dict(safe_summary) if isinstance(safe_summary, Mapping) else {}
@@ -357,7 +382,11 @@ class LLMInvocationGateway:
             invocation_id=f"{base_id}-started",
         )
         try:
-            raw = context.provider.generate_json_text(prompt)
+            raw = context.universal_runtime.invoke_text(
+                context.universal_selection,
+                prompt,
+                project_id=project_id,
+            )
             if not isinstance(raw, str) or not raw.strip():
                 raise LLMInvocationError("LLM structured generation returned empty text")
         except Exception as exc:
@@ -367,7 +396,7 @@ class LLMInvocationGateway:
                 context,
                 status="FAILED",
                 request_summary=summary
-                | {"error_code": "PROVIDER_ERROR", "error": reason},
+                | {"error_code": "PROVIDER_ERROR", "error": reason, "structured_output_state": "NOT_RETURNED"},
                 started_at=started_at,
                 finished_at=_now(),
                 invocation_id=f"{base_id}-failed",
@@ -383,7 +412,7 @@ class LLMInvocationGateway:
                 project_id,
                 context,
                 status="FAILED",
-                request_summary=summary | {"error_code": "OUTPUT_INVALID"},
+                request_summary=summary | {"error_code": "OUTPUT_INVALID", "structured_output_state": "INVALID"},
                 started_at=started_at,
                 finished_at=_now(),
                 invocation_id=f"{base_id}-failed",
@@ -393,7 +422,7 @@ class LLMInvocationGateway:
             project_id,
             context,
             status="SUCCEEDED",
-            request_summary=summary,
+            request_summary=summary | {"structured_output_state": "VALID"},
             started_at=started_at,
             finished_at=_now(),
             invocation_id=f"{base_id}-succeeded",
@@ -423,35 +452,6 @@ class LLMInvocationGateway:
             finished_at=finished_at,
             invocation_id=invocation_id,
         )
-
-    def _resolve_provider(self, profile) -> tuple[LLMProvider, Mapping[str, object]]:
-        for provider in self.registry.list(CapabilityKind.LLM):
-            if str(getattr(provider, "provider_name", "")).casefold() != profile.provider_id.casefold():
-                continue
-            status = provider.status
-            metadata = dict(status.metadata)
-            if str(metadata.get("model") or "runtime") != profile.model_id:
-                continue
-            endpoint_id = str(metadata.get("endpoint_profile_id") or "")
-            if profile.endpoint_profile_id not in {"", "LEGACY"} and endpoint_id != profile.endpoint_profile_id:
-                continue
-            endpoint_class = str(metadata.get("endpoint_class") or "UNSPECIFIED")
-            if profile.endpoint_class not in {"", "UNSPECIFIED"} and endpoint_class != profile.endpoint_class:
-                continue
-            region = str(metadata.get("deployment_region") or "UNSPECIFIED")
-            if profile.deployment_region.value != "UNSPECIFIED" and region != profile.deployment_region.value:
-                continue
-            credential = str(metadata.get("credential_reference") or "") or None
-            if profile.credential_reference is not None and credential != profile.credential_reference:
-                continue
-            if not isinstance(provider, LLMProvider):
-                if not callable(getattr(provider, "generate_json_text", None)):
-                    continue
-            return provider, metadata
-        raise LLMInvocationError(
-            "冻结 LLM Provider/model/endpoint 不在当前 capability inventory；不会自动 fallback"
-        )
-
 
 __all__ = [
     "LLM_LIVE_SMOKE_PROMPT",

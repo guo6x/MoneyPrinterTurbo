@@ -1966,6 +1966,45 @@ def _migration_033_continuity_schema_compatibility(
     )
 
 
+def _migration_034_creative_pipeline_operations(
+    connection: sqlite3.Connection,
+) -> None:
+    """Persist upstream AI intent and its human-review handoff."""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS creative_pipeline_operations (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            stage TEXT NOT NULL CHECK (stage IN (
+                'CREATIVE_INTAKE','STORY_GENERATION','STORY_REVIEW',
+                'SCRIPT_GENERATION','SCRIPT_REVIEW','SHOT_PLAN_GENERATION',
+                'SHOT_PLAN_REVIEW','REFERENCE_PREPARATION'
+            )),
+            status TEXT NOT NULL CHECK (status IN ('RUNNING','WAITING_HUMAN','FAILED')),
+            input_hash TEXT NOT NULL,
+            input_revision_ids_json TEXT NOT NULL,
+            output_revision_id TEXT,
+            provider_id TEXT,
+            model_id TEXT,
+            prompt_template_version TEXT NOT NULL,
+            failure_reason TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            UNIQUE(project_id, operation, input_hash)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_creative_pipeline_operations_project "
+        "ON creative_pipeline_operations(project_id, created_at DESC, id)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -2000,6 +2039,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (31, _migration_031_runtime_plan_schema_forward_repair),
     (32, _migration_032_shot_source_selection_kind_forward_repair),
     (33, _migration_033_continuity_schema_compatibility),
+    (34, _migration_034_creative_pipeline_operations),
 )
 
 

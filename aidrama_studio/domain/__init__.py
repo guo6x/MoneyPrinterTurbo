@@ -46,6 +46,11 @@ from .director import (
 from .producer import ProducerPolicy, ProducerRecommendation, ProductionProgress
 from .runtime_foundation import AIInvocation, GenerationBrief, OutputProfile, RuntimePlan
 from .creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourceKind, SourcePackItem
+from .creative_pipeline import (
+    CreativePipelineOperation,
+    CreativePipelineOperationStatus,
+    CreativePipelineStage,
+)
 from .creative_control import CreativeLock
 from .heavy_job import HeavyJob, HeavyJobEvent, HeavyJobEventType, HeavyJobStatus, HeavyJobType
 from .reference_profile import ReferenceProfile, ReferenceProfileItem
@@ -95,6 +100,7 @@ __all__ = [
     "ProducerPolicy", "ProducerRecommendation", "ProductionProgress",
     "OutputProfile", "RuntimePlan", "GenerationBrief", "AIInvocation",
     "SourceKind", "ExtractionState", "SourcePackItem", "NormalizedCreativeBrief", "IntakeAnalysis",
+    "CreativePipelineOperation", "CreativePipelineOperationStatus", "CreativePipelineStage",
     "CreativeLock",
     "HeavyJob", "HeavyJobEvent", "HeavyJobEventType", "HeavyJobStatus", "HeavyJobType",
     "ReferenceProfile", "ReferenceProfileItem",

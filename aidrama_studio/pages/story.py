@@ -230,7 +230,8 @@ def _latest_normalized_brief(project_id: str, repository=None):
         briefs = (repository or ProjectRepository()).list_normalized_creative_briefs(
             project_id
         )
-        return briefs[-1] if briefs else None
+        approved = [item for item in briefs if str(getattr(item, "status", "")).upper() == "APPROVED"]
+        return approved[-1] if approved else None
     except Exception:
         # Creative is optional while a project is being bootstrapped.  Story
         # remains usable with a blank/manual draft if the hand-off is absent.

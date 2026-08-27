@@ -63,7 +63,12 @@ from aidrama_studio.domain.director import (
     DirectorSessionStatus,
 )
 from aidrama_studio.domain.runtime_foundation import AIInvocation, GenerationBrief, OutputProfile, RuntimePlan
-from aidrama_studio.domain.creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourcePackItem
+from aidrama_studio.domain.creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourceKind, SourcePackItem
+from aidrama_studio.domain.creative_pipeline import (
+    CreativePipelineOperation,
+    CreativePipelineOperationStatus,
+    CreativePipelineStage,
+)
 from aidrama_studio.domain.creative_control import CreativeLock
 from aidrama_studio.domain.heavy_job import (
     HeavyJob,
@@ -3178,6 +3183,165 @@ class ProjectRepository:
         with connect(self.paths.database) as connection:
             rows = connection.execute("SELECT * FROM normalized_creative_briefs WHERE project_id=? ORDER BY created_at,id", (project_id,)).fetchall()
         return [self._normalized_brief_from_row(row) for row in rows]
+
+    def approve_normalized_creative_brief(
+        self, brief_id: str, *, updated_at: str
+    ) -> NormalizedCreativeBrief:
+        """Approve one intake version without relying on UI session state."""
+
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM normalized_creative_briefs WHERE id=?", (brief_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError("Normalized Creative Brief 不存在")
+            if row["status"] == "SUPERSEDED":
+                raise ValueError("已被替代的 Creative Brief 不能确认")
+            connection.execute(
+                "UPDATE normalized_creative_briefs SET status='SUPERSEDED',updated_at=? "
+                "WHERE project_id=? AND status='APPROVED' AND id<>?",
+                (updated_at, row["project_id"], brief_id),
+            )
+            connection.execute(
+                "UPDATE normalized_creative_briefs SET status='APPROVED',updated_at=? WHERE id=?",
+                (updated_at, brief_id),
+            )
+            approved = connection.execute(
+                "SELECT * FROM normalized_creative_briefs WHERE id=?", (brief_id,)
+            ).fetchone()
+        return self._normalized_brief_from_row(approved)
+
+    # Creative pipeline activity ---------------------------------------
+    @staticmethod
+    def _creative_pipeline_operation_from_row(row) -> CreativePipelineOperation:
+        return CreativePipelineOperation(
+            id=row["id"],
+            project_id=row["project_id"],
+            operation=row["operation"],
+            stage=CreativePipelineStage(row["stage"]),
+            status=CreativePipelineOperationStatus(row["status"]),
+            input_hash=row["input_hash"],
+            input_revision_ids=tuple(json.loads(row["input_revision_ids_json"])),
+            output_revision_id=row["output_revision_id"],
+            provider_id=row["provider_id"],
+            model_id=row["model_id"],
+            prompt_template_version=row["prompt_template_version"],
+            failure_reason=row["failure_reason"],
+            created_at=row["created_at"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def create_creative_pipeline_operation(
+        self, operation: CreativePipelineOperation
+    ) -> CreativePipelineOperation:
+        with connect(self.paths.database) as connection:
+            if not self._project_exists(connection, operation.project_id):
+                raise KeyError(f"项目不存在: {operation.project_id}")
+            connection.execute(
+                "INSERT INTO creative_pipeline_operations("
+                "id,project_id,operation,stage,status,input_hash,input_revision_ids_json,"
+                "output_revision_id,provider_id,model_id,prompt_template_version,"
+                "failure_reason,created_at,started_at,finished_at,updated_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    operation.id,
+                    operation.project_id,
+                    operation.operation,
+                    operation.stage.value,
+                    operation.status.value,
+                    operation.input_hash,
+                    json.dumps(list(operation.input_revision_ids), ensure_ascii=False),
+                    operation.output_revision_id,
+                    operation.provider_id,
+                    operation.model_id,
+                    operation.prompt_template_version,
+                    operation.failure_reason,
+                    operation.created_at,
+                    operation.started_at,
+                    operation.finished_at,
+                    operation.updated_at,
+                ),
+            )
+        created = self.get_creative_pipeline_operation(operation.id)
+        if created is None:
+            raise RuntimeError("Creative pipeline operation 创建后不可读取")
+        return created
+
+    def get_creative_pipeline_operation(
+        self, operation_id: str
+    ) -> CreativePipelineOperation | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM creative_pipeline_operations WHERE id=?", (operation_id,)
+            ).fetchone()
+        return self._creative_pipeline_operation_from_row(row) if row else None
+
+    def get_creative_pipeline_operation_by_input(
+        self, project_id: str, operation: str, input_hash: str
+    ) -> CreativePipelineOperation | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM creative_pipeline_operations "
+                "WHERE project_id=? AND operation=? AND input_hash=?",
+                (project_id, operation, input_hash),
+            ).fetchone()
+        return self._creative_pipeline_operation_from_row(row) if row else None
+
+    def list_creative_pipeline_operations(
+        self, project_id: str
+    ) -> list[CreativePipelineOperation]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(
+                "SELECT * FROM creative_pipeline_operations WHERE project_id=? "
+                "ORDER BY created_at DESC,id DESC",
+                (project_id,),
+            ).fetchall()
+        return [self._creative_pipeline_operation_from_row(row) for row in rows]
+
+    def finish_creative_pipeline_operation(
+        self,
+        operation_id: str,
+        *,
+        status: CreativePipelineOperationStatus,
+        updated_at: str,
+        output_revision_id: str | None = None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+        failure_reason: str | None = None,
+    ) -> CreativePipelineOperation:
+        if status not in {
+            CreativePipelineOperationStatus.WAITING_HUMAN,
+            CreativePipelineOperationStatus.FAILED,
+        }:
+            raise ValueError("Creative pipeline operation 必须以终态结束")
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM creative_pipeline_operations WHERE id=?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError("Creative pipeline operation 不存在")
+            if row["status"] != CreativePipelineOperationStatus.RUNNING.value:
+                raise ValueError("Creative pipeline operation 已结束")
+            connection.execute(
+                "UPDATE creative_pipeline_operations SET status=?,output_revision_id=?,"
+                "provider_id=?,model_id=?,failure_reason=?,finished_at=?,updated_at=? WHERE id=?",
+                (
+                    status.value,
+                    output_revision_id,
+                    provider_id,
+                    model_id,
+                    failure_reason,
+                    updated_at,
+                    updated_at,
+                    operation_id,
+                ),
+            )
+        result = self.get_creative_pipeline_operation(operation_id)
+        if result is None:
+            raise RuntimeError("Creative pipeline operation 更新后不可读取")
+        return result
 
     @staticmethod
     def _intake_analysis_from_row(row) -> IntakeAnalysis:

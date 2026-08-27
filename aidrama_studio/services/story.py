@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from loguru import logger
@@ -242,6 +242,7 @@ class StoryService:
         creative_constraints: str = "",
         source_ids: tuple[str, ...] | list[str] = (),
         normalized_brief_id: str | None = None,
+        generation_provenance: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         if not brief.strip():
             raise StoryServiceError("请先填写核心创意或项目 Brief。")
@@ -270,7 +271,7 @@ class StoryService:
             "project_target_duration_seconds": project.target_duration_seconds,
             "source_ids": list(normalized_source_ids),
             "normalized_brief_id": normalized_brief_id,
-        }
+        } | dict(generation_provenance or {})
         prompt = build_story_bible_prompt(
             project,
             brief=brief,
@@ -289,6 +290,7 @@ class StoryService:
                     raw, str(exc)
                 ),
                 input_source_ids=normalized_source_ids,
+                provenance=generation_provenance,
             )
         except LLMInvocationError as exc:
             logger.warning(f"Story Bible generation failed: {exc}")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 from aidrama_studio.domain import Project, ScriptRevisionStatus, Scene, ScriptBeat, ScriptBeatType, StructuredScript, InteriorExterior, TimeOfDay, StoryRevisionStatus
 from aidrama_studio.services.llm_runtime import LLMInvocationError, LLMInvocationGateway
@@ -102,16 +102,40 @@ class ScriptService:
         total = revision["content"].total_estimated_duration_seconds
         lower, upper = target_duration_seconds * 0.85, target_duration_seconds * 1.15
         return {"total": total, "target": float(target_duration_seconds), "within_tolerance": lower <= total <= upper}
-    def generate_script(self, project: Project, *, dialogue_density="standard", narration="少量", pacing="standard"):
-        story = next((x for x in self.repository.list_story_revisions(project.id) if x["status"] is StoryRevisionStatus.APPROVED), None)
+    def generate_script(
+        self,
+        project: Project,
+        *,
+        dialogue_density="standard",
+        narration="少量",
+        pacing="standard",
+        source_story_revision_id: str | None = None,
+        generation_provenance: Mapping[str, object] | None = None,
+    ):
+        story = (
+            self.repository.get_story_revision(source_story_revision_id)
+            if source_story_revision_id
+            else next(
+                (
+                    x
+                    for x in self.repository.list_story_revisions(project.id)
+                    if x["status"] is StoryRevisionStatus.APPROVED
+                ),
+                None,
+            )
+        )
+        if story is not None and story["project_id"] != project.id:
+            raise ScriptServiceError("Story Bible revision 不属于该项目")
         if not story: raise ScriptServiceError("请先确认 Story Bible")
+        if story["status"] is not StoryRevisionStatus.APPROVED:
+            raise ScriptServiceError("Script AI 必须使用 APPROVED Story Bible")
         prompt = build_script_prompt(project, story["content"], dialogue_density=dialogue_density, narration=narration, pacing=pacing)
         def validate(raw):
             content = parse_structured_script(raw); content.validate_against(story["content"]); return content
         try:
-            content = self._llm_gateway.generate_validated_json(project.id, prompt, operation="STRUCTURED_SCRIPT_GENERATION", validator=validate, repair_prompt_builder=lambda raw, exc: build_script_repair_prompt(raw, str(exc)), input_source_ids=(story["id"],))
+            content = self._llm_gateway.generate_validated_json(project.id, prompt, operation="STRUCTURED_SCRIPT_GENERATION", validator=validate, repair_prompt_builder=lambda raw, exc: build_script_repair_prompt(raw, str(exc)), input_source_ids=(story["id"],), provenance=generation_provenance)
         except LLMInvocationError as exc:
             raise ScriptServiceError(str(exc)) from exc
         except Exception as exc:
             raise ScriptServiceError("结构化剧本生成失败，请稍后重试。") from exc
-        return self._create(project.id, story["id"], content, {"dialogue_density":dialogue_density,"narration":narration,"pacing":pacing,"target_duration_seconds":project.target_duration_seconds,"aspect_ratio":project.aspect_ratio.value})
+        return self._create(project.id, story["id"], content, {"dialogue_density":dialogue_density,"narration":narration,"pacing":pacing,"target_duration_seconds":project.target_duration_seconds,"aspect_ratio":project.aspect_ratio.value} | dict(generation_provenance or {}))

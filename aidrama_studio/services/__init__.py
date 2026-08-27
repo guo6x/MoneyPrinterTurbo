@@ -24,6 +24,7 @@ from .creative_control import CreativeControlError, CreativeLockService
 from .llm_runtime import LLM_LIVE_SMOKE_PROMPT, LLMInvocationError, LLMInvocationGateway
 from .image_runtime import ImageRuntimeError, ImageRuntimeService
 from .creative_intake import CreativeIntakeError, CreativeIntakeService, DocumentIngestionService, IntakeAnalyzer, SourcePackService
+from .creative_pipeline import CreativePipelineError, CreativePipelineService, ProductActivityAdapter
 from .reference_profiles import ReferenceProfileService, ReferenceProfileServiceError
 from .provider_profiles import (
     DurationPlan,
@@ -128,6 +129,7 @@ from .model_runtime import (
     ProtocolFamily,
     RequestResponseDriver,
     StreamDriver,
+    UniversalLLMRuntime,
     readiness_from_status,
 )
 from .model_settings import (
@@ -163,6 +165,7 @@ __all__ = [
     "LLM_LIVE_SMOKE_PROMPT", "LLMInvocationGateway", "LLMInvocationError",
     "ImageRuntimeService", "ImageRuntimeError",
     "CreativeIntakeService", "CreativeIntakeError", "SourcePackService", "DocumentIngestionService", "IntakeAnalyzer",
+    "CreativePipelineService", "CreativePipelineError", "ProductActivityAdapter",
     "ReferenceProfileService", "ReferenceProfileServiceError",
     "ProviderProfileService", "ProviderProfileError", "ProviderSelectionState", "ProviderDisclosure",
     "ResolvedProviderSelection", "DurationPlan", "ReferenceTrace",
@@ -199,4 +202,5 @@ __all__ = [
     "ModelManifest", "ModelResolver", "ModelReadiness", "readiness_from_status",
     "SettingsModelOption", "SettingsModelResolution", "SettingsModelService",
     "RequestResponseDriver", "AsyncTaskDriver", "StreamDriver",
+    "UniversalLLMRuntime",
 ]
