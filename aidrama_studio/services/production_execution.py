@@ -42,6 +42,11 @@ from .production import ProductionService, ProductionServiceError
 from .active_work import TERMINAL_PROVIDER_STATES
 from .provider_profiles import ProviderProfileService
 from .security import sanitize_error, sanitize_persistent_metadata
+from .production_reliability import (
+    PaidBudgetError,
+    PaidBudgetExhausted,
+    PaidBudgetService,
+)
 
 
 def _now() -> str:
@@ -69,6 +74,7 @@ class ProductionExecutionService:
             self.production_service = ProductionService(self.repository)
         self._adapters: dict[str, ProductionRuntimeAdapter] = {}
         self.provider_profiles = ProviderProfileService(self.repository)
+        self.paid_budgets = PaidBudgetService(self.repository)
 
     def _require_project(self, project_id: str):
         project = self.repository.get_project(project_id)
@@ -690,22 +696,26 @@ class ProductionExecutionService:
         runtime_snapshot = input_snapshot or execution.input_snapshot
         if runtime_snapshot is None:
             raise ProductionExecutionServiceError("execution 缺少 immutable input snapshot")
-        task = self._provider_task_intent(project_id, execution, adapter, runtime_snapshot)
-        # A durable provider identity is the recovery boundary.  If the
-        # process was restarted after a successful provider POST, never issue
-        # another paid POST; resume polling the original task instead.
+        task = self._provider_task_intent(
+            project_id, execution, adapter, runtime_snapshot
+        )
+        # A durable provider identity is the recovery boundary. Any process
+        # that observes an already-closed create gate without an identity must
+        # fail closed. It is not allowed to infer that the POST did not happen.
         if task.state in {
             "SUBMITTING",
             "SUBMISSION_UNCERTAIN",
+            "UNCERTAIN_CREATE",
             "RECONCILIATION_REQUIRED",
         } and not task.provider_task_id:
             if task.state == "SUBMITTING":
-                self._update_provider_task(
+                task = self.paid_budgets.mark_uncertain(
                     task,
-                    state="RECONCILIATION_REQUIRED",
-                    error_message="provider submit interrupted before identity persistence",
+                    "provider create interrupted before identity persistence",
                 )
-            raise ProductionExecutionServiceError("provider submission 状态不确定，必须先 reconciliation")
+            raise ProductionExecutionServiceError(
+                "UNCERTAIN_CREATE: provider submission 必须先 reconciliation"
+            )
         self._adapters[execution.id] = adapter
         if task.provider_task_id:
             runtime_reference = task.provider_task_id
@@ -716,31 +726,96 @@ class ProductionExecutionService:
         try:
             accepted = adapter.validate(runtime_snapshot)
             if accepted is False:
-                self._update_provider_task(task, state="FAILED", error_message="runtime adapter 拒绝 input snapshot")
-                self.fail_execution(project_id, execution.id, error_message="runtime adapter 拒绝 input snapshot")
-                raise ProductionExecutionServiceError("runtime adapter 拒绝 input snapshot")
-            self._update_provider_task(task, state="SUBMITTING")
+                self._update_provider_task(
+                    task,
+                    state="FAILED",
+                    error_message="runtime adapter 拒绝 input snapshot",
+                )
+                self.fail_execution(
+                    project_id,
+                    execution.id,
+                    error_message="runtime adapter 拒绝 input snapshot",
+                )
+                raise ProductionExecutionServiceError(
+                    "runtime adapter 拒绝 input snapshot"
+                )
+        except ProductionExecutionServiceError:
+            raise
+        except Exception as exc:
+            # Validation happens before the create gate and therefore cannot
+            # consume budget or create a remote task.
+            self._update_provider_task(
+                task, state="FAILED", error_message=self._safe_error(exc)
+            )
+            self.fail_execution(
+                project_id, execution.id, error_message=self._safe_error(exc)
+            )
+            raise ProductionExecutionServiceError(
+                f"runtime validation 失败: {type(exc).__name__}"
+            ) from exc
+
+        try:
+            task, claimed, _reservation = self.paid_budgets.claim_create(
+                task,
+                execution,
+                require_budget=self._requires_paid_budget(execution, adapter),
+            )
+        except PaidBudgetExhausted as exc:
+            raise ProductionExecutionServiceError(str(exc)) from exc
+        except PaidBudgetError as exc:
+            raise ProductionExecutionServiceError(str(exc)) from exc
+        if not claimed:
+            if task.provider_task_id:
+                return self.start_execution(
+                    project_id,
+                    execution.id,
+                    {
+                        "adapter": getattr(
+                            adapter, "name", adapter.__class__.__name__
+                        ),
+                        "runtime_reference": task.provider_task_id,
+                        "provider_metadata": dict(task.metadata),
+                    },
+                )
+            raise ProductionExecutionServiceError(
+                "UNCERTAIN_CREATE: create gate 已关闭，不得重复 submit"
+            )
+
+        runtime_reference: str | None = None
+        try:
             submission = adapter.submit(runtime_snapshot)
             runtime_reference = self._submission_reference(submission)
             submission_metadata = self._submission_metadata(submission)
-            task = self._update_provider_task(task, state="PROVIDER_ACCEPTED", provider_task_id=runtime_reference, metadata=submission_metadata, submitted_at=_now())
+            task = self.paid_budgets.mark_accepted(
+                task,
+                provider_task_id=runtime_reference,
+                metadata=submission_metadata,
+            )
         except RuntimeContentRejectedError as exc:
+            # An explicit provider response proves the create transport was
+            # attempted. Count it, but never auto-create a replacement.
+            self.paid_budgets.mark_consumed(task)
             self.mark_provider_content_rejected(project_id, execution.id, exc)
             raise ProductionExecutionServiceError(
                 "runtime provider 明确拒绝了内容；需要用户编辑后显式创建新 attempt"
             ) from exc
-        except ProductionExecutionServiceError:
-            raise
         except Exception as exc:
-            # The adapter may have accepted the request before the transport
-            # raised.  Persist uncertainty and require explicit reconciliation
-            # instead of turning an unknown paid request into an auto-retry.
-            if bool(getattr(adapter, "submission_uncertain_on_error", False)):
-                self._update_provider_task(task, state="SUBMISSION_UNCERTAIN", error_message=self._safe_error(exc))
-                raise ProductionExecutionServiceError(f"runtime submit 状态不确定: {type(exc).__name__}") from exc
-            self._update_provider_task(task, state="FAILED", error_message=self._safe_error(exc))
-            self.fail_execution(project_id, execution.id, error_message=self._safe_error(exc))
-            raise ProductionExecutionServiceError(f"runtime submit 失败: {type(exc).__name__}") from exc
+            # Once submit() is entered, every unknown outcome is uncertain by
+            # default. Adapters are not trusted to opt into fail-closed safety.
+            try:
+                self.paid_budgets.mark_uncertain(
+                    task,
+                    exc,
+                    provider_task_id=runtime_reference,
+                )
+            except Exception:
+                # If the second persistence attempt also fails, the durable
+                # task remains SUBMITTING. Startup reconciliation converts it
+                # to UNCERTAIN_CREATE before any worker can run again.
+                pass
+            raise ProductionExecutionServiceError(
+                f"UNCERTAIN_CREATE: runtime submit outcome unknown ({type(exc).__name__})"
+            ) from exc
         start_payload = {
             "adapter": getattr(adapter, "name", adapter.__class__.__name__),
             "runtime_reference": runtime_reference,
@@ -771,24 +846,65 @@ class ProductionExecutionService:
             provider_id = plan.provider_id
             model_id = plan.model_id
             plan_hash = plan.plan_hash
-        key_payload = {"project_id": project_id, "execution_id": execution.id, "provider_id": provider_id, "model_id": model_id, "plan_id": plan_id, "plan_hash": plan_hash, "snapshot": snapshot.to_json_dict()}
+        queued_event = next(
+            (
+                item
+                for item in self.repository.list_production_events(execution.id)
+                if item.event_type is ProductionEventType.QUEUED
+            ),
+            None,
+        )
+        shot_id = next(iter(snapshot.shot_parameters), None)
+        attempt_id = (
+            queued_event.payload_json.get("attempt_id")
+            if queued_event is not None
+            else None
+        )
+        key_payload = {
+            "project_id": project_id,
+            "production_job_id": execution.production_job_id,
+            "shot_id": shot_id,
+            "execution_id": execution.id,
+            "runtime_plan_id": plan_id,
+            "runtime_plan_hash": plan_hash,
+            "attempt_id": attempt_id,
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "snapshot": snapshot.to_json_dict(),
+        }
         key = hashlib.sha256(json.dumps(key_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-        existing = self.repository.get_provider_task_by_idempotency(project_id, key)
-        if existing is not None:
-            return existing
         now = _now()
-        return self.repository.create_provider_task(ProviderTask(
+        task, _created = self.repository.get_or_create_provider_task(ProviderTask(
             id=uuid4().hex, project_id=project_id, execution_id=execution.id,
             capability="VIDEO_GENERATIVE", provider_id=provider_id, model_id=model_id,
             idempotency_key=key, state="PENDING_SUBMISSION",
             request_summary={
+                "project_id": project_id,
+                "production_job_id": execution.production_job_id,
+                "shot_id": shot_id,
                 "execution_id": execution.id,
+                "attempt_id": attempt_id,
                 "snapshot_hash": hashlib.sha256(json.dumps(snapshot.to_json_dict(), ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
                 "runtime_plan_id": execution.runtime_plan_id,
                 "runtime_plan_hash": plan_hash or None,
             },
             created_at=now, updated_at=now,
         ))
+        return task
+
+    def _requires_paid_budget(
+        self,
+        execution: ProductionExecution,
+        adapter: ProductionRuntimeAdapter,
+    ) -> bool:
+        if bool(getattr(adapter, "requires_paid_budget", False)):
+            return True
+        if not execution.runtime_plan_id:
+            return False
+        plan = self.repository.get_runtime_plan(execution.runtime_plan_id)
+        if plan is None:
+            return False
+        return str(plan.deployment_region).upper() != "LOCAL"
 
     def _update_provider_task(self, task: ProviderTask, *, state: str | None = None, provider_task_id: str | None = None, metadata: Mapping[str, object] | None = None, submitted_at: str | None = None, error_message: str | None = None) -> ProviderTask:
         updated = task.model_copy(update={
@@ -1336,18 +1452,30 @@ class ProductionExecutionService:
         if not isinstance(artifact_type, str) or not artifact_type.strip():
             raise ProductionExecutionServiceError("artifact_type 不能为空")
         safe_path = self._validate_artifact_path(path)
-        if any(item.path == safe_path for item in self.repository.list_production_artifacts(execution.id)):
-            raise ProductionExecutionServiceError("artifact path 不可覆盖")
-        return self.repository.create_production_artifact(
-            ProductionArtifact(
-                id=uuid4().hex,
-                execution_id=execution.id,
-                artifact_type=artifact_type.strip(),
-                path=safe_path,
-                metadata_json=metadata_json or {},
-                created_at=_now(),
-            )
+        sanitized = sanitize_persistent_metadata(dict(metadata_json or {}))
+        metadata = dict(sanitized) if isinstance(sanitized, Mapping) else {}
+        digest = metadata.get("sha256")
+        artifact = ProductionArtifact(
+            id=uuid4().hex,
+            execution_id=execution.id,
+            artifact_type=artifact_type.strip(),
+            path=safe_path,
+            metadata_json=metadata,
+            created_at=_now(),
         )
+        if isinstance(digest, str) and digest.strip():
+            try:
+                return self.repository.create_production_artifact_idempotent(
+                    artifact, sha256=digest
+                )
+            except ValueError as exc:
+                raise ProductionExecutionServiceError(str(exc)) from exc
+        if any(
+            item.path == safe_path
+            for item in self.repository.list_production_artifacts(execution.id)
+        ):
+            raise ProductionExecutionServiceError("artifact path 不可覆盖")
+        return self.repository.create_production_artifact(artifact)
 
     def list_artifacts(self, project_id: str, execution_id: str) -> list[ProductionArtifact]:
         execution, _ = self._get_execution(project_id, execution_id)

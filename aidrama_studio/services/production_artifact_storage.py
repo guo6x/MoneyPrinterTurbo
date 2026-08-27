@@ -20,6 +20,7 @@ from uuid import uuid4
 from aidrama_studio.storage.repositories import ProjectRepository
 from aidrama_studio.storage.reference_assets import sanitize_filename
 
+from .security import sanitize_error
 from .streaming_artifact import StreamingArtifactSource
 
 
@@ -103,30 +104,50 @@ class ProductionArtifactStorageService:
         # serialization failure cannot strand an otherwise valid final file.
         safe_metadata = self._plain_metadata(merged_metadata)
         safe_name = sanitize_filename(filename or source_name or artifact_type)
-        if not Path(safe_name).suffix:
-            safe_name = f"{safe_name}.bin"
-        # UUID names make retries non-overwriting while retaining a useful,
-        # sanitized suffix for operators inspecting the artifact directory.
-        target_name = f"{self._safe_type(artifact_type)}-{uuid4().hex}-{safe_name}"
-        target = (execution_root / target_name).resolve()
-        if execution_root.resolve() not in target.parents:
-            raise ProductionArtifactStorageError("production artifact path escapes execution directory")
-
-        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        suffix = Path(safe_name).suffix.lower()
+        if not suffix or not re.fullmatch(r"\.[a-z0-9]{1,10}", suffix):
+            suffix = ".bin"
+        # The physical object name is content addressed. A repeated download
+        # after crash/reconciliation converges on the same path instead of
+        # manufacturing a second UUID-named artifact.
+        temporary = (
+            execution_root
+            / f".{self._safe_type(artifact_type)}.{uuid4().hex}.ingest.tmp"
+        ).resolve()
+        if execution_root.resolve() not in temporary.parents:
+            raise ProductionArtifactStorageError(
+                "production artifact path escapes execution directory"
+            )
+        target: Path | None = None
+        target_name = ""
         try:
             self._copy_source(source, temporary)
             if not temporary.is_file() or temporary.stat().st_size <= 0:
                 raise ProductionArtifactStorageError("artifact physical bytes 为空")
             size_bytes = temporary.stat().st_size
             digest = self._sha256(temporary)
+            target_name = (
+                f"{self._safe_type(artifact_type)}-sha256-{digest}{suffix}"
+            )
+            target = (execution_root / target_name).resolve()
+            if execution_root.resolve() not in target.parents:
+                raise ProductionArtifactStorageError(
+                    "production artifact path escapes execution directory"
+                )
             if target.exists():
-                raise ProductionArtifactStorageError("artifact 不可覆盖")
-            os.replace(temporary, target)
+                if not target.is_file() or self._sha256(target) != digest:
+                    raise ProductionArtifactStorageError(
+                        "content-addressed artifact identity 冲突"
+                    )
+            else:
+                os.replace(temporary, target)
             self._sync_directory(target.parent)
         finally:
             if temporary.exists():
                 temporary.unlink()
 
+        if target is None:
+            raise ProductionArtifactStorageError("artifact target 未创建")
         relative = PurePosixPath("production", execution_id, target_name).as_posix()
         if target.exists():
             safe_metadata["size_bytes"] = size_bytes
@@ -336,8 +357,12 @@ class ProductionArtifactStorageService:
                 normalized = item.replace("\\", "/")
                 if normalized.startswith("/") or PureWindowsPath(item).drive:
                     return Path(normalized).name
-                return PurePosixPath(normalized).as_posix()
-            if isinstance(item, (str, int, float, bool)) or item is None:
+                return sanitize_error(
+                    PurePosixPath(normalized).as_posix(), max_length=8000
+                )
+            if isinstance(item, str):
+                return sanitize_error(item, max_length=8000)
+            if isinstance(item, (int, float, bool)) or item is None:
                 return item
             return str(item)
 

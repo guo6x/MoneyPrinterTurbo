@@ -45,6 +45,8 @@ from .vision_qc import VisionFrameSamplingService, VisionQCResult, VisionQCServi
 from .diagnostics import DiagnosticsError, DiagnosticsService, DiskSpaceService
 from .tts_runtime import TTS_LIVE_SMOKE_TEXT, TTSRuntimeError, TTSRuntimeService
 from .production_queue import ProductionAuthorizationPreview, ProductionQueueError, ProductionQueueService
+from .production_reliability import PaidBudgetError, PaidBudgetExhausted, PaidBudgetService
+from .production_recovery import ProductionRecoveryService
 from .production_runtime_resolver import ProductionRuntimeResolutionError, ProductionRuntimeResolver
 from .security import (
     configure_runtime_logging,
@@ -169,6 +171,7 @@ __all__ = [
     "DiagnosticsError", "DiagnosticsService", "DiskSpaceService",
     "TTS_LIVE_SMOKE_TEXT", "TTSRuntimeError", "TTSRuntimeService",
     "ProductionAuthorizationPreview", "ProductionQueueError", "ProductionQueueService",
+    "PaidBudgetError", "PaidBudgetExhausted", "PaidBudgetService", "ProductionRecoveryService",
     "ProductionRuntimeResolutionError", "ProductionRuntimeResolver",
     "configure_runtime_logging", "sanitize_error", "sanitize_persistent_metadata",
     "ProviderReadinessService", "CapabilityReadiness", "ReadinessState",

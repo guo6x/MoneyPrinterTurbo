@@ -63,7 +63,7 @@ from aidrama_studio.domain.director import (
     DirectorSessionStatus,
 )
 from aidrama_studio.domain.runtime_foundation import AIInvocation, GenerationBrief, OutputProfile, RuntimePlan
-from aidrama_studio.domain.creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourceKind, SourcePackItem
+from aidrama_studio.domain.creative_intake import ExtractionState, IntakeAnalysis, NormalizedCreativeBrief, SourcePackItem
 from aidrama_studio.domain.creative_control import CreativeLock
 from aidrama_studio.domain.heavy_job import (
     HeavyJob,
@@ -79,6 +79,11 @@ from aidrama_studio.domain.runtime_operations import (
     ProviderTask,
     VisionAnalysisRecord,
     VisionFrameManifest,
+)
+from aidrama_studio.domain.production_reliability import (
+    PaidBudgetLedger,
+    PaidCreateReservation,
+    PaidCreateStatus,
 )
 
 from .database import DatabasePaths, connect, initialize_database, transaction
@@ -1379,6 +1384,73 @@ class ProjectRepository:
                 (artifact.id, artifact.execution_id, artifact.artifact_type, artifact.path, json.dumps(artifact.metadata_json, ensure_ascii=False, sort_keys=True), artifact.created_at),
             )
         return self.get_production_artifact(artifact.id)
+
+    def create_production_artifact_idempotent(
+        self,
+        artifact: ProductionArtifact,
+        *,
+        sha256: str,
+    ) -> ProductionArtifact:
+        """Persist one logical artifact per execution/type/content identity."""
+
+        digest = str(sha256).strip().lower()
+        if len(digest) != 64:
+            raise ValueError("artifact sha256 无效")
+        try:
+            int(digest, 16)
+        except ValueError as exc:
+            raise ValueError("artifact sha256 无效") from exc
+        existing_id: str | None = None
+        with self.transaction() as connection:
+            existing = connection.execute(
+                "SELECT artifact_id FROM production_artifact_identities "
+                "WHERE execution_id=? AND artifact_type=? AND sha256=?",
+                (artifact.execution_id, artifact.artifact_type, digest),
+            ).fetchone()
+            if existing is not None:
+                existing_id = str(existing["artifact_id"])
+            else:
+                if connection.execute(
+                    "SELECT 1 FROM production_executions WHERE id=?",
+                    (artifact.execution_id,),
+                ).fetchone() is None:
+                    raise KeyError(
+                        f"ProductionExecution 不存在: {artifact.execution_id}"
+                    )
+                connection.execute(
+                    "INSERT INTO production_artifacts("
+                    "id,execution_id,artifact_type,path,metadata_json,created_at"
+                    ") VALUES (?,?,?,?,?,?)",
+                    (
+                        artifact.id,
+                        artifact.execution_id,
+                        artifact.artifact_type,
+                        artifact.path,
+                        json.dumps(
+                            artifact.metadata_json,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        artifact.created_at,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO production_artifact_identities("
+                    "execution_id,artifact_type,sha256,artifact_id,created_at"
+                    ") VALUES (?,?,?,?,?)",
+                    (
+                        artifact.execution_id,
+                        artifact.artifact_type,
+                        digest,
+                        artifact.id,
+                        artifact.created_at,
+                    ),
+                )
+                existing_id = artifact.id
+        result = self.get_production_artifact(existing_id)
+        if result is None:
+            raise RuntimeError("ProductionArtifact 创建后不可读取")
+        return result
 
     def get_production_artifact(self, artifact_id: str) -> ProductionArtifact | None:
         with connect(self.paths.database) as connection:
@@ -3296,6 +3368,89 @@ class ProjectRepository:
             )
         return self.get_provider_task(task.id)
 
+    def get_or_create_provider_task(
+        self, task: ProviderTask
+    ) -> tuple[ProviderTask, bool]:
+        """Atomically persist an idempotent local intent."""
+
+        created = False
+        task_id = task.id
+        with self.transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM provider_tasks WHERE project_id=? "
+                "AND idempotency_key=?",
+                (task.project_id, task.idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                current = self._provider_task_from_row(existing)
+                stable_fields = (
+                    "project_id",
+                    "execution_id",
+                    "capability",
+                    "provider_id",
+                    "model_id",
+                )
+                if any(
+                    getattr(current, field) != getattr(task, field)
+                    for field in stable_fields
+                ):
+                    raise ValueError("ProviderTask idempotency key 与不同 intent 冲突")
+                task_id = current.id
+            else:
+                if not self._project_exists(connection, task.project_id):
+                    raise KeyError(f"项目不存在: {task.project_id}")
+                if task.execution_id is not None:
+                    execution = connection.execute(
+                        "SELECT pe.production_job_id,pj.project_id "
+                        "FROM production_executions pe "
+                        "JOIN production_jobs pj ON pj.id=pe.production_job_id "
+                        "WHERE pe.id=?",
+                        (task.execution_id,),
+                    ).fetchone()
+                    if (
+                        execution is None
+                        or execution["project_id"] != task.project_id
+                    ):
+                        raise ValueError("ProviderTask execution 不属于该项目")
+                connection.execute(
+                    "INSERT INTO provider_tasks("
+                    "id,project_id,execution_id,capability,provider_id,model_id,"
+                    "idempotency_key,provider_task_id,state,request_summary_json,"
+                    "metadata_json,submitted_at,last_polled_at,next_poll_at,"
+                    "error_message,created_at,updated_at"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        task.id,
+                        task.project_id,
+                        task.execution_id,
+                        task.capability,
+                        task.provider_id,
+                        task.model_id,
+                        task.idempotency_key,
+                        task.provider_task_id,
+                        task.state,
+                        json.dumps(
+                            task.request_summary,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        json.dumps(
+                            task.metadata, ensure_ascii=False, sort_keys=True
+                        ),
+                        task.submitted_at,
+                        task.last_polled_at,
+                        task.next_poll_at,
+                        task.error_message,
+                        task.created_at,
+                        task.updated_at,
+                    ),
+                )
+                created = True
+        result = self.get_provider_task(task_id)
+        if result is None:
+            raise RuntimeError("ProviderTask 创建后不可读取")
+        return result, created
+
     def get_provider_task(self, task_id: str) -> ProviderTask | None:
         with connect(self.paths.database) as connection:
             row = connection.execute("SELECT * FROM provider_tasks WHERE id=?", (task_id,)).fetchone()
@@ -3326,6 +3481,337 @@ class ProjectRepository:
                  task.next_poll_at, task.error_message, task.updated_at, task.id),
             )
         return self.get_provider_task(task.id)
+
+    @staticmethod
+    def _paid_budget_ledger_from_row(row) -> PaidBudgetLedger:
+        return PaidBudgetLedger(
+            id=row["id"],
+            project_id=row["project_id"],
+            production_job_id=row["production_job_id"],
+            authorization_fingerprint=row["authorization_fingerprint"],
+            planned_creates=row["planned_creates"],
+            authorized_max=row["authorized_max"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _paid_create_reservation_from_row(row) -> PaidCreateReservation:
+        return PaidCreateReservation(
+            id=row["id"],
+            ledger_id=row["ledger_id"],
+            project_id=row["project_id"],
+            production_job_id=row["production_job_id"],
+            execution_id=row["execution_id"],
+            provider_task_record_id=row["provider_task_record_id"],
+            idempotency_key=row["idempotency_key"],
+            status=PaidCreateStatus(row["status"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def create_paid_budget_ledger(
+        self, ledger: PaidBudgetLedger
+    ) -> PaidBudgetLedger:
+        with self.transaction() as connection:
+            job = connection.execute(
+                "SELECT project_id FROM production_jobs WHERE id=?",
+                (ledger.production_job_id,),
+            ).fetchone()
+            if job is None or job["project_id"] != ledger.project_id:
+                raise ValueError("PaidBudgetLedger ProductionJob provenance 无效")
+            existing = connection.execute(
+                "SELECT * FROM paid_budget_ledgers WHERE production_job_id=?",
+                (ledger.production_job_id,),
+            ).fetchone()
+            if existing is not None:
+                current = self._paid_budget_ledger_from_row(existing)
+                if (
+                    current.project_id != ledger.project_id
+                    or current.authorization_fingerprint
+                    != ledger.authorization_fingerprint
+                    or current.planned_creates != ledger.planned_creates
+                    or current.authorized_max != ledger.authorized_max
+                ):
+                    raise ValueError(
+                        "PaidBudgetLedger 已冻结，不能静默扩大或替换授权"
+                    )
+                return current
+            connection.execute(
+                "INSERT INTO paid_budget_ledgers("
+                "id,project_id,production_job_id,authorization_fingerprint,"
+                "planned_creates,authorized_max,created_at,updated_at"
+                ") VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    ledger.id,
+                    ledger.project_id,
+                    ledger.production_job_id,
+                    ledger.authorization_fingerprint,
+                    ledger.planned_creates,
+                    ledger.authorized_max,
+                    ledger.created_at,
+                    ledger.updated_at,
+                ),
+            )
+        result = self.get_paid_budget_ledger(ledger.production_job_id)
+        if result is None:
+            raise RuntimeError("PaidBudgetLedger 创建后不可读取")
+        return result
+
+    def get_paid_budget_ledger(
+        self, production_job_id: str
+    ) -> PaidBudgetLedger | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM paid_budget_ledgers WHERE production_job_id=?",
+                (production_job_id,),
+            ).fetchone()
+        return self._paid_budget_ledger_from_row(row) if row else None
+
+    def list_paid_create_reservations(
+        self,
+        production_job_id: str,
+        *,
+        execution_id: str | None = None,
+    ) -> list[PaidCreateReservation]:
+        query = (
+            "SELECT * FROM paid_create_reservations "
+            "WHERE production_job_id=?"
+        )
+        values: list[object] = [production_job_id]
+        if execution_id is not None:
+            query += " AND execution_id=?"
+            values.append(execution_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(values)).fetchall()
+        return [self._paid_create_reservation_from_row(row) for row in rows]
+
+    def claim_provider_submission(
+        self,
+        task_id: str,
+        *,
+        reservation: PaidCreateReservation | None = None,
+    ) -> tuple[ProviderTask, bool, PaidCreateReservation | None]:
+        """Atomically close the local create gate and reserve authorization."""
+
+        claimed = False
+        reservation_id: str | None = None
+        with self.transaction() as connection:
+            task_row = connection.execute(
+                "SELECT * FROM provider_tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if task_row is None:
+                raise KeyError(f"ProviderTask 不存在: {task_id}")
+            if task_row["provider_task_id"] or task_row["state"] != "PENDING_SUBMISSION":
+                existing = connection.execute(
+                    "SELECT * FROM paid_create_reservations "
+                    "WHERE provider_task_record_id=?",
+                    (task_id,),
+                ).fetchone()
+                reservation_id = str(existing["id"]) if existing else None
+            else:
+                if reservation is not None:
+                    ledger = connection.execute(
+                        "SELECT * FROM paid_budget_ledgers WHERE id=?",
+                        (reservation.ledger_id,),
+                    ).fetchone()
+                    execution = connection.execute(
+                        "SELECT pe.production_job_id,pj.project_id "
+                        "FROM production_executions pe "
+                        "JOIN production_jobs pj ON pj.id=pe.production_job_id "
+                        "WHERE pe.id=?",
+                        (reservation.execution_id,),
+                    ).fetchone()
+                    if (
+                        ledger is None
+                        or execution is None
+                        or ledger["project_id"] != reservation.project_id
+                        or ledger["production_job_id"]
+                        != reservation.production_job_id
+                        or execution["project_id"] != reservation.project_id
+                        or execution["production_job_id"]
+                        != reservation.production_job_id
+                        or task_row["project_id"] != reservation.project_id
+                        or task_row["execution_id"] != reservation.execution_id
+                        or task_row["idempotency_key"]
+                        != reservation.idempotency_key
+                    ):
+                        raise ValueError("paid create reservation provenance 无效")
+                    existing = connection.execute(
+                        "SELECT * FROM paid_create_reservations "
+                        "WHERE execution_id=? OR provider_task_record_id=?",
+                        (reservation.execution_id, task_id),
+                    ).fetchone()
+                    if existing is not None:
+                        reservation_id = str(existing["id"])
+                        connection.execute(
+                            "UPDATE provider_tasks SET state='UNCERTAIN_CREATE',"
+                            "error_message='create gate already reserved without durable remote identity',"
+                            "updated_at=? WHERE id=?",
+                            (reservation.updated_at, task_id),
+                        )
+                        connection.execute(
+                            "UPDATE paid_create_reservations SET status='UNCERTAIN',"
+                            "updated_at=? WHERE id=? AND status='RESERVED'",
+                            (reservation.updated_at, reservation_id),
+                        )
+                    else:
+                        used = connection.execute(
+                            "SELECT COUNT(*) FROM paid_create_reservations "
+                            "WHERE ledger_id=? AND status IN "
+                            "('RESERVED','CONSUMED','UNCERTAIN')",
+                            (reservation.ledger_id,),
+                        ).fetchone()[0]
+                        if int(used) >= int(ledger["authorized_max"]):
+                            raise ValueError(
+                                "PAID_BUDGET_EXHAUSTED: provider create blocked before transport"
+                            )
+                        connection.execute(
+                            "INSERT INTO paid_create_reservations("
+                            "id,ledger_id,project_id,production_job_id,execution_id,"
+                            "provider_task_record_id,idempotency_key,status,created_at,updated_at"
+                            ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (
+                                reservation.id,
+                                reservation.ledger_id,
+                                reservation.project_id,
+                                reservation.production_job_id,
+                                reservation.execution_id,
+                                reservation.provider_task_record_id,
+                                reservation.idempotency_key,
+                                reservation.status.value,
+                                reservation.created_at,
+                                reservation.updated_at,
+                            ),
+                        )
+                        reservation_id = reservation.id
+                if reservation is None or reservation_id == reservation.id:
+                    cursor = connection.execute(
+                        "UPDATE provider_tasks SET state='SUBMITTING',"
+                        "error_message=NULL,updated_at=? "
+                        "WHERE id=? AND state='PENDING_SUBMISSION' "
+                        "AND provider_task_id IS NULL",
+                        (
+                            reservation.updated_at
+                            if reservation is not None
+                            else task_row["updated_at"],
+                            task_id,
+                        ),
+                    )
+                    claimed = cursor.rowcount == 1
+        task = self.get_provider_task(task_id)
+        if task is None:
+            raise RuntimeError("ProviderTask claim 后不可读取")
+        durable_reservation = None
+        if reservation_id is not None:
+            with connect(self.paths.database) as connection:
+                row = connection.execute(
+                    "SELECT * FROM paid_create_reservations WHERE id=?",
+                    (reservation_id,),
+                ).fetchone()
+            durable_reservation = (
+                self._paid_create_reservation_from_row(row) if row else None
+            )
+        return task, claimed, durable_reservation
+
+    def update_provider_submission_outcome(
+        self,
+        task_id: str,
+        *,
+        state: str,
+        updated_at: str,
+        provider_task_id: str | None = None,
+        metadata: dict[str, object] | None = None,
+        submitted_at: str | None = None,
+        error_message: str | None = None,
+        reservation_status: PaidCreateStatus | None = None,
+    ) -> ProviderTask:
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM provider_tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"ProviderTask 不存在: {task_id}")
+            connection.execute(
+                "UPDATE provider_tasks SET provider_task_id=?,state=?,"
+                "metadata_json=?,submitted_at=?,error_message=?,updated_at=? "
+                "WHERE id=?",
+                (
+                    provider_task_id or row["provider_task_id"],
+                    state,
+                    json.dumps(
+                        metadata
+                        if metadata is not None
+                        else json.loads(row["metadata_json"] or "{}"),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    submitted_at or row["submitted_at"],
+                    error_message,
+                    updated_at,
+                    task_id,
+                ),
+            )
+            if reservation_status is not None:
+                connection.execute(
+                    "UPDATE paid_create_reservations SET status=?,updated_at=? "
+                    "WHERE provider_task_record_id=?",
+                    (reservation_status.value, updated_at, task_id),
+                )
+        result = self.get_provider_task(task_id)
+        if result is None:
+            raise RuntimeError("ProviderTask outcome 更新后不可读取")
+        return result
+
+    def mark_inflight_provider_creates_uncertain(
+        self, *, project_id: str | None = None, updated_at: str
+    ) -> list[ProviderTask]:
+        """Fail closed after a dead process held a create gate."""
+
+        changed_ids: list[str] = []
+        with self.transaction() as connection:
+            query = "SELECT * FROM provider_tasks WHERE state='SUBMITTING'"
+            values: tuple[object, ...] = ()
+            if project_id is not None:
+                query += " AND project_id=?"
+                values = (project_id,)
+            rows = connection.execute(query, values).fetchall()
+            for row in rows:
+                state = (
+                    "RECONCILIATION_REQUIRED"
+                    if row["provider_task_id"]
+                    else "UNCERTAIN_CREATE"
+                )
+                connection.execute(
+                    "UPDATE provider_tasks SET state=?,error_message=?,updated_at=? "
+                    "WHERE id=? AND state='SUBMITTING'",
+                    (
+                        state,
+                        "create interrupted; reconcile original task and never resubmit",
+                        updated_at,
+                        row["id"],
+                    ),
+                )
+                connection.execute(
+                    "UPDATE paid_create_reservations SET status=?,updated_at=? "
+                    "WHERE provider_task_record_id=? AND status='RESERVED'",
+                    (
+                        (
+                            PaidCreateStatus.CONSUMED.value
+                            if row["provider_task_id"]
+                            else PaidCreateStatus.UNCERTAIN.value
+                        ),
+                        updated_at,
+                        row["id"],
+                    ),
+                )
+                changed_ids.append(str(row["id"]))
+        return [
+            task
+            for task_id in changed_ids
+            if (task := self.get_provider_task(task_id)) is not None
+        ]
 
     def mark_provider_content_rejected_atomic(
         self,

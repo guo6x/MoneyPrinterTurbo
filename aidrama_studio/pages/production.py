@@ -1342,17 +1342,27 @@ def _production_activity(job, progress: Mapping[str, object]) -> tuple[dict[str,
     )
 
 
-def _render_budget_summary(progress: Mapping[str, object]) -> None:
+def _render_budget_summary(
+    progress: Mapping[str, object], budget: object | None = None
+) -> None:
     """Show creator-facing request bounds without guessing a currency price."""
 
     total = int(progress.get("total_shots", 0) or 0)
-    completed = int(progress.get("completed_shots", 0) or 0)
-    remaining = max(total - completed, 0)
+    planned = int(_value(budget, "planned_creates", total) or 0)
+    authorized = int(_value(budget, "authorized_max", 0) or 0)
+    consumed = int(_value(budget, "consumed_creates", 0) or 0)
+    reserved = int(_value(budget, "reserved_creates", 0) or 0)
+    uncertain = int(_value(budget, "uncertain_creates", 0) or 0)
+    remaining = int(_value(budget, "remaining_creates", 0) or 0)
     with st.container(border=True):
         st.markdown("### 成本与预算")
         left, right = st.columns(2)
-        left.metric("待生成镜头", remaining)
-        right.metric("单镜头新建上限", "1 次")
+        left.metric("计划调用", planned)
+        right.metric("已消费", consumed)
+        left, right = st.columns(2)
+        left.metric("剩余授权", remaining)
+        right.metric("不确定", uncertain)
+        st.caption(f"授权上限 · {authorized} · 已保留未提交 · {reserved}")
         st.caption("恢复已有任务不会创建新的付费请求；任何新视频任务都需要再次明确确认。")
         st.caption("当前没有可靠的实时价格，因此不会猜测金额。")
 
@@ -1432,7 +1442,15 @@ def render() -> None:
 
     # Keep durable queue activity visible without replacing the board.
     render_background_activity(_production_activity(selected_job, progress), compact=True)
-    _render_budget_summary(progress)
+    budget = None
+    if selected_job is not None:
+        try:
+            budget = orchestrator.budget_projection(
+                project.id, _value(selected_job, "id")
+            )
+        except (ProductionQueueError, ValueError, AttributeError):
+            budget = None
+    _render_budget_summary(progress, budget)
     _render_primary_action(orchestrator, production_service, project, selected_job, job_readiness, progress, ensure_job=ensure_job)
     if selected_job is not None:
         try:

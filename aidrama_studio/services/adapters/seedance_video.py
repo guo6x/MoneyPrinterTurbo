@@ -494,6 +494,7 @@ class SeedanceInputMapper:
 class SeedanceProductionAdapter(ProductionRuntimeAdapter):
     name = "seedance"
     provider_id = "SEEDANCE"
+    requires_paid_budget = True
     poll_interval_seconds = 10.0
     submission_uncertain_on_error = True
     STATUS_MAP = {

@@ -94,7 +94,11 @@ def test_ui_queue_is_durable_idempotent_and_nonblocking(tmp_path):
     queue = _queue(repository)
     authorization = _authorization(queue, project.id, job.id)
     first = queue.run_job(project.id, job.id, authorization=authorization)
+    double_click = queue.run_job(
+        project.id, job.id, authorization=authorization
+    )
     second = queue.run_job(project.id, job.id)
+    assert first.id == double_click.id
     assert first.id == second.id
     assert first.state == "QUEUED"
     assert first.execution_id is None
@@ -103,6 +107,10 @@ def test_ui_queue_is_durable_idempotent_and_nonblocking(tmp_path):
     assert first.request_summary["approved"] is True
     assert first.request_summary["estimated_provider_requests"] == 1
     assert set(first.request_summary["runtime_plan_ids_by_shot"]) == {"shot_001"}
+    budget = queue.budget_projection(project.id, job.id)
+    assert budget.planned_creates == 1
+    assert budget.authorized_max == 1
+    assert budget.remaining_creates == 1
     assert repository.get_production_job(job.id).status.value == "QUEUED"
 
 
@@ -597,7 +605,7 @@ def test_crash_after_submitting_state_never_reposts_paid_request(tmp_path):
 
     assert current.status.value == "QUEUED"
     assert adapter.submits == 1
-    assert repository.get_provider_task(task.id).state == "RECONCILIATION_REQUIRED"
+    assert repository.get_provider_task(task.id).state == "UNCERTAIN_CREATE"
 
     runner = BackgroundProductionRunner(
         repository,

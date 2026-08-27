@@ -121,8 +121,13 @@ class ProductionWorker:
             if task is not None and task.state in {
                 "SUBMITTING",
                 "SUBMISSION_UNCERTAIN",
+                "UNCERTAIN_CREATE",
                 "RECONCILIATION_REQUIRED",
             }:
+                return current
+            if task is not None and task.provider_task_id:
+                # The paid side effect is already durable even if the local
+                # STARTED transition failed. A later reconcile/run resumes it.
                 return current
             if current.status is ProductionExecutionStatus.FAILED:
                 return current
@@ -159,8 +164,9 @@ class ProductionWorker:
         if task is not None and task.state in {
             "SUBMITTING",
             "SUBMISSION_UNCERTAIN",
+            "UNCERTAIN_CREATE",
             "RECONCILIATION_REQUIRED",
-        }:
+        } and not task.provider_task_id:
             # Without a trustworthy provider identity there is no safe
             # automatic action.  In particular, do not call the adapter: a
             # status lookup cannot be scoped and a submit could duplicate a
@@ -184,6 +190,56 @@ class ProductionWorker:
             if current.status in self._terminal_statuses():
                 return current
             return self._fail(project_id, current, f"worker resume failed: {exc}")
+
+    def reconcile(
+        self,
+        project_id: str,
+        execution_id: str,
+        *,
+        adapter: ProductionRuntimeAdapter | None = None,
+    ) -> ProductionExecution:
+        """Poll one explicit durable provider task; never create speculatively."""
+
+        runtime_adapter = adapter or self.adapter
+        if runtime_adapter is None:
+            raise ProductionWorkerError(
+                "ProductionWorker 需要一个 ProductionRuntimeAdapter"
+            )
+        execution = self.execution_service.get_execution(project_id, execution_id)
+        task = self._provider_task(project_id, execution_id)
+        if task is None:
+            raise ProductionWorkerError("execution 缺少 provider task intent")
+        if not task.provider_task_id:
+            if task.state in {
+                "SUBMITTING",
+                "SUBMISSION_UNCERTAIN",
+                "UNCERTAIN_CREATE",
+                "RECONCILIATION_REQUIRED",
+            }:
+                raise ProductionWorkerError(
+                    "UNCERTAIN_CREATE: 缺少明确 task id，必须人工调查"
+                )
+            raise ProductionWorkerError(
+                "provider reconciliation 需要明确 task id"
+            )
+        if execution.status is ProductionExecutionStatus.QUEUED:
+            started = self.execution_service.submit_execution(
+                project_id,
+                execution.id,
+                runtime_adapter,
+                input_snapshot=execution.input_snapshot,
+            )
+            return self._poll(
+                project_id,
+                started,
+                runtime_adapter,
+                task.provider_task_id,
+            )
+        if execution.status is ProductionExecutionStatus.RUNNING:
+            return self.resume(
+                project_id, execution.id, adapter=runtime_adapter
+            )
+        return execution
 
     def _resume_artifact_download(
         self,
@@ -491,13 +547,25 @@ class ProductionWorker:
             metadata=metadata,
         )
         try:
-            self.execution_service.record_artifact(
+            recorded = self.execution_service.record_artifact(
                 project_id,
                 execution_id,
                 artifact_type,
                 relative_path,
                 stored_metadata,
             )
+            if recorded.path != relative_path:
+                # The content identity already existed under its first
+                # durable path. Remove any alternate-suffix physical copy
+                # created by a repeated provider download.
+                self.artifact_storage.discard_unrecorded(
+                    project_id,
+                    execution_id,
+                    relative_path,
+                    expected_sha256=(
+                        str(stored_metadata.get("sha256") or "") or None
+                    ),
+                )
         except Exception:
             self.artifact_storage.discard_unrecorded(
                 project_id,

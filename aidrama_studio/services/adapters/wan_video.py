@@ -549,6 +549,7 @@ class WanProductionAdapter(ProductionRuntimeAdapter):
     """ProductionRuntimeAdapter for one Wan image-to-video shot."""
 
     name = "wan_video"
+    requires_paid_budget = True
     poll_interval_seconds = 10.0
     submission_uncertain_on_error = True
     STATUS_MAP = {
