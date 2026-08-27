@@ -130,7 +130,13 @@ def _asset_status(service, project, binding_type, subject_id, story_revision_id)
 
 
 def _enqueue_image_activity(
-    project, *, subject, binding_type, story_revision_id, prompt
+    project,
+    *,
+    subject,
+    binding_type,
+    story_revision_id,
+    prompt,
+    create_authorized: bool = False,
 ):
     """Queue image generation through an optional runtime-owned adapter.
 
@@ -144,6 +150,7 @@ def _enqueue_image_activity(
         "binding_type": _enum_value(binding_type),
         "source_story_revision_id": story_revision_id,
         "prompt": prompt,
+        "create_authorized": create_authorized is True,
     }
     if not callable(adapter):
         st.session_state[f"assets-activity-{project.id}"] = {
@@ -166,8 +173,8 @@ def _enqueue_image_activity(
         }
         return None
     st.session_state[f"assets-activity-{project.id}"] = {
-        "state": "queued",
-        "message": "候选图请求已加入后台活动；当前工作区保持可用。",
+        "state": "ready",
+        "message": "真实候选图已安全保存；请比较后再提升并锁定。",
     }
     return result
 
@@ -495,17 +502,25 @@ def _render_workspace(
         height=120,
         key=f"reference-generation-prompt-{project.id}-{binding_value}-{subject_id}{key_suffix}",
     )
+    paid_create_authorized = st.checkbox(
+        "我确认本次最多创建 1 张付费候选图，且不会自动重试",
+        key=f"reference-generation-authorization-{project.id}-{binding_value}-{subject_id}{key_suffix}",
+    )
     if st.button(
         "请求生成候选图",
+        disabled=not paid_create_authorized,
         key=f"generate-reference-candidate-{project.id}-{binding_value}-{subject_id}{key_suffix}",
     ):
-        _enqueue_image_activity(
+        generated = _enqueue_image_activity(
             project,
             subject=subject,
             binding_type=binding_type,
             story_revision_id=story_revision_id,
             prompt=generation_prompt,
+            create_authorized=paid_create_authorized,
         )
+        if generated is not None:
+            st.rerun()
         _render_asset_activity(project)
 
     if not asset:

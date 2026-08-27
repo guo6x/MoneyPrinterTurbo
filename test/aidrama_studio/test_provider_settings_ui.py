@@ -125,3 +125,51 @@ finally:
         "画面分析": "已配置",
         "配音": "需要配置",
     }
+
+
+def test_runtime_credential_uses_direct_submit_form_without_enter_key():
+    app = AppTest.from_string(
+        """
+from types import SimpleNamespace
+import streamlit as st
+from aidrama_studio.pages import settings as page
+
+class Store:
+    def __init__(self):
+        self.values = {}
+    def configured(self, key):
+        return bool(self.values.get(key))
+    def configured_providers(self):
+        return tuple(self.values)
+    def set(self, key, value):
+        self.values[key] = value
+    def delete(self, key):
+        self.values.pop(key, None)
+
+store = st.session_state.setdefault('_test-credential-store', Store())
+page.WindowsCredentialStore = lambda root: store
+page._credential_requirements = lambda: ({
+    'key': 'DASHSCOPE_API_KEY',
+    'label': '阿里云百炼 / DashScope',
+    'description': '安全保存，不发起请求。',
+},)
+page._render_credentials(SimpleNamespace(root='unused'), ())
+"""
+    ).run()
+
+    assert not app.exception
+    assert app.text_input[0].label == "安全凭据"
+    save = next(button for button in app.button if button.label == "安全保存")
+    assert not save.disabled
+
+    app.text_input[0].set_value("unit-test-secret")
+    save.click().run()
+
+    assert not app.exception
+    rendered = "\n".join(
+        str(element.value)
+        for collection in (app.markdown, app.caption, app.success)
+        for element in collection
+    )
+    assert "已配置" in rendered
+    assert "unit-test-secret" not in rendered

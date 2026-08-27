@@ -1,0 +1,165 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from aidrama_studio.domain import ReferenceBindingType
+from aidrama_studio.services.mainland_frontend_runtime import (
+    MainlandFrontendRuntimeBridge,
+    MainlandFrontendRuntimeError,
+)
+from aidrama_studio.services.model_runtime import (
+    CapabilityKind,
+    CapabilityResult,
+    RuntimeOutcome,
+)
+from aidrama_studio.services.model_runtime.mainland_manifests import (
+    build_mainland_manifests,
+)
+from aidrama_studio.services.reference_assets import ReferenceAssetService
+from test.aidrama_studio.image_fixtures import png_bytes
+from test.aidrama_studio.test_production_execution import context as _context
+
+
+@pytest.fixture
+def context(tmp_path: Path):
+    return _context.__wrapped__(tmp_path)
+
+
+class _CredentialStore:
+    def __init__(self, secret: str | None = "unit-test-secret") -> None:
+        self.secret = secret
+        self.read_count = 0
+
+    def configured_providers(self):
+        return ("DASHSCOPE_API_KEY",) if self.secret else ()
+
+    def get(self, key):
+        assert key == "DASHSCOPE_API_KEY"
+        self.read_count += 1
+        return self.secret
+
+
+class _OfflineMainlandRuntime:
+    requests = []
+
+    def __init__(self, *, credentials, create_authorized, artifact_sink):
+        assert credentials == {"DASHSCOPE_API_KEY": "unit-test-secret"}
+        assert create_authorized is True
+        self.sink = artifact_sink
+        self.manifest = next(
+            item
+            for item in build_mainland_manifests(
+                credential_presence={"DASHSCOPE_API_KEY": True},
+                create_authorized=True,
+                artifact_sink_available=True,
+            )
+            if item.capability is CapabilityKind.IMAGE
+        )
+
+    def primary_manifest(self, capability):
+        assert CapabilityKind.coerce(capability) is CapabilityKind.IMAGE
+        return self.manifest
+
+    def submit(self, request, *, authorization):
+        assert authorization == {"approved": True, "create_authorized": True}
+        self.__class__.requests.append(request)
+        output = self.sink.persist_bytes(
+            png_bytes(),
+            request_id=request.request_id,
+            role="generated_image",
+            mime_type="image/png",
+            safe_metadata={"provider": "alibaba_model_studio"},
+        )
+        return CapabilityResult(
+            request_id=request.request_id,
+            outcome=RuntimeOutcome.SUCCEEDED,
+            outputs=(output,),
+        )
+
+
+def _bridge(repository, store):
+    return MainlandFrontendRuntimeBridge(
+        repository,
+        paths=repository.paths,
+        credential_store=store,
+        runtime_factory=_OfflineMainlandRuntime,
+    )
+
+
+def test_settings_projection_declares_dashscope_without_reading_secret(context):
+    repository, _project = context
+    store = _CredentialStore()
+    bridge = _bridge(repository, store)
+
+    requirements = bridge.credential_requirements()
+    snapshot = bridge.capability_snapshot()
+
+    assert requirements[0]["key"] == "DASHSCOPE_API_KEY"
+    assert snapshot["IMAGE"]["configured"] is True
+    assert snapshot["VIDEO"]["runtime_available"] is True
+    assert snapshot["IMAGE"]["create_authorized"] is False
+    assert store.read_count == 0
+
+
+def test_reference_image_action_requires_explicit_paid_authorization(context):
+    repository, project = context
+    store = _CredentialStore()
+    bridge = _bridge(repository, store)
+
+    with pytest.raises(MainlandFrontendRuntimeError, match="明确确认"):
+        bridge.handle_activity(
+            project.id,
+            "REFERENCE_IMAGE_CANDIDATE",
+            {
+                "subject_id": "char_001",
+                "binding_type": ReferenceBindingType.CHARACTER.value,
+                "source_story_revision_id": "story_001",
+                "prompt": "rainy bus terminal",
+                "create_authorized": False,
+            },
+        )
+
+    assert store.read_count == 0
+    assert _OfflineMainlandRuntime.requests == []
+
+
+def test_reference_image_action_uses_mainland_contract_and_records_draft(context):
+    repository, project = context
+    store = _CredentialStore()
+    bridge = _bridge(repository, store)
+    _OfflineMainlandRuntime.requests.clear()
+
+    candidate = bridge.handle_activity(
+        project.id,
+        "REFERENCE_IMAGE_CANDIDATE",
+        {
+            "subject_id": "char_001",
+            "binding_type": ReferenceBindingType.CHARACTER.value,
+            "source_story_revision_id": "story_001",
+            "prompt": "rainy bus terminal",
+            "create_authorized": True,
+        },
+    )
+
+    assert store.read_count == 1
+    assert len(_OfflineMainlandRuntime.requests) == 1
+    request = _OfflineMainlandRuntime.requests[0]
+    assert request.manifest_id == "mainland:alibaba:z-image-turbo:v1"
+    assert dict(request.provider_parameters) == {
+        "resolution": "720*1280",
+        "prompt_extend": False,
+    }
+    assert "n" not in request.provider_parameters
+    assert candidate.model_id == "z-image-turbo"
+    assert candidate.sha256
+    service = ReferenceAssetService(repository)
+    asset = service.find_workspace_asset(
+        project.id,
+        ReferenceBindingType.CHARACTER,
+        "char_001",
+    )
+    assert asset is not None
+    assert asset.current_version_id is None
+    assert service.resolve_image_candidate_path(project.id, candidate.id).is_file()

@@ -1096,7 +1096,11 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
     capabilities.  Constructing this registry performs no network calls and
     never turns an absent credential into a live-model claim.
     """
-    from .adapters import MPTProductionAdapter, SeedanceProductionAdapter, WanProductionAdapter
+    from .adapters import (
+        MainlandWanProductionAdapter,
+        MPTProductionAdapter,
+        SeedanceProductionAdapter,
+    )
     from .providers import GeminiVisionProvider, OpenAIImageProvider
 
     values = dict(os.environ if env is None else env)
@@ -1113,20 +1117,9 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
             # Environment configuration remains a development fallback. A
             # locked/corrupt credential store must not prevent offline use.
             pass
-    from .adapters.wan_video import WanProviderConfig
     from .adapters.seedance_video import SeedanceProviderConfig
 
-    wan_adapter = WanProductionAdapter(
-        config=WanProviderConfig(
-            api_key=str(values.get("DASHSCOPE_API_KEY", "")).strip(),
-            base_url=str(values.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")).strip(),
-            model=str(values.get("WAN_VIDEO_MODEL", "wan2.7-i2v-2026-04-25")).strip(),
-            allow_paid_live_tests=str(
-                values.get("AIDRAMA_ALLOW_PAID_LIVE_TESTS", "")
-            )
-            == "1",
-        )
-    )
+    wan_adapter = MainlandWanProductionAdapter(env=values)
     wan = RuntimeVideoProvider(wan_adapter, provider_name="WAN_VIDEO", mode=CapabilityKind.VIDEO_GENERATIVE)
     seedance = RuntimeVideoProvider(SeedanceProductionAdapter(config=SeedanceProviderConfig(
         api_key=str(values.get("ARK_API_KEY", "")).strip(),

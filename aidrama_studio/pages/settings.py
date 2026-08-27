@@ -280,21 +280,31 @@ def _render_credentials(paths: object, snapshots: tuple[object, ...]) -> None:
             st.caption("已配置" if configured else "需要配置")
             if item.get("description"):
                 st.caption(item["description"][:180])
-            secret = st.text_input(
-                "安全凭据",
-                type="password",
-                key=f"runtime-credential-{key}",
-                help="保存后输入框会清空；完整值不会再次显示。",
-            )
-            save_col, remove_col = st.columns(2)
-            if save_col.button("安全保存", key=f"runtime-credential-save-{key}", disabled=not bool(secret)):
+            with st.form(
+                f"runtime-credential-form-{key}", clear_on_submit=True
+            ):
+                secret = st.text_input(
+                    "安全凭据",
+                    type="password",
+                    key=f"runtime-credential-{key}",
+                    help="保存后输入框会清空；完整值不会再次显示。",
+                )
+                save = st.form_submit_button("安全保存", type="primary")
+            if save:
+                if not secret:
+                    st.warning("请输入安全凭据后再保存。")
+                    continue
                 try:
                     store.set(key, secret)
                     st.success("连接已安全保存。")
                     st.rerun()
                 except Exception:
                     st.warning("连接保存失败；原有连接状态保持不变。")
-            if remove_col.button("移除连接", key=f"runtime-credential-remove-{key}", disabled=not configured):
+            if st.button(
+                "移除连接",
+                key=f"runtime-credential-remove-{key}",
+                disabled=not configured,
+            ):
                 try:
                     store.delete(key)
                     st.success("连接已移除。")

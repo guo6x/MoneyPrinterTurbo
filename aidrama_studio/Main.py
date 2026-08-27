@@ -15,6 +15,9 @@ from aidrama_studio.components.navigation import build_navigation  # noqa: E402
 from aidrama_studio.branding import BRAND  # noqa: E402
 from aidrama_studio.storage.database import get_default_paths, initialize_database  # noqa: E402
 from aidrama_studio.services.security import configure_runtime_logging  # noqa: E402
+from aidrama_studio.services.mainland_frontend_runtime import (  # noqa: E402
+    install_mainland_frontend_runtime,
+)
 
 
 st.set_page_config(
@@ -48,6 +51,12 @@ def main() -> None:
         logger.exception("failed to initialize AIDrama Studio storage")
         st.error("AIDrama Studio 无法初始化本地存储，请检查目录写入权限。")
         st.stop()
+
+    try:
+        install_mainland_frontend_runtime()
+    except Exception:
+        logger.exception("failed to initialize Mainland frontend runtime bridge")
+        st.warning("中国大陆模型连接暂不可用；不会读取凭据或发起请求。")
 
     with st.sidebar:
         st.markdown(

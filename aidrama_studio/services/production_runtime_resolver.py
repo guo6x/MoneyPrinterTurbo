@@ -96,7 +96,12 @@ class ProductionRuntimeResolver:
             required = ("validate", "submit", "cancel", "get_status")
             if not all(callable(getattr(adapter, name, None)) for name in required):
                 raise ProductionRuntimeResolutionError(f"Provider 没有 ProductionRuntimeAdapter: {provider_id}")
-        return self._pin_adapter(adapter, runtime_plan, model_id)
+        return self._pin_adapter(
+            adapter,
+            runtime_plan,
+            model_id,
+            provider_task=task,
+        )
 
     @staticmethod
     def _provider_matches(provider: object, provider_id: str) -> bool:
@@ -137,7 +142,11 @@ class ProductionRuntimeResolver:
         adapter: ProductionRuntimeAdapter,
         runtime_plan: RuntimePlan | None,
         model_id: str,
+        provider_task: ProviderTask | None = None,
     ) -> ProductionRuntimeAdapter:
+        bind_plan = getattr(adapter, "for_runtime_plan", None)
+        if runtime_plan is not None and callable(bind_plan):
+            return bind_plan(runtime_plan, provider_task=provider_task)
         config = getattr(adapter, "config", None)
         if config is None or not is_dataclass(config):
             configured_model = str(getattr(adapter, "model_id", model_id))

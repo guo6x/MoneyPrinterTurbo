@@ -111,6 +111,7 @@ def test_page_loads_and_exposes_required_center_sections():
         "候选对比 / 锁定",
         "参考版本",
         "请求生成候选图",
+        "我确认本次最多创建 1 张付费候选图，且不会自动重试",
     ):
         assert label in source
 

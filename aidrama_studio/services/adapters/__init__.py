@@ -22,6 +22,7 @@ from .wan_video import (
     WanVideoClient,
     WanTransientError,
 )
+from .mainland_wan import MainlandWanAdapterError, MainlandWanProductionAdapter
 from .seedance_video import (
     SeedanceAdapterError,
     SeedanceInputMapper,
@@ -44,6 +45,7 @@ __all__ = [
     "WanProviderConfig", "WanProviderHTTPError", "WanReferenceResolver",
     "WanReferenceSelection", "WanVideoClient",
     "WanTransientError",
+    "MainlandWanAdapterError", "MainlandWanProductionAdapter",
     "SeedanceAdapterError", "SeedanceInputMapper", "SeedanceProductionAdapter", "SeedanceProviderConfig", "SeedanceTransientError",
     "FinalAssemblyRenderRequest", "FinalAssemblyRuntimeAdapter", "FinalAssemblyRuntimeError", "MPTFinalAssemblyAdapter",
 ]
