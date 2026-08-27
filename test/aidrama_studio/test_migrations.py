@@ -227,8 +227,8 @@ def test_migration_029_adds_candidate_and_current_shot_source_truth() -> None:
 def test_migration_030_adds_final_duration_control_in_order_and_is_idempotent() -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
-    assert MIGRATIONS[-3][0] == 30
-    assert [version for version, _ in MIGRATIONS] == list(range(1, 33))
+    assert MIGRATIONS[-4][0] == 30
+    assert [version for version, _ in MIGRATIONS] == list(range(1, 34))
     prior = [(version, migration) for version, migration in MIGRATIONS if version < 30]
     for _, migration in prior:
         migration(connection)
@@ -296,6 +296,28 @@ def test_migration_030_adds_final_duration_control_in_order_and_is_idempotent() 
         row[1]
         for row in connection.execute("PRAGMA table_info(final_assembly_items)")
     } == columns
+
+
+def test_migration_033_preserves_continuity_schema_and_accepts_recorded_version() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+
+    assert apply_migrations(connection) == len(MIGRATIONS)
+    assert connection.execute(
+        "SELECT MAX(version) FROM schema_migrations"
+    ).fetchone()[0] == 33
+    assert {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name LIKE 'continuity_%' ORDER BY name"
+        )
+    } == {
+        "continuity_snapshots",
+        "continuity_issues",
+        "continuity_repair_recommendations",
+    }
+    assert apply_migrations(connection) == 0
 
 
 def _insert_legacy_runtime_plan(connection: sqlite3.Connection) -> None:
@@ -435,7 +457,7 @@ def test_migration_032_repairs_recorded_legacy_source_decision_schema() -> None:
     }
     assert "selection_kind" not in before
 
-    assert apply_migrations(connection) == 1
+    assert apply_migrations(connection) == len(MIGRATIONS) - 31
     columns = {
         row[1]
         for row in connection.execute(

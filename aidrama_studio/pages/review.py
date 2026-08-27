@@ -397,7 +397,7 @@ def _render_result(
             artifact = None
 
     with st.container(border=True):
-        shot_label = _value(result, "shot_number", None)
+        shot_label = _value(shot, "order_index", _value(result, "shot_number", None))
         if shot_label is None:
             shot_label = "当前镜头"
         st.markdown(f"### 镜头 {shot_label} · 看片")
@@ -544,6 +544,46 @@ def _activity_for_review(project: Any, execution_service: Any, job: Any | None) 
     )
 
 
+def _review_targets(
+    project: Any,
+    executions: Sequence[Any],
+    qc_service: ProductionQCService | Any,
+    canonical_state: Any | None,
+) -> list[dict[str, Any]]:
+    """Project every persisted execution/QC pair into the review workspace."""
+
+    targets: list[dict[str, Any]] = []
+    canonical_shots = tuple(getattr(canonical_state, "shots", ()) or ())
+    for execution_index, execution in enumerate(executions):
+        try:
+            results = list(qc_service.list_results(project.id, _value(execution, "id")))
+        except Exception:
+            results = []
+        for result_index, result in enumerate(results):
+            result_shot_id = _result_shot_id(result, execution)
+            shot = next(
+                (
+                    item
+                    for item in canonical_shots
+                    if str(_value(item, "id")) == result_shot_id
+                    or str(_value(item, "shot_id")) == result_shot_id
+                ),
+                None,
+            )
+            targets.append(
+                {
+                    "execution": execution,
+                    "result": result,
+                    "results": results,
+                    "shot": shot,
+                    "shot_number": _value(shot, "order_index", execution_index + 1),
+                    "execution_index": execution_index,
+                    "result_index": result_index,
+                }
+            )
+    return targets
+
+
 def render() -> None:
     page_header("审片", "REVIEW WORKSPACE", "以画面为中心完成技术检查、Vision 建议与人工决定。")
     project = current_project_or_stop()
@@ -576,56 +616,61 @@ def render() -> None:
     if not executions:
         st.info("该项目还没有可查看的镜头结果。")
         return
+    review_targets = _review_targets(project, executions, qc_service, canonical_state)
     selected_execution = executions[-1]
+    results: list[Any] = []
+    selected_result = None
+    selected_shot = None
+    selected_shot_number: Any = None
+    if review_targets:
+        selected_result_key = f"review-result-{project.id}"
+        selected_result_id = st.session_state.get(selected_result_key)
+        selected_target = next(
+            (
+                item
+                for item in review_targets
+                if str(_value(item["result"], "id")) == str(selected_result_id)
+            ),
+            review_targets[0],
+        )
+        if len(review_targets) > 1:
+            selected_index = st.selectbox(
+                "镜头结果",
+                list(range(len(review_targets))),
+                index=review_targets.index(selected_target),
+                format_func=lambda index: (
+                    f"镜头 {review_targets[index]['shot_number']} · "
+                    f"{_human_qc_state(_status(review_targets[index]['result']))}"
+                ),
+                key=f"review-result-select-{project.id}",
+            )
+            selected_target = review_targets[int(selected_index)]
+        selected_execution = selected_target["execution"]
+        selected_result = selected_target["result"]
+        results = selected_target["results"]
+        selected_shot = selected_target["shot"]
+        selected_shot_number = selected_target["shot_number"]
+        st.session_state[selected_result_key] = _value(selected_result, "id")
     try:
         artifacts = list(execution_service.list_artifacts(project.id, _value(selected_execution, "id")))
     except Exception:
         artifacts = []
-    try:
-        results = list(qc_service.list_results(project.id, _value(selected_execution, "id")))
-    except Exception as exc:
-        st.warning(_safe_ui_error(exc, "技术检查结果暂不可用，请稍后刷新。"))
-        results = []
 
-    selected_shot = None
-    if results:
-        selected_result_key = f"review-result-{project.id}"
-        selected_result_id = st.session_state.get(selected_result_key)
-        selected_result = next(
-            (item for item in results if str(_value(item, "id")) == str(selected_result_id)),
-            results[-1],
+    if selected_result is not None:
+        wrapped_result = (
+            dict(selected_result)
+            if isinstance(selected_result, Mapping)
+            else selected_result
         )
-        if len(results) > 1:
-            selected_index = st.selectbox(
-                "镜头结果",
-                list(range(len(results))),
-                index=results.index(selected_result),
-                format_func=lambda index: f"镜头 {index + 1} · {_human_qc_state(_status(results[index]))}",
-                key=f"review-result-select-{project.id}",
-            )
-            selected_result = results[int(selected_index)]
-            st.session_state[selected_result_key] = _value(selected_result, "id")
-        shot = None
-        if canonical_state is not None:
-            result_shot_id = _result_shot_id(selected_result, selected_execution)
-            if result_shot_id:
-                shot = next(
-                    (
-                        item
-                        for item in getattr(canonical_state, "shots", ())
-                        if str(_value(item, "id")) == result_shot_id
-                        or str(_value(item, "shot_id")) == result_shot_id
-                    ),
-                    None,
-                )
-        selected_shot = shot
+        if isinstance(wrapped_result, dict):
+            wrapped_result.setdefault("shot_number", selected_shot_number)
         _render_result(
             qc_service,
             project,
-            selected_result,
+            wrapped_result,
             execution_service=execution_service,
             job=job,
-            shot=shot,
+            shot=selected_shot,
             vision_service=vision_service,
         )
     else:
