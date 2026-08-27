@@ -1813,6 +1813,40 @@ def _migration_031_runtime_plan_schema_forward_repair(
     )
 
 
+def _migration_032_shot_source_selection_kind_forward_repair(
+    connection: sqlite3.Connection,
+) -> None:
+    """Repair source-decision rows created by an older migration 029 schema.
+
+    Some durable databases already recorded migration 029 before
+    ``selection_kind`` became part of the append-only shot-source contract.
+    Re-running migration 029 is unsafe, so add the missing column forward and
+    classify preserved legacy selections as final accepted sources.
+    """
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND name='production_shot_source_decisions'"
+    ).fetchone()
+    if table is None:
+        raise sqlite3.OperationalError(
+            "production_shot_source_decisions base table is missing "
+            "before migration 032"
+        )
+
+    columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(production_shot_source_decisions)"
+        )
+    }
+    if "selection_kind" not in columns:
+        connection.execute(
+            "ALTER TABLE production_shot_source_decisions ADD COLUMN "
+            "selection_kind TEXT NOT NULL DEFAULT 'FINAL_ACCEPTED' "
+            "CHECK (selection_kind IN ('FINAL_ACCEPTED','PREVIEW_PROMOTED'))"
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1845,6 +1879,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (29, _migration_029_candidate_and_shot_source_truth),
     (30, _migration_030_final_duration_control),
     (31, _migration_031_runtime_plan_schema_forward_repair),
+    (32, _migration_032_shot_source_selection_kind_forward_repair),
 )
 
 

@@ -227,8 +227,8 @@ def test_migration_029_adds_candidate_and_current_shot_source_truth() -> None:
 def test_migration_030_adds_final_duration_control_in_order_and_is_idempotent() -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
-    assert MIGRATIONS[-2][0] == 30
-    assert [version for version, _ in MIGRATIONS] == list(range(1, 32))
+    assert MIGRATIONS[-3][0] == 30
+    assert [version for version, _ in MIGRATIONS] == list(range(1, 33))
     prior = [(version, migration) for version, migration in MIGRATIONS if version < 30]
     for _, migration in prior:
         migration(connection)
@@ -344,7 +344,7 @@ def test_migration_031_repairs_recorded_legacy_duration_column_and_preserves_row
     ).fetchall()
     connection.execute("ALTER TABLE runtime_plans DROP COLUMN duration_strategy")
 
-    assert apply_migrations(connection) == 1
+    assert apply_migrations(connection) == len(MIGRATIONS) - 30
     columns = {
         row[1] for row in connection.execute("PRAGMA table_info(runtime_plans)")
     }
@@ -368,7 +368,7 @@ def test_migration_031_repairs_complete_runtime_plan_forward_contract() -> None:
     for column in reversed(RUNTIME_PLAN_FORWARD_COLUMNS):
         connection.execute(f"ALTER TABLE runtime_plans DROP COLUMN {column}")
 
-    assert apply_migrations(connection) == 1
+    assert apply_migrations(connection) == len(MIGRATIONS) - 30
     columns = {
         row[1] for row in connection.execute("PRAGMA table_info(runtime_plans)")
     }
@@ -394,6 +394,65 @@ def test_migration_031_repairs_complete_runtime_plan_forward_contract() -> None:
         "SELECT 1 FROM sqlite_master WHERE type='index' "
         "AND name='idx_runtime_plans_endpoint'"
     ).fetchone()
+
+
+def _database_recorded_through_031(connection: sqlite3.Connection) -> None:
+    for version, migration in MIGRATIONS:
+        if version == 32:
+            break
+        migration(connection)
+    connection.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    connection.executemany(
+        "INSERT INTO schema_migrations VALUES (?,?)",
+        [(version, "2026-08-27") for version in range(1, 32)],
+    )
+
+
+def test_migration_032_repairs_recorded_legacy_source_decision_schema() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    _database_recorded_through_031(connection)
+    connection.execute(
+        "INSERT INTO production_shot_source_decisions("
+        "id,project_id,production_job_id,production_shot_id,sequence_number,"
+        "decision_type,selection_kind,production_execution_id,"
+        "production_artifact_id,qc_result_id,selected_by,notes,created_at) "
+        "VALUES ('decision-legacy','project-legacy','job-legacy','shot-legacy',1,"
+        "'SELECTED','FINAL_ACCEPTED','execution-legacy','artifact-legacy',"
+        "'qc-legacy','user','accepted before schema repair','now')"
+    )
+    connection.execute(
+        "ALTER TABLE production_shot_source_decisions DROP COLUMN selection_kind"
+    )
+
+    before = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(production_shot_source_decisions)"
+        )
+    }
+    assert "selection_kind" not in before
+
+    assert apply_migrations(connection) == 1
+    columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(production_shot_source_decisions)"
+        )
+    }
+    assert "selection_kind" in columns
+    preserved = connection.execute(
+        "SELECT id,production_artifact_id,selection_kind "
+        "FROM production_shot_source_decisions WHERE id='decision-legacy'"
+    ).fetchone()
+    assert tuple(preserved) == (
+        "decision-legacy",
+        "artifact-legacy",
+        "FINAL_ACCEPTED",
+    )
+    assert apply_migrations(connection) == 0
 
 
 def test_fresh_initialize_is_idempotent_and_runtime_plan_insert_contract_works(
