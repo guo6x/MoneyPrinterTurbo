@@ -195,9 +195,16 @@ class ProviderProfileService:
         "MPT_TTS": (ProviderDeploymentRegion.LOCAL, "MPT_LOCAL_TTS", None),
     }
 
-    def __init__(self, repository: ProjectRepository | None = None, *, registry: CapabilityRegistry | None = None) -> None:
+    def __init__(
+        self,
+        repository: ProjectRepository | None = None,
+        *,
+        registry: CapabilityRegistry | None = None,
+        manifest_registry: object | None = None,
+    ) -> None:
         self.repository = repository or ProjectRepository()
         self.registry = registry
+        self.manifest_registry = manifest_registry
 
     def register(
         self,
@@ -275,6 +282,40 @@ class ProviderProfileService:
             raise ProviderProfileError(f"项目不存在: {project_id}")
         value = CapabilityKind(capability).value if not isinstance(capability, str) else capability
         profiles = [profile for profile in self.list(project_id, value) if profile.enabled]
+        manifest_registry = self.manifest_registry
+        if manifest_registry is None:
+            # A normal runtime does not pay the cost of projecting the whole
+            # manifest registry.  If Settings persisted an exact manifest ID,
+            # however, materialize that one immutable profile so downstream
+            # services consume the saved choice instead of silently falling
+            # back to the legacy registry default.
+            settings = self.get_settings(project_id) if project_id is not None else None
+            if settings is None and project_id is not None:
+                settings = self.get_settings(None)
+            if settings is None and project_id is None:
+                settings = self.get_settings(None)
+            selected = (
+                settings.selections.get(value)
+                if settings is not None and settings.preset is ProviderPreset.CUSTOM
+                else None
+            )
+            if selected:
+                try:
+                    from .model_runtime import default_manifest_registry
+
+                    candidate_registry = default_manifest_registry(
+                        include_placeholders=False
+                    )
+                    if candidate_registry.get(selected) is not None:
+                        manifest_registry = candidate_registry
+                except Exception:
+                    manifest_registry = None
+        if manifest_registry is not None:
+            profiles.extend(
+                profile
+                for profile in self._manifest_profiles(manifest_registry, value)
+                if not any(existing.id == profile.id for existing in profiles)
+            )
         if self.registry is not None:
             for index, provider in enumerate(self.registry.list(value)):
                 status = provider.status
@@ -348,6 +389,140 @@ class ProviderProfileService:
             )
         )
         return tuple(profiles)
+
+    @staticmethod
+    def _manifest_profiles(
+        manifest_registry: object,
+        legacy_capability: str,
+    ) -> tuple[CapabilityProfile, ...]:
+        """Project registered model data into the existing selection seam."""
+
+        try:
+            from .model_runtime import CapabilityKind as ModelCapabilityKind
+
+            universal = {
+                CapabilityKind.LLM.value: ModelCapabilityKind.LLM,
+                CapabilityKind.IMAGE.value: ModelCapabilityKind.IMAGE,
+                CapabilityKind.VIDEO_GENERATIVE.value: ModelCapabilityKind.VIDEO,
+                CapabilityKind.VISION.value: ModelCapabilityKind.VISION,
+                CapabilityKind.TTS.value: ModelCapabilityKind.TTS,
+            }[legacy_capability]
+            manifests = tuple(manifest_registry.list(universal))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return ()
+
+        projected: list[CapabilityProfile] = []
+        for manifest in manifests:
+            metadata = getattr(manifest, "metadata", {})
+            metadata = metadata if isinstance(metadata, Mapping) else {}
+            if metadata.get("placeholder") is True:
+                continue
+            manifest_id = str(getattr(manifest, "id", "") or "")
+            provider_id = str(
+                metadata.get("runtime_provider_id")
+                or getattr(manifest, "provider_id", "")
+            )
+            model_id = str(getattr(manifest, "model_id", "") or "")
+            endpoint_profile_id = str(
+                metadata.get("runtime_endpoint_profile_id")
+                or getattr(manifest, "endpoint_profile_id", "")
+                or "LEGACY"
+            )
+            endpoint_class = str(
+                metadata.get("runtime_endpoint_class")
+                or getattr(manifest, "endpoint_class", "")
+                or "UNSPECIFIED"
+            )
+            if not all((manifest_id, provider_id, model_id)):
+                continue
+            region_value = str(
+                getattr(manifest, "deployment_region", "UNSPECIFIED")
+                or "UNSPECIFIED"
+            )
+            try:
+                region = ProviderDeploymentRegion(region_value)
+            except ValueError:
+                region = ProviderDeploymentRegion.UNSPECIFIED
+            selection_policy = getattr(manifest, "selection_policy", {})
+            selection_policy = (
+                selection_policy if isinstance(selection_policy, Mapping) else {}
+            )
+            try:
+                priority = int(selection_policy.get("priority", 100))
+            except (TypeError, ValueError):
+                priority = 100
+            duration = getattr(manifest, "duration", None)
+            duration_data = (
+                duration.to_dict() if callable(getattr(duration, "to_dict", None)) else {}
+            )
+            resolution = getattr(manifest, "resolution", None)
+            resolution_data = (
+                resolution.to_dict()
+                if callable(getattr(resolution, "to_dict", None))
+                else {}
+            )
+            profile_data: dict[str, object] = {
+                "manifest_id": manifest_id,
+                "manifest_hash": str(getattr(manifest, "manifest_hash", "")),
+                "codec_id": str(getattr(manifest, "codec_id", "")),
+                "requires_explicit_selection": selection_policy.get(
+                    "requires_explicit_selection"
+                )
+                is True,
+            }
+            minimum = duration_data.get("minimum")
+            maximum = duration_data.get("maximum")
+            if minimum is not None:
+                profile_data["minimum_duration_seconds"] = minimum
+            if maximum is not None:
+                profile_data["maximum_duration_seconds"] = maximum
+            discrete = duration_data.get("discrete_values")
+            if isinstance(discrete, list) and discrete:
+                profile_data["supported_durations"] = discrete
+            limits = getattr(manifest, "limits", {})
+            limits = limits if isinstance(limits, Mapping) else {}
+            if (
+                "supported_durations" not in profile_data
+                and limits.get("duration_integer_only") is True
+                and isinstance(minimum, (int, float))
+                and isinstance(maximum, (int, float))
+                and float(minimum).is_integer()
+                and float(maximum).is_integer()
+            ):
+                profile_data["supported_durations"] = list(
+                    range(int(minimum), int(maximum) + 1)
+                )
+            resolutions = resolution_data.get("supported")
+            if isinstance(resolutions, list) and resolutions:
+                profile_data["supported_native_resolutions"] = resolutions
+                profile_data["provider_resolution"] = resolutions[0]
+            credential_reference = str(
+                getattr(manifest, "credential_reference", "") or ""
+            ) or None
+            projected.append(
+                CapabilityProfile(
+                    id=manifest_id,
+                    project_id=None,
+                    capability=legacy_capability,
+                    provider_id=provider_id,
+                    model_id=model_id,
+                    endpoint_profile_id=endpoint_profile_id,
+                    deployment_region=region,
+                    endpoint_class=endpoint_class,
+                    credential_reference=credential_reference,
+                    verification_state=(
+                        ProviderVerificationState.VERIFIED
+                        if bool(getattr(manifest, "verified", False))
+                        else ProviderVerificationState.NOT_VERIFIED
+                    ),
+                    selection_priority=max(0, min(10000, priority)),
+                    profile=profile_data,
+                    enabled=True,
+                    created_at="manifest",
+                    updated_at="manifest",
+                )
+            )
+        return tuple(projected)
 
     def get_settings(self, project_id: str | None = None) -> ProviderSelectionSettings | None:
         return self.repository.get_provider_selection_settings(project_id)

@@ -130,7 +130,13 @@ def build_mainland_manifests(
             selection_policy={"priority": 10, "profile": "MAINLAND_QUALITY"},
             limits={"max_messages": 64},
             pricing={"status": "PRICE_UNVERIFIED", "unit": "TOKENS"},
-            metadata={"provider_family": "ALIBABA", "region_scope": "MAINLAND_ONLY"},
+            metadata={
+                "provider_family": "ALIBABA",
+                "region_scope": "MAINLAND_ONLY",
+                "runtime_provider_id": "MPT_LLM",
+                "runtime_endpoint_profile_id": "runtime:LLM:MPT_LLM:qwen:default",
+                "runtime_endpoint_class": "MPT_LLM_QWEN_DEFAULT",
+            },
         ),
         ModelManifest(
             id=MAINLAND_PRIMARY_MANIFEST_IDS[CapabilityKind.IMAGE],
@@ -250,6 +256,7 @@ def build_mainland_manifests(
                 "region_scope": "MAINLAND_ONLY",
                 "legacy_implementation": "WanProductionAdapter",
                 "migration_action": "WRAP",
+                "runtime_provider_id": "WAN_VIDEO",
                 "requires_artifact_sink": True,
                 "supports_process_local_input_resolver": True,
             },
@@ -330,7 +337,13 @@ def build_mainland_manifests(
             readiness=deepseek_ready,
             selection_policy={"priority": 30, "requires_explicit_selection": True},
             pricing={"status": "PRICE_UNVERIFIED", "unit": "TOKENS"},
-            metadata={"migration_action": "KEEP", "region_scope": "MAINLAND_ONLY"},
+            metadata={
+                "migration_action": "KEEP",
+                "region_scope": "MAINLAND_ONLY",
+                "runtime_provider_id": "MPT_LLM",
+                "runtime_endpoint_profile_id": "runtime:LLM:MPT_LLM:deepseek:default",
+                "runtime_endpoint_class": "MPT_LLM_DEEPSEEK_DEFAULT",
+            },
         ),
         ModelManifest(
             id=MAINLAND_COMPATIBILITY_MANIFEST_IDS["SEEDANCE_VIDEO"],
@@ -376,6 +389,11 @@ def build_mainland_manifests(
                 "legacy_implementation": "SeedanceProductionAdapter",
                 "migration_action": "WRAP",
                 "region_scope": "MAINLAND_ONLY",
+                "runtime_provider_id": "SEEDANCE",
+                "runtime_endpoint_profile_id": (
+                    "runtime:VIDEO_GENERATIVE:SEEDANCE:ARK_CN_BEIJING"
+                ),
+                "runtime_endpoint_class": "ARK_CN_BEIJING",
                 "requires_artifact_sink": True,
                 "supports_process_local_input_resolver": True,
             },

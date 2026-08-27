@@ -128,6 +128,11 @@ from .model_runtime import (
     StreamDriver,
     readiness_from_status,
 )
+from .model_settings import (
+    SettingsModelOption,
+    SettingsModelResolution,
+    SettingsModelService,
+)
 
 __all__ = [
     "DeleteProjectResult",
@@ -189,5 +194,6 @@ __all__ = [
     "Capability", "CapabilityRequest", "CapabilityResult", "ProtocolFamily",
     "MAINLAND_MANIFESTS", "MainlandProviderRuntime",
     "ModelManifest", "ModelResolver", "ModelReadiness", "readiness_from_status",
+    "SettingsModelOption", "SettingsModelResolution", "SettingsModelService",
     "RequestResponseDriver", "AsyncTaskDriver", "StreamDriver",
 ]

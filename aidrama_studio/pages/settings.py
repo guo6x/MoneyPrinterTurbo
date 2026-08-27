@@ -15,7 +15,16 @@ from aidrama_studio.services import (
     ProjectService,
     WindowsCredentialStore,
 )
+from aidrama_studio.services.model_settings import (
+    CAPABILITY_LABELS,
+    CAPABILITY_ORDER,
+    SettingsModelService,
+    provider_label,
+    region_label,
+    validate_connection_value,
+)
 from aidrama_studio.storage import get_default_paths
+from aidrama_studio.storage.repositories import ProjectRepository
 from aidrama_studio.pages._shared import (
     normalize_capability_snapshots,
     render_capability_cards,
@@ -172,32 +181,141 @@ def _render_capability_workspace(project_id: str | None = None) -> tuple[object,
     return normalized
 
 
-def _render_model_scheme(snapshots: tuple[object, ...], project_id: str | None = None) -> None:
-    """Show the current model/profile choices without provider inventory UI."""
+def _render_model_scheme(
+    snapshots: tuple[object, ...] = (),
+    project_id: str | None = None,
+    *,
+    selection_service: SettingsModelService | None = None,
+) -> None:
+    """Render provider/model selectors from the canonical manifest registry."""
 
+    del snapshots  # Capability cards above remain a separate readiness surface.
+    service = selection_service or SettingsModelService()
     st.subheader("模型方案")
-    st.caption("模型与配置由通用运行时声明；已提交的制作版本保持原冻结选择。")
-    if not snapshots:
-        st.info("暂时无法读取模型方案；完成运行时初始化后可再次查看。")
-        return
-    for snapshot in snapshots:
-        public = _snapshot_public(snapshot)
-        capability = str(public.get("capability") or "能力").upper()
-        label = {
-            "LLM": "文本生成",
-            "IMAGE": "参考图生成",
-            "VIDEO": "视频生成",
-            "VISION": "画面分析",
-            "TTS": "配音",
-        }.get(capability, capability)
-        model = public.get("model_or_profile") or "尚未选择"
-        state = _human_capability_state(public)
+    st.caption(
+        "Provider 与模型均来自 Universal Runtime Manifest Registry；保存只影响之后新建的制作版本。"
+    )
+    scope_options = ["全局默认"]
+    if project_id:
+        scope_options.append("当前项目默认")
+    scope = st.radio(
+        "设置作用域",
+        scope_options,
+        horizontal=True,
+        key="universal-model-selection-scope",
+    )
+    scope_project_id = project_id if scope == "当前项目默认" else None
+    pending: dict[object, str] = {}
+
+    for capability in CAPABILITY_ORDER:
+        label = CAPABILITY_LABELS[capability]
+        try:
+            options = service.selectable_inventory(capability)
+            resolved = service.resolve(scope_project_id, capability)
+        except Exception as exc:
+            logger.warning("settings model projection unavailable for {}: {}", capability, exc)
+            options = ()
+            resolved = None
+
         with st.container(border=True):
-            st.markdown(f"**{label}**")
-            st.caption(f"当前方案 · {model} · {state}")
-            if public.get("authorization_required") and not public.get("create_authorized"):
-                st.caption("首次创建任务前需要明确确认；不会自动提交。")
-    st.info("要更换模型方案，请先让运行时声明可用选项；这里不会猜测或自动跨区切换。")
+            st.markdown(f"#### {label}")
+            current = resolved.option if resolved is not None else None
+            if current is not None:
+                inherited = " · 继承全局" if resolved.inherited else ""
+                st.caption(
+                    f"当前 · {current.provider_name} / {current.display_name}{inherited}"
+                )
+            else:
+                st.caption("当前 · 尚未选择")
+
+            if not options:
+                st.warning("当前 Registry 没有通过兼容性与 Runtime codec 检查的模型。")
+                continue
+            provider_ids = list(
+                dict.fromkeys(option.provider_id for option in options)
+            )
+            current_provider = (
+                current.provider_id
+                if current is not None and current.provider_id in provider_ids
+                else provider_ids[0]
+            )
+            selected_provider = st.selectbox(
+                f"{label} Provider",
+                provider_ids,
+                index=provider_ids.index(current_provider),
+                format_func=provider_label,
+                key=f"universal-provider-{scope_project_id or 'global'}-{capability.value}",
+            )
+            provider_models = [
+                option for option in options if option.provider_id == selected_provider
+            ]
+            model_ids = [option.manifest_id for option in provider_models]
+            current_manifest = (
+                current.manifest_id
+                if current is not None and current.manifest_id in model_ids
+                else model_ids[0]
+            )
+            selected_manifest = st.selectbox(
+                f"{label} 模型选择",
+                model_ids,
+                index=model_ids.index(current_manifest),
+                format_func=lambda manifest_id, choices={
+                    item.manifest_id: item for item in provider_models
+                }: choices[manifest_id].display_name,
+                key=f"universal-model-{scope_project_id or 'global'}-{capability.value}",
+            )
+            pending[capability] = selected_manifest
+            selected = next(
+                item for item in provider_models if item.manifest_id == selected_manifest
+            )
+            status_columns = st.columns(2)
+            status_columns[0].caption(
+                f"Provider · {selected.provider_name}\n\n"
+                f"区域 · {region_label(selected.deployment_region)}\n\n"
+                f"Availability · {'已注册' if selected.registered else '未注册'}\n\n"
+                f"Runtime · {'可用' if selected.runtime_available else '不可用'}"
+            )
+            status_columns[1].caption(
+                f"连接 · {'已配置' if selected.configured else '需要配置'}\n\n"
+                f"Credential · {'就绪' if selected.credential_ready else '缺失'}\n\n"
+                f"验证 · {'已验证' if selected.verified else '尚未验证'}\n\n"
+                f"显式选择 · {'需要' if selected.explicit_selection_required else '不需要'}"
+            )
+            if selected.authorization_required and not selected.create_authorized:
+                st.caption("付费创建尚未授权；选择或保存模型不会提交 Provider 请求。")
+            if current is None or selected.manifest_id != current.manifest_id:
+                st.info("此项为待保存选择；不会修改任何已冻结 RuntimePlan。")
+            with st.expander("高级诊断", expanded=False):
+                st.caption("以下仅为无凭据的 Registry identity 与兼容性摘要。")
+                st.json(
+                    {
+                        "capability": capability.value,
+                        "manifest_id": selected.manifest_id,
+                        "manifest_hash": selected.manifest_hash,
+                        "protocol": selected.protocol,
+                        "codec_id": selected.codec_id,
+                        "runtime_available": selected.runtime_available,
+                        "compatibility": selected.compatibility_reason,
+                    }
+                )
+
+    if st.button(
+        "保存模型方案",
+        type="primary",
+        key=f"save-universal-model-selection-{scope_project_id or 'global'}",
+        disabled=len(pending) != len(CAPABILITY_ORDER),
+    ):
+        try:
+            service.save_selections(
+                project_id=scope_project_id,
+                selections=pending,
+            )
+        except Exception as exc:
+            logger.warning("model selection save failed: {}", exc)
+            st.error("模型方案保存失败；原有选择与已冻结制作版本保持不变。")
+        else:
+            st.success("模型方案已保存；只影响之后新建的 RuntimePlan。")
+            st.rerun()
 
 
 def _credential_requirements() -> tuple[dict[str, object], ...]:
@@ -208,6 +326,10 @@ def _credential_requirements() -> tuple[dict[str, object], ...]:
     summary rather than hard-coding provider-specific API keys in the page.
     """
 
+    try:
+        declared = list(SettingsModelService().credential_requirements())
+    except Exception:
+        declared = []
     source = st.session_state.get("_aidrama_credential_requirements", ())
     if callable(source):
         try:
@@ -218,7 +340,8 @@ def _credential_requirements() -> tuple[dict[str, object], ...]:
         source = tuple(source.values())
     if isinstance(source, (str, bytes)) or source is None:
         source = ()
-    requirements: list[dict[str, object]] = []
+    requirements: list[dict[str, object]] = list(declared)
+    known = {str(item.get("key") or "") for item in requirements}
     for index, item in enumerate(source or ()):
         if isinstance(item, dict):
             key = str(item.get("key") or item.get("id") or "").strip()
@@ -234,6 +357,8 @@ def _credential_requirements() -> tuple[dict[str, object], ...]:
             input_label = str(getattr(item, "input_label", "") or "").strip()
         if not key:
             continue
+        if key in known:
+            continue
         requirements.append({
             "key": key,
             "label": label or f"安全连接 {index + 1}",
@@ -241,17 +366,24 @@ def _credential_requirements() -> tuple[dict[str, object], ...]:
             "secret": secret,
             "input_label": input_label,
         })
+        known.add(key)
     return tuple(requirements)
 
 
-def _render_credentials(paths: object, snapshots: tuple[object, ...]) -> None:
+def _render_credentials(
+    paths: object,
+    snapshots: tuple[object, ...],
+    *,
+    requirements: tuple[dict[str, object], ...] | None = None,
+    credential_store: object | None = None,
+) -> None:
     """Render generic secure credentials/connections, driven by declarations."""
 
     st.subheader("凭据与连接")
     st.caption("凭据与连接地址只保存在当前 Windows 用户的安全存储中；保存状态不会显示完整值，也不会自动发起请求。")
-    requirements = _credential_requirements()
+    requirements = requirements if requirements is not None else _credential_requirements()
     try:
-        store = WindowsCredentialStore(getattr(paths, "root", None))
+        store = credential_store or WindowsCredentialStore(getattr(paths, "root", None))
     except CredentialStoreError:
         st.warning("安全凭据存储当前不可用；不会读取或显示已有凭据。")
         return
@@ -305,12 +437,15 @@ def _render_credentials(paths: object, snapshots: tuple[object, ...]) -> None:
                 save = st.form_submit_button("安全保存", type="primary")
             if save:
                 if not secret:
-                    st.warning("请输入安全凭据后再保存。")
+                    st.warning("请输入连接配置后再保存。")
                     continue
                 try:
-                    store.set(key, secret)
+                    validated = validate_connection_value(item, secret)
+                    store.set(key, validated)
                     st.success("连接已安全保存。")
                     st.rerun()
+                except ValueError:
+                    st.warning("连接格式无效；未保存任何变更。")
                 except Exception:
                     st.warning("连接保存失败；原有连接状态保持不变。")
             if st.button(
@@ -548,8 +683,31 @@ def render() -> None:
     paths = get_default_paths()
     ready, detail = check_media_engine()
     snapshots = _render_capability_workspace(project_id)
-    _render_model_scheme(snapshots, project_id)
-    _render_credentials(paths, snapshots)
+    try:
+        credential_store = WindowsCredentialStore(paths.root)
+    except Exception:
+        credential_store = None
+    try:
+        model_service = SettingsModelService(
+            ProjectRepository(paths),
+            credential_store=credential_store,
+        )
+        requirements = model_service.credential_requirements()
+    except Exception as exc:
+        logger.warning("settings manifest registry unavailable: {}", exc)
+        model_service = None
+        requirements = None
+    _render_model_scheme(
+        snapshots,
+        project_id,
+        selection_service=model_service,
+    )
+    _render_credentials(
+        paths,
+        snapshots,
+        requirements=requirements,
+        credential_store=credential_store,
+    )
     _render_output_defaults(project_id, project)
     _render_storage_backup(project_id, project, paths)
     _render_diagnostics(paths, ready, detail)

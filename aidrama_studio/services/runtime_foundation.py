@@ -349,6 +349,62 @@ class RuntimePlanService:
         self.repository = repository or ProjectRepository()
         self.profiles = OutputProfileService(self.repository)
 
+    def create_from_selection(
+        self,
+        project_id: str,
+        *,
+        brief: GenerationBrief,
+        capability: object,
+        selection_service: object | None = None,
+        **plan_options: Any,
+    ) -> RuntimePlan:
+        """Create a future plan from the persisted exact manifest selection.
+
+        Existing plans never pass through this method again: their provider,
+        model, endpoint and manifest provenance remain frozen in SQLite.  The
+        helper is intentionally thin so every normal RuntimePlan invariant is
+        still enforced by :meth:`create`.
+        """
+
+        identity_fields = {
+            "provider_capability",
+            "provider_id",
+            "model_id",
+            "endpoint_profile_id",
+            "deployment_region",
+            "endpoint_class",
+            "credential_reference",
+            "selection_source",
+        }
+        if identity_fields.intersection(plan_options):
+            raise RuntimeFoundationError(
+                "manifest selection identity cannot be overridden while creating RuntimePlan"
+            )
+        if selection_service is None:
+            from .model_settings import SettingsModelService
+
+            selection_service = SettingsModelService(self.repository)
+        resolve_identity = getattr(selection_service, "runtime_plan_identity", None)
+        if not callable(resolve_identity):
+            raise RuntimeFoundationError("model selection service is invalid")
+        try:
+            identity = dict(resolve_identity(project_id, capability))
+        except Exception as exc:
+            raise RuntimeFoundationError(
+                "saved model selection cannot resolve into a RuntimePlan"
+            ) from exc
+        manifest_parameters = dict(identity.pop("provider_parameters", {}))
+        requested_parameters = dict(plan_options.pop("provider_parameters", {}) or {})
+        # Canonical manifest identity always wins over request tuning fields.
+        requested_parameters.update(manifest_parameters)
+        return self.create(
+            project_id,
+            brief=brief,
+            provider_parameters=requested_parameters,
+            **identity,
+            **plan_options,
+        )
+
     def create(self, project_id: str, *, production_job_id: str | None, brief: GenerationBrief, provider_capability: str, provider_id: str, model_id: str, endpoint_profile_id: str | None = None, deployment_region: str = "UNSPECIFIED", endpoint_class: str = "UNSPECIFIED", credential_reference: str | None = None, selection_source: str = "LEGACY", transmitted_content_types: list[str] | tuple[str, ...] = (), estimated_request_count: int = 1, generation_mode: str = "text_to_video", resolution: str | None = None, native_generation_fps: float = 24.0, provider_generation_duration: float | None = None, target_creative_duration: float | None = None, duration_strategy: str = "EXACT", audio_strategy: str = "provider_or_post", provider_parameters: Mapping[str, Any] | None = None, reference_version_ids: list[str] | tuple[str, ...] = (), reference_roles: Mapping[str, str] | None = None, continuity_strategy: str = "shot-local", authorization: Mapping[str, Any] | None = None, prompt_template_version: str = "v1", plan_id: str | None = None) -> RuntimePlan:
         if brief.project_id != project_id or (production_job_id is not None and brief.production_job_id != production_job_id):
             raise RuntimeFoundationError("GenerationBrief provenance 不匹配")
