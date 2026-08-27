@@ -12,11 +12,16 @@ from aidrama_studio.domain import (
     ProductionReviewDecision,
     ProductionShotStatus,
 )
-from aidrama_studio.pages._shared import current_project_or_stop, render_actionable_blockers, render_project_context
+from aidrama_studio.pages._shared import (
+    current_project_or_stop,
+    render_automation_mode,
+    render_background_activity,
+    render_project_context,
+)
+from aidrama_studio.services.current_state import CurrentProductionStateService
 from aidrama_studio.services import (
     ProductionExecutionService,
     ProductionExecutionServiceError,
-    FinalAssemblyService,
     FinalAssemblyServiceError,
     ProductionOrchestratorError,
     ProductionQueueError,
@@ -128,12 +133,26 @@ def _qc_traceability(execution, artifact) -> None:
         st.caption("Reference versions · " + (", ".join(f"{key}={value}" for key, value in references.items()) or "—"))
 
 
-def _safe_failure_reason(value: object, default: str = "runtime execution failed") -> str:
+def _safe_failure_reason(value: object, default: str = "制作任务暂未完成") -> str:
     """Keep operator-facing errors concise and never render a traceback."""
     text = str(value or default).replace("\r", " ").replace("\n", " ").strip()
     if "Traceback (most recent call last)" in text:
         text = text.split("Traceback (most recent call last)", 1)[0].strip() or default
+    # Normal production cards should explain what happened without exposing a
+    # local path, hash, provider task id, or a raw worker exception.  The full
+    # event payload remains available under the single Advanced drawer.
+    import re
+
+    text = re.sub(r"(?i)(?:[a-z]:[\\/]|/)(?:[^\s]+[\\/])+[^\s]*", "相关文件", text)
+    text = re.sub(r"\b[0-9a-f]{32,}\b", "相关记录", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?i)\b(runtime|provider|endpoint|model[_ -]?id|task[_ -]?id)\b", "制作服务", text)
     return text[:300]
+
+
+def _safe_ui_error(_exc: object, fallback: str) -> str:
+    """Return creator-facing copy while keeping raw diagnostics out of normal UI."""
+
+    return fallback
 
 
 def _render_qc_metrics(qc_service: ProductionQCService, project, result) -> None:
@@ -357,6 +376,9 @@ def _readiness_check(readiness: Mapping[str, object], key: str, reason_tokens: t
 
 def _render_readiness_console(readiness: Mapping[str, object]) -> None:
     ready = bool(readiness.get("ready"))
+    if not ready:
+        _render_locked_production_workspace(readiness)
+        return
     st.markdown("### 制作准备度")
     st.markdown("项目 → 制作准备 → 镜头生产 → QC → 完成")
     status_col, story_col = st.columns(2)
@@ -372,18 +394,102 @@ def _render_readiness_console(readiness: Mapping[str, object]) -> None:
     coverage_col.metric("人物参考资产", str(character_coverage if character_coverage is not None else ("已满足" if ready else "需检查")))
     location_col.metric("场景参考资产", str(location_coverage if location_coverage is not None else ("已满足" if ready else "需检查")))
 
-    reasons = _readiness_reasons(readiness)
-    if ready:
-        st.success("制作准备已完成，可以开始整剧制作。")
-    else:
-        st.warning("Production 尚未就绪。请先完成以下前置条件：")
-        render_actionable_blockers(
-            reasons or ["approved Story Bible, Structured Script, Shot Plan and Reference Assets are required"],
-            project_id=str(readiness.get("project_id") or "production"),
+    st.success("制作准备已完成，可以开始整剧制作。")
+
+
+def _coverage_complete(value: object) -> bool:
+    """Interpret the service's canonical coverage projection without recomputing it."""
+
+    current, separator, required = str(value or "").partition("/")
+    if not separator:
+        return False
+    try:
+        return int(current) == int(required)
+    except ValueError:
+        return False
+
+
+def _locked_prerequisites(readiness: Mapping[str, object]) -> list[tuple[str, str, str, bool]]:
+    story_ready = _readiness_check(readiness, "story_bible_approved", ("story bible", "story_bible"))
+    script_ready = _readiness_check(readiness, "structured_script_approved", ("structured script", "script"))
+    plan_ready = _readiness_check(readiness, "shot_plan_approved", ("shot plan", "shot_plan"))
+    references_ready = (
+        plan_ready
+        and _coverage_complete(readiness.get("character_reference_coverage"))
+        and _coverage_complete(readiness.get("location_reference_coverage"))
+    )
+    return [
+        ("确认故事设定", "Story Bible 已批准后才能固定制作基础。", "story", story_ready),
+        ("确认结构化剧本", "剧本需与当前故事版本保持一致。", "story", script_ready),
+        ("确认分镜方案", "镜头顺序与时长必须经过人工确认。", "director", plan_ready),
+        ("锁定角色与场景参考", "生产只使用已明确锁定的参考资产。", "assets", references_ready),
+    ]
+
+
+def _render_locked_shot_board(readiness: Mapping[str, object]) -> None:
+    shot_count = int(readiness.get("shot_count") or 0)
+    if shot_count:
+        visible = min(shot_count, 10)
+        slots = "".join(
+            '<div class="aidrama-shot-slot">'
+            f'<strong>镜头 {index:02d}</strong><span>等待制作</span></div>'
+            for index in range(1, visible + 1)
         )
-        missing = [reason for reason in reasons if "reference" in reason.lower() or "参考" in reason]
-        if missing:
-            st.info("参考资产缺失时，请前往「创意与剧本 → Reference Assets」补齐人物或场景覆盖。")
+        if shot_count > visible:
+            slots += (
+                '<div class="aidrama-shot-slot"><strong>更多镜头</strong>'
+                f'<span>另有 {shot_count - visible} 个已规划镜头</span></div>'
+            )
+        body = f'<div class="aidrama-shot-slot-grid">{slots}</div>'
+        summary = f"已确认的 Shot Plan · {shot_count} 个镜头"
+    else:
+        body = (
+            '<div class="aidrama-production-empty-board">'
+            '<strong>镜头生产区等待 Shot Plan</strong>'
+            '<span>确认分镜后，真实镜头会在这里进入制作队列。</span></div>'
+        )
+        summary = "尚无可用于制作的已确认镜头"
+    st.markdown(
+        '<section class="aidrama-production-locked-board">'
+        '<div class="aidrama-production-board-head">'
+        '<strong>Shot Production Board</strong>'
+        f'<span>{summary}</span></div>{body}</section>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_locked_production_workspace(readiness: Mapping[str, object]) -> None:
+    _render_locked_shot_board(readiness)
+    prerequisites = _locked_prerequisites(readiness)
+    rows = "".join(
+        '<div class="aidrama-prereq-row{}">'
+        '<span class="aidrama-prereq-mark">{}</span>'
+        '<div class="aidrama-prereq-copy"><strong>{}</strong><span>{}</span></div></div>'.format(
+            " is-complete" if complete else "",
+            "✓" if complete else "○",
+            title,
+            detail,
+        )
+        for title, detail, _page, complete in prerequisites
+    )
+    st.markdown(
+        '<section class="aidrama-production-prereqs">'
+        '<h3>开始制作前</h3>' + rows + '</section>',
+        unsafe_allow_html=True,
+    )
+    next_item = next((item for item in prerequisites if not item[3]), None)
+    if next_item is None:
+        return
+    title, _detail, page, _complete = next_item
+    if st.button(
+        f"去完成：{title}",
+        type="primary",
+        key=f"production-next-prerequisite-{readiness.get('project_id') or 'project'}-{page}",
+        use_container_width=True,
+    ):
+        from aidrama_studio.components.navigation import request_navigation
+
+        request_navigation(page)
 
 
 def _board_entries(production_service: ProductionService, project, job) -> list[dict[str, object]]:
@@ -690,6 +796,8 @@ def _render_shot_board(
     job,
     progress: Mapping[str, object],
     source_service=None,
+    *,
+    show_source_controls: bool = False,
 ) -> tuple[list[object], dict[str, object]]:
     entries = _board_entries(production_service, project, job)
     try:
@@ -714,7 +822,16 @@ def _render_shot_board(
     progress_cols = st.columns(2)
     progress_cols[0].metric("失败", failed)
     progress_cols[1].metric("待制作", pending)
-    st.caption(f"当前镜头 · {current_shot_id or '—'}")
+    # Keep the internal shot key for highlighting, but present an ordinal to
+    # creators instead of a database identifier.
+    current_shot_label = None
+    if current_shot_id:
+        for item in entries:
+            candidate_shot = _value(item, "production_shot")
+            if str(_value(candidate_shot, "shot_id", "")) == current_shot_id:
+                current_shot_label = _value(candidate_shot, "order_index", None)
+                break
+    st.caption(f"当前镜头 · {('镜头 ' + str(current_shot_label)) if current_shot_label is not None else '等待下一镜头'}")
     st.caption(f"{completed}/{total} 个镜头完成 · {progress.get('percent_complete', 0)}%")
     if progress.get("total_shots"):
         st.progress(min(100, max(0, int(float(progress.get("percent_complete", 0))))))
@@ -732,7 +849,8 @@ def _render_shot_board(
         qc_status = _qc_status_value(qc_result) if qc_result is not None else "QC_PENDING"
         review_status = _review_status(reviews)
         highlighted = shot_id == current_shot_id or shot_status == ProductionShotStatus.RUNNING.value
-        label = f"镜头 {_value(shot, 'order_index', '—')} · {_value(entry, 'scene_name', _value(entry, 'scene_id', '—'))}"
+        scene_label = str(_value(entry, "scene_name", "") or "未命名场景").strip()
+        label = f"镜头 {_value(shot, 'order_index', '—')} · {scene_label}"
         with st.container(border=True):
             if highlighted:
                 st.markdown(f"#### ▶ {label}")
@@ -740,14 +858,22 @@ def _render_shot_board(
             else:
                 st.markdown(f"#### {label}")
             description = str(_value(entry, "description", "") or "").strip()
+            # The board is media-first even when a real thumbnail is not yet
+            # available.  A provider/path identifier is never shown here.
+            st.caption("镜头缩略图 · 媒体完成后可在审片预览")
             if description:
                 st.caption(description[:240])
             cols = st.columns(3)
             cols[0].markdown(f"制作：**{_display_status(execution_status if execution is not None else shot_status, _SHOT_STATUS_LABELS)}**")
             cols[1].markdown(f"QC：**{_display_status(qc_status, _QC_STATUS_LABELS)}**")
-            cols[2].markdown(f"人审：**{_review_status(reviews) if review_status == 'PENDING' else ('已拒绝' if review_status == 'REJECTED' else '已接受')}**")
+            review_display = {
+                "PENDING": "待审片",
+                "REJECTED": "需要修改",
+                "APPROVED": "已通过",
+            }.get(review_status, "待审片")
+            cols[2].markdown(f"人审：**{review_display}**")
             if execution_status == ProductionExecutionStatus.FAILED.value:
-                reason = "runtime failed"
+                reason = "制作服务未完成"
                 try:
                     events = execution_service.list_events(project.id, _value(execution, "id"))
                     for event in reversed(events):
@@ -772,21 +898,55 @@ def _render_shot_board(
                     except (ProductionQCServiceError, AttributeError):
                         failed_metrics = []
                 if failed_metrics:
-                    st.caption("失败指标：" + ", ".join(map(str, failed_metrics)))
+                    st.caption(f"有 {len(failed_metrics)} 项技术检查未通过；请在审片页查看明细。")
                 if st.button("查看 QC 详情", key=f"view-qc-{shot_id}"):
                     st.session_state[f"production-advanced-{_value(job, 'id')}"] = True
             if review_status == "REJECTED":
-                st.warning("人审拒绝，后续镜头已阻塞；请修订后创建新的 attempt。")
-            _render_shot_sources(
-                source_service,
-                execution_service,
-                qc_service,
-                project,
-                job,
-                shot,
-                executions,
+                st.warning("人审要求修改；请先修订生成意图，再明确创建新版本。")
+            next_action = _shot_next_action(
+                execution_status=execution_status,
+                shot_status=shot_status,
+                qc_status=qc_status,
+                review_status=review_status,
             )
+            st.caption(f"下一步 · {next_action}")
+            # Candidate/source controls belong to Review.  Keep this switch
+            # only for compatibility callers and focused diagnostics tests.
+            if show_source_controls:
+                _render_shot_sources(
+                    source_service,
+                    execution_service,
+                    qc_service,
+                    project,
+                    job,
+                    shot,
+                    executions,
+                )
     return shown_executions, {"executions": executions, "by_shot": by_shot}
+
+
+def _shot_next_action(
+    *,
+    execution_status: str,
+    shot_status: str,
+    qc_status: str,
+    review_status: str,
+) -> str:
+    """Translate canonical shot state into one creator-facing next action."""
+
+    if execution_status in {ProductionExecutionStatus.QUEUED.value, ProductionExecutionStatus.RUNNING.value}:
+        return "等待生成完成"
+    if execution_status == ProductionExecutionStatus.FAILED.value or shot_status == ProductionShotStatus.FAILED.value:
+        return "恢复已有结果"
+    if qc_status == ProductionQCStatus.QC_FAILED.value:
+        return "查看审片中的技术检查"
+    if review_status == ProductionReviewDecision.REJECTED.value:
+        return "修改生成意图后重做"
+    if qc_status == ProductionQCStatus.QC_PASS.value:
+        return "进入审片"
+    if execution_status == ProductionExecutionStatus.SUCCEEDED.value or shot_status == ProductionShotStatus.SUCCEEDED.value:
+        return "运行技术检查"
+    return "等待提交"
 
 
 def _make_orchestrator(production_service, execution_service, qc_service):
@@ -844,22 +1004,25 @@ def _orchestrator_action(
                 raise ProductionOrchestratorError("停止制作需要一个正在运行的 ProductionJob")
             orchestrator.cancel_job(project.id, _value(job, "id"), reason="user")
     except (ProductionQueueError, ProductionOrchestratorError, ProductionServiceError, ProductionExecutionServiceError, NotImplementedError) as exc:
-        st.error(f"Production action unavailable: {exc}")
+        st.error(_safe_ui_error(exc, "制作操作未完成，请检查准备项后重试。"))
         return
     st.rerun()
 
 
 def _render_primary_action(orchestrator, production_service, project, job, readiness, progress, *, ensure_job=None) -> None:
+    """Render one state-dependent production action and paid disclosure."""
+
     status = _job_status(job) if job is not None else ("READY" if readiness.get("ready") else "DRAFT")
     ready = bool(readiness.get("ready"))
     if not ready:
         st.button("开始整剧制作", type="primary", disabled=True, key=f"start-blocked-{project.id}")
         return
     if status in {"QUEUED", "RUNNING"}:
+        st.caption("制作在后台进行；当前页面仍可查看已完成镜头。")
         cols = st.columns(2)
         if cols[0].button("刷新制作状态", key=f"refresh-job-{_value(job, 'id', project.id)}"):
             try:
-                progress = orchestrator.get_job_progress(project.id, _value(job, "id"))
+                orchestrator.get_job_progress(project.id, _value(job, "id"))
             except Exception:
                 pass
             st.rerun()
@@ -867,18 +1030,30 @@ def _render_primary_action(orchestrator, production_service, project, job, readi
             _orchestrator_action(orchestrator, "cancel", project, job)
         return
     if status == "SUCCEEDED":
-        st.success("制作完成")
+        st.success("制作完成，可以进入审片。")
+        if st.button("进入审片", type="primary", key=f"go-review-{project.id}"):
+            from aidrama_studio.components.navigation import request_navigation
+
+            request_navigation("review")
         return
     if status == "FAILED":
-        st.error("制作失败，当前不会自动重新生成或重试。请查看失败镜头与高级信息。")
+        st.error("制作遇到问题。系统不会自动重新生成或付费重试；请先查看失败镜头。")
         return
+
     label = "继续制作" if status == "CANCELLED" or int(progress.get("completed_shots", 0) or 0) > 0 else "开始整剧制作"
     preview_method = getattr(orchestrator, "preview_authorization", None)
+    if job is None and not callable(preview_method):
+        # A missing preview is an unavailable authorization surface, not an
+        # implicit approval.  Keep the CTA visibly disabled until the runtime
+        # can disclose the bounded work and transfer scope.
+        st.info("制作授权预览暂不可用；准备完成后才能确认并开始制作。")
+        st.button(label, type="primary", disabled=True, key=f"prepare-production-{project.id}")
+        return
     if callable(preview_method) and job is None:
-        st.info("先冻结 Production Job 与输出配置；下一步会显示本次 Provider、模型及最大请求数供你确认。")
-        if st.button("准备制作计划", type="primary", key=f"prepare-production-{project.id}"):
+        st.info("开始前会先准备制作版本，并显示新建任务数量与素材传输范围供你确认。")
+        if st.button(label, type="primary", key=f"prepare-production-{project.id}"):
             if not callable(ensure_job):
-                st.error("无法创建 ProductionJob")
+                st.error("暂时无法准备制作版本。")
                 return
             ensure_job()
             st.rerun()
@@ -888,135 +1063,92 @@ def _render_primary_action(orchestrator, production_service, project, job, readi
     disabled = False
     endpoint_profile_id = None
     if callable(preview_method) and job is not None:
-        options_method = getattr(orchestrator, "list_provider_options", None)
-        if callable(options_method):
-            options = list(options_method(project.id))
-            if options:
-                by_endpoint = {
-                    str(item["endpoint_profile_id"]): item for item in options
-                }
-                default_endpoint_id = str(
-                    next(
-                        (
-                            item["endpoint_profile_id"]
-                            for item in options
-                            if item.get("default")
-                        ),
-                        options[0]["endpoint_profile_id"],
-                    )
-                )
-                selected_endpoint_profile_id = st.selectbox(
-                    "本次视频 Provider",
-                    list(by_endpoint),
-                    key=(
-                        f"production-provider-override-{_value(job, 'id')}-"
-                        f"{default_endpoint_id}"
-                    ),
-                    format_func=lambda value: (
-                        f"{by_endpoint[value]['provider_id']} / {by_endpoint[value]['model_id']} · "
-                        f"{by_endpoint[value]['deployment_region']} · {by_endpoint[value]['endpoint_class']}"
-                    ),
-                )
-                endpoint_profile_id = (
-                    None
-                    if selected_endpoint_profile_id == default_endpoint_id
-                    else selected_endpoint_profile_id
-                )
         try:
             preview = preview_method(
                 project.id,
                 _value(job, "id"),
-                endpoint_profile_id=endpoint_profile_id,
+                endpoint_profile_id=None,
                 max_paid_attempts=1,
             )
         except ProductionQueueError as exc:
-            st.warning(f"生成 Provider 尚未就绪：{exc}")
+            st.warning(_safe_ui_error(exc, "视频生成能力尚未就绪，请前往设置检查能力状态。"))
             st.button(label, type="primary", disabled=True, key=f"primary-production-{_value(job, 'id', project.id)}")
             return
-        st.markdown("### 本次生成授权")
+        except Exception as exc:
+            st.warning(_safe_ui_error(exc, "制作授权预览暂不可用，请稍后重试。"))
+            st.button(label, type="primary", disabled=True, key=f"primary-production-{_value(job, 'id', project.id)}")
+            return
+
+        st.markdown("### 付费确认")
+        st.caption("只确认本次新建任务；恢复已有任务不会重复提交。")
         cols = st.columns(2)
-        cols[0].metric("视频 Provider", preview.provider_id)
-        cols[1].metric("模型", preview.model_id)
+        cols[0].metric("镜头数量", int(getattr(preview, "shot_count", 0) or 0))
+        cols[1].metric("参考图数量", int(getattr(preview, "reference_count", 0) or 0))
         cols = st.columns(2)
-        cols[0].metric("区域 / 部署类型", f"{preview.deployment_region} / {preview.endpoint_class}")
-        cols[1].metric("参考图数量", preview.reference_count)
-        cols = st.columns(2)
-        cols[0].metric("目标成片时长", f"{preview.target_episode_duration_seconds:g}s")
-        cols[1].metric("镜头数量", preview.shot_count)
-        cols = st.columns(2)
-        cols[0].metric(
-            "Provider 原生生成",
-            f"{preview.native_generation_resolution} · {preview.native_generation_fps:g}fps",
-        )
-        cols[1].metric(
-            "最终交付",
-            f"{preview.delivery_resolution} · {preview.target_fps:g}fps",
-        )
-        if preview.delivery_strategy == "DETERMINISTIC_UPSCALE":
-            st.info(
-                f"{preview.native_generation_resolution} AI 生成 → "
-                f"{preview.delivery_resolution} 确定性输出放大（不是原生 4K，也不是 AI 超分辨率）。"
-            )
-        elif preview.delivery_strategy == "DETERMINISTIC_SCALE":
-            st.info(
-                f"Provider 原生 {preview.native_generation_resolution} → "
-                f"交付 {preview.delivery_resolution} 确定性缩放。"
-            )
-        st.caption(f"生成质量：{preview.quality_mode} · 以上参数将冻结到实际 RuntimePlan。")
-        _render_generation_brief_editor(orchestrator, project, job)
-        st.caption(
-            f"最大付费尝试：每镜头 {preview.max_paid_attempts} 次 · "
-            f"预计最多 {preview.estimated_provider_requests} 次 Provider 请求。"
-        )
+        target_duration = float(getattr(preview, "target_episode_duration_seconds", 0) or 0)
+        cols[0].metric("目标时长", f"{target_duration:g} 秒")
+        request_count = int(getattr(preview, "estimated_provider_requests", 0) or 0)
+        cols[1].metric("最多新建", f"{request_count} 个视频任务")
+
         content_labels = {
             "TEXT": "文本",
             "REFERENCE_IMAGE": "参考图片",
             "VIDEO": "视频",
             "AUDIO": "音频",
         }
-        content_summary = "、".join(
-            content_labels.get(item, item)
-            for item in preview.transmitted_content_types
-        )
-        if preview.deployment_region == "LOCAL":
-            st.info("本次选择为 LOCAL，本机处理，不向云端 Provider 传输素材。")
+        transmitted = tuple(getattr(preview, "transmitted_content_types", ()) or ())
+        content_summary = "、".join(content_labels.get(str(item), "创作素材") for item in transmitted) or "创作文本"
+        region = str(getattr(preview, "deployment_region", "") or "").upper()
+        region_label = {
+            "LOCAL": "本机",
+            "MAINLAND": "中国大陆",
+            "MAINLAND_CHINA": "中国大陆",
+            "INTERNATIONAL": "国际",
+        }.get(region, "已配置的云端区域")
+        if region == "LOCAL":
+            st.info(f"处理位置 · {region_label}；素材不会上传到云端。")
         else:
-            st.warning(
-                f"云传输披露：将向 {preview.provider_id}（{preview.deployment_region} / "
-                f"{preview.endpoint_class}）传输：{content_summary}。"
-            )
-        st.caption("未获得可靠的当前价格数据，因此不展示或猜测货币金额。")
+            st.warning(f"素材传输 · {region_label}；将发送：{content_summary}。")
+        native = str(getattr(preview, "native_generation_resolution", "") or "")
+        delivery = str(getattr(preview, "delivery_resolution", "") or "")
+        if native and delivery and native != delivery:
+            st.caption(f"生成画面 {native} → 最终交付 {delivery}；交付缩放不会被描述为原生生成。")
+        st.caption("当前没有可靠的实时价格，因此不会猜测金额。")
+        fingerprint = str(getattr(preview, "authorization_fingerprint", "authorization"))
         approved = st.checkbox(
-            "我已阅读区域与传输内容披露，确认上述 Provider / 模型，并批准本次有界生成请求",
-            key=f"paid-authorization-{_value(job, 'id')}-{preview.authorization_fingerprint}",
+            f"我已确认素材传输范围，并批准本次最多新建 {request_count} 个视频任务",
+            key=f"paid-authorization-{_value(job, 'id')}-{fingerprint}",
         )
         disabled = not approved
         if approved:
             authorization = {
                 "approved": True,
-                "provider_id": preview.provider_id,
-                "model_id": preview.model_id,
-                "deployment_region": preview.deployment_region,
-                "endpoint_profile_id": preview.endpoint_profile_id,
-                "endpoint_class": preview.endpoint_class,
-                "reference_count": preview.reference_count,
-                "max_paid_attempts": preview.max_paid_attempts,
-                "estimated_provider_requests": preview.estimated_provider_requests,
-                "target_episode_duration_seconds": preview.target_episode_duration_seconds,
-                "native_generation_resolution": preview.native_generation_resolution,
-                "native_generation_fps": preview.native_generation_fps,
-                "delivery_resolution": preview.delivery_resolution,
-                "target_fps": preview.target_fps,
-                "delivery_strategy": preview.delivery_strategy,
-                "quality_mode": preview.quality_mode,
-                "authorization_fingerprint": preview.authorization_fingerprint,
+                "provider_id": getattr(preview, "provider_id", None),
+                "model_id": getattr(preview, "model_id", None),
+                "deployment_region": getattr(preview, "deployment_region", None),
+                "endpoint_profile_id": getattr(preview, "endpoint_profile_id", None),
+                "endpoint_class": getattr(preview, "endpoint_class", None),
+                "reference_count": getattr(preview, "reference_count", 0),
+                "max_paid_attempts": getattr(preview, "max_paid_attempts", 1),
+                "estimated_provider_requests": request_count,
+                "target_episode_duration_seconds": target_duration,
+                "native_generation_resolution": getattr(preview, "native_generation_resolution", None),
+                "native_generation_fps": getattr(preview, "native_generation_fps", None),
+                "delivery_resolution": getattr(preview, "delivery_resolution", None),
+                "target_fps": getattr(preview, "target_fps", None),
+                "delivery_strategy": getattr(preview, "delivery_strategy", None),
+                "quality_mode": getattr(preview, "quality_mode", None),
+                "authorization_fingerprint": fingerprint,
             }
-    if st.button(
-        label,
-        type="primary",
-        disabled=disabled,
-        key=f"primary-production-{_value(job, 'id', project.id)}",
-    ):
+    if not callable(preview_method) and job is not None:
+        st.warning("制作授权预览暂不可用；系统不会在未确认范围时提交新任务。")
+        approved = st.checkbox(
+            "我已确认本次会创建新的视频任务，并同意继续",
+            key=f"generic-paid-authorization-{_value(job, 'id', project.id)}",
+        )
+        disabled = not approved
+        authorization = {"approved": True} if approved else None
+    if st.button(label, type="primary", disabled=disabled, key=f"primary-production-{_value(job, 'id', project.id)}"):
         _orchestrator_action(
             orchestrator,
             "resume" if label == "继续制作" else "start",
@@ -1036,24 +1168,21 @@ def _render_generation_brief_editor(orchestrator, project, job) -> None:
     try:
         briefs = prepare(project.id, _value(job, "id"))
     except Exception as exc:
-        st.warning(f"GenerationBrief 暂不可编辑：{str(exc)[:160]}")
+        st.warning(_safe_ui_error(exc, "镜头生成意图暂不可编辑，请稍后重试。"))
         return
-    with st.expander("生成简报 · 付费前可编辑", expanded=False):
+    with st.expander("镜头生成意图 · 付费前可编辑", expanded=False):
         st.caption(
-            "这里编辑的是 Provider-neutral 创作意图，不是 Provider JSON。"
-            "保存会创建新的不可变 HUMAN_OVERRIDE 版本；旧版本与已冻结 RuntimePlan 不会被改写。"
+            "这里编辑画面、动作、运镜与连续性要求。保存会创建新版本，"
+            "已经进入制作的版本不会被改写。"
         )
-        for brief in briefs:
+        for brief_index, brief in enumerate(briefs, start=1):
             characters = "、".join(
                 str(item.get("name") or item.get("id") or "")
                 for item in brief.character_context
                 if isinstance(item, Mapping)
             ) or "—"
-            st.markdown(f"#### {brief.shot_id} · {characters}")
-            st.caption(
-                f"{brief.origin} · {brief.sha256[:12]}…"
-                + (f" · parent {brief.parent_brief_id[:12]}…" if brief.parent_brief_id else "")
-            )
+            st.markdown(f"#### 镜头 {brief_index} · {characters}")
+            st.caption("当前可编辑版本")
             with st.form(f"generation-brief-{brief.id}", clear_on_submit=False):
                 action = st.text_area("人物 / 动作", value=brief.action, key=f"brief-action-{brief.id}")
                 framing = st.text_input("镜头语言 / 景别", value=brief.framing, key=f"brief-framing-{brief.id}")
@@ -1088,7 +1217,7 @@ def _render_generation_brief_editor(orchestrator, project, job) -> None:
                     value=float(brief.target_duration_seconds),
                     key=f"brief-duration-{brief.id}",
                 )
-                saved = st.form_submit_button("保存 GenerationBrief Draft", type="primary")
+                saved = st.form_submit_button("保存镜头生成意图", type="primary")
             if saved:
                 try:
                     save_override(
@@ -1111,9 +1240,9 @@ def _render_generation_brief_editor(orchestrator, project, job) -> None:
                         base_brief_id=brief.id,
                     )
                 except Exception as exc:
-                    st.error(f"GenerationBrief 保存失败：{str(exc)[:180]}")
+                    st.error(_safe_ui_error(exc, "镜头生成意图保存失败，请检查内容后重试。"))
                 else:
-                    st.success("GenerationBrief Draft 已持久保存；付费确认已失效并将重新计算。")
+                    st.success("镜头生成意图已保存；开始制作前需要重新确认本次任务。")
                     st.rerun()
 
 
@@ -1130,6 +1259,86 @@ def _select_default_job(project_id: str, jobs: list[object]):
     return active[0] if active else jobs[-1]
 
 
+def _select_current_job(
+    project_id: str,
+    jobs: list[object],
+    production_service: ProductionService,
+):
+    """Use canonical current-production truth with a fixture-safe fallback."""
+
+    try:
+        state = CurrentProductionStateService(
+            getattr(production_service, "repository", None)
+        ).derive(project_id)
+        if state.job is not None:
+            return state.job
+    except Exception:
+        # Isolated page tests intentionally provide only the page facade.  The
+        # compatibility selector is never a second production authority in a
+        # real repository-backed render.
+        pass
+    return _select_default_job(project_id, jobs)
+
+
+def _production_activity(job, progress: Mapping[str, object]) -> tuple[dict[str, object], ...]:
+    """Project persisted job state into the shared non-blocking activity strip."""
+
+    if job is None:
+        return ()
+    status = _job_status(job)
+    if status not in {"QUEUED", "RUNNING", "FAILED", "CANCELLED"}:
+        return ()
+    total = int(progress.get("total_shots", 0) or 0)
+    completed = int(progress.get("completed_shots", 0) or 0)
+    percent = progress.get("percent_complete")
+    try:
+        numeric_percent = float(percent) if percent is not None else None
+        if numeric_percent is not None and numeric_percent > 1:
+            numeric_percent /= 100
+        fraction = max(0.0, min(1.0, numeric_percent)) if numeric_percent is not None else None
+    except (TypeError, ValueError):
+        fraction = None
+    state = {
+        "QUEUED": "queued",
+        "RUNNING": "running",
+        "FAILED": "failed",
+        "CANCELLED": "interrupted",
+    }[status]
+    detail = (
+        f"已完成 {completed}/{total} 个镜头；工作区仍可查看。"
+        if total
+        else "制作状态已持久保存；工作区仍可查看。"
+    )
+    if status == "FAILED":
+        detail = "制作遇到问题；不会自动重新付费提交，请先查看失败镜头。"
+    elif status == "CANCELLED":
+        detail = "制作已暂停；已有结果保留，继续前会重新确认。"
+    return (
+        {
+            "activity_id": _value(job, "id"),
+            "title": "镜头制作后台活动",
+            "detail": detail,
+            "state": state,
+            "progress": fraction,
+        },
+    )
+
+
+def _render_budget_summary(progress: Mapping[str, object]) -> None:
+    """Show creator-facing request bounds without guessing a currency price."""
+
+    total = int(progress.get("total_shots", 0) or 0)
+    completed = int(progress.get("completed_shots", 0) or 0)
+    remaining = max(total - completed, 0)
+    with st.container(border=True):
+        st.markdown("### 成本与预算")
+        left, right = st.columns(2)
+        left.metric("待生成镜头", remaining)
+        right.metric("单镜头新建上限", "1 次")
+        st.caption("恢复已有任务不会创建新的付费请求；任何新视频任务都需要再次明确确认。")
+        st.caption("当前没有可靠的实时价格，因此不会猜测金额。")
+
+
 def _render_empty_shot_board(readiness: Mapping[str, object]) -> None:
     st.markdown("### 镜头生产")
     st.caption(f"总镜头 · {int(readiness.get('shot_count') or 0)} · 制作开始后将显示每个镜头的进度、QC 与人审状态。")
@@ -1138,27 +1347,38 @@ def _render_empty_shot_board(readiness: Mapping[str, object]) -> None:
 def render() -> None:
     page_header("制作", "PRODUCTION WORKSPACE", "查看镜头进度，处理失败项，并在明确授权后开始制作。")
     project = current_project_or_stop()
-    render_project_context(project, stage="制作", next_action="查看制作进度", next_page="production")
+    render_project_context(
+        project,
+        stage="制作",
+        next_action="查看制作进度",
+        next_page="production",
+        suppress_next=True,
+    )
     production_service = ProductionService()
     execution_service = ProductionExecutionService(production_service=production_service)
     qc_service = ProductionQCService()
-    source_service = (
-        FinalAssemblyService(production_service.repository)
-        if hasattr(production_service, "repository")
-        else None
-    )
+    # Source/candidate selection is a Review concern.  Do not even construct
+    # the FinalAssembly facade on the normal Production path: besides keeping
+    # the board focused, this prevents a hidden source read from becoming a
+    # second current-state authority.  The compatibility helpers above remain
+    # available to explicit diagnostic callers that opt in with a service.
+    source_service = None
 
     try:
         readiness = production_service.validate_job_readiness(project.id)
         jobs = production_service.list_jobs(project.id)
     except ProductionServiceError as exc:
-        st.error(str(exc))
+        st.error(_safe_ui_error(exc, "制作任务暂时无法读取，请稍后重试。"))
         return
 
     # Legacy label retained for discoverability: Production Readiness Check.
     _render_readiness_console(readiness)
+    if not bool(readiness.get("ready")):
+        render_automation_mode(project.id, compact=True)
+        return
+    render_automation_mode(project.id, compact=True)
 
-    selected_job = _select_default_job(project.id, jobs)
+    selected_job = _select_current_job(project.id, jobs, production_service)
     job_readiness = readiness
     try:
         if selected_job is not None:
@@ -1180,7 +1400,7 @@ def render() -> None:
                 "current_shot_id": None,
             }
     except (ProductionServiceError, ProductionExecutionServiceError) as exc:
-        st.warning(f"制作进度暂不可用：{exc}")
+        st.warning(_safe_ui_error(exc, "制作进度暂不可用；工作区仍可继续查看。"))
         progress = {"total_shots": job_readiness.get("shot_count", 0), "completed_shots": 0, "failed_shots": 0, "pending_shots": job_readiness.get("shot_count", 0), "percent_complete": 0, "current_shot_id": None}
 
     # Orchestration remains canonical; the page only supplies an existing job
@@ -1192,6 +1412,9 @@ def render() -> None:
             return selected_job
         return production_service.create_production_job(project.id)
 
+    # Keep durable queue activity visible without replacing the board.
+    render_background_activity(_production_activity(selected_job, progress), compact=True)
+    _render_budget_summary(progress)
     _render_primary_action(orchestrator, production_service, project, selected_job, job_readiness, progress, ensure_job=ensure_job)
     if selected_job is not None:
         try:
@@ -1203,16 +1426,17 @@ def render() -> None:
                 selected_job,
                 progress,
                 source_service,
+                show_source_controls=False,
             )
         except (ProductionServiceError, ProductionExecutionServiceError) as exc:
-            st.warning(f"镜头生产暂不可用：{exc}")
+            st.warning(_safe_ui_error(exc, "镜头生产信息暂不可用；请稍后刷新。"))
     else:
         _render_empty_shot_board(job_readiness)
 
     # Keep low-level IDs, events and artifact metadata available without
     # overwhelming the default director view.
     advanced_key = f"production-advanced-{project.id}"
-    with st.expander("高级信息 / 调试信息", expanded=bool(st.session_state.get(advanced_key))):
+    with st.expander("执行详情（高级）", expanded=bool(st.session_state.get(advanced_key))):
         st.caption("Submit Execution is delegated to ProductionOrchestrator; execution details remain available here.")
         st.markdown("#### Production Jobs")
         if st.button(

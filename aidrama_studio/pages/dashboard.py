@@ -256,20 +256,37 @@ def _navigate(page: str) -> None:
     request_navigation(page)
 
 
+def _stage_route(status: ProjectStatus | None) -> str:
+    """Map canonical workflow state to the next creator-facing workspace."""
+
+    return {
+        ProjectStatus.DRAFT: "creative",
+        ProjectStatus.STORY: "story",
+        ProjectStatus.PREPRODUCTION: "director",
+        ProjectStatus.PRODUCTION: "production",
+        ProjectStatus.REVIEW: "review",
+        ProjectStatus.POSTPRODUCTION: "postproduction",
+        ProjectStatus.COMPLETED: "postproduction",
+    }.get(status, "creative")
+
+
 def _create_project_form(service: ProjectService) -> None:
-    with st.expander("开始一个短剧", expanded=not service.list()):
+    """Create the lightweight project shell used before Creative Intake.
+
+    Creative content belongs to ``pages/creative.py``.  Keeping this form
+    limited to project identity and delivery-neutral planning prevents the
+    Workbench from becoming a second intake surface.
+    """
+
+    has_projects = bool(service.list())
+    with st.expander("新建项目", expanded=not has_projects):
         with st.form("create-project", clear_on_submit=False):
-            st.radio(
-                "创作入口",
-                ["一句话创意", "粘贴故事 / 大纲", "上传剧本 / 策划文档", "上传参考图片", "组合输入"],
-                horizontal=True,
-                key="create-entry-mode",
-            )
             title = st.text_input(
                 "项目名称", max_chars=120, placeholder="例如：霓虹雨夜"
             )
             description = st.text_area(
-                "一句话创意", max_chars=1000, placeholder="例如：失忆的末班车司机，在终点站遇见未来的自己。"
+                "项目描述（可选）", max_chars=1000,
+                placeholder="创建后可在创意工作区继续输入一句话、大纲或素材。",
             )
             aspect = st.selectbox("画幅", [item.value for item in AspectRatio], index=1)
             duration = st.number_input(
@@ -280,23 +297,10 @@ def _create_project_form(service: ProjectService) -> None:
                 step=15,
                 help="常用：30 / 45 / 60 / 90 / 120 秒，也可自定义。",
             )
-            delivery_resolution = st.selectbox(
-                "最终画质", ["720p", "1080p", "1440p", "4K"], index=1,
-                help="这是最终交付分辨率；若 Provider 原生分辨率较低，会明确显示并走确定性放大。",
-            )
-            target_fps = st.selectbox("最终帧率", [24, 25, 30, 60], index=2)
-            quality_mode = st.selectbox(
-                "生成质量",
-                ["PREVIEW", "STANDARD", "HIGH", "FINAL"],
-                index=1,
-                format_func=lambda value: {
-                    "PREVIEW": "快速预览", "STANDARD": "标准制作",
-                    "HIGH": "高质量", "FINAL": "最终成片",
-                }[value],
-                help="质量模式会冻结到新 RuntimePlan；预览产物不会自动成为最终成片来源。",
-            )
             submitted = st.form_submit_button(
-                "开始创作", type="primary", use_container_width=True
+                "创建项目并进入创意",
+                type="secondary" if has_projects else "primary",
+                use_container_width=True,
             )
         if submitted:
             try:
@@ -305,13 +309,10 @@ def _create_project_form(service: ProjectService) -> None:
                     description=description,
                     aspect_ratio=aspect,
                     target_duration_seconds=int(duration),
-                    delivery_resolution_label=delivery_resolution,
-                    target_fps=float(target_fps),
-                    quality_mode=quality_mode,
                 )
             except (ValueError, OSError) as exc:
                 logger.warning(f"invalid AIDrama project creation: {exc}")
-                st.error(str(exc))
+                st.error("项目未创建，请检查名称、画幅和目标时长。")
             except Exception:
                 logger.exception("failed to create AIDrama project")
                 st.error("项目创建失败，请检查数据库与项目目录权限。")
@@ -319,7 +320,7 @@ def _create_project_form(service: ProjectService) -> None:
                 st.session_state.current_project_id = project.id
                 st.query_params["project"] = project.id
                 st.toast("项目已创建")
-                _navigate("story")
+                _navigate("creative")
 
 
 def _edit_project(
@@ -327,9 +328,6 @@ def _edit_project(
     project: Project,
     canonical_status: ProjectStatus | None = None,
 ) -> None:
-    from aidrama_studio.services.runtime_foundation import OutputProfileService
-
-    output_profile = OutputProfileService(service.repository).ensure_for_project(project.id)
     with st.container(border=True):
         st.markdown(f"#### 编辑项目 · {project.title}")
         with st.form(f"edit-project-{project.id}"):
@@ -341,7 +339,16 @@ def _edit_project(
             stage = canonical_status or CurrentProductionStateService(
                 service.repository
             ).workflow_stage(project.id)
-            st.info(f"当前制作阶段（系统派生） · {stage.value}")
+            stage_label = {
+                ProjectStatus.DRAFT: "创意",
+                ProjectStatus.STORY: "故事 / 剧本",
+                ProjectStatus.PREPRODUCTION: "分镜",
+                ProjectStatus.PRODUCTION: "制作",
+                ProjectStatus.REVIEW: "审片",
+                ProjectStatus.POSTPRODUCTION: "成片",
+                ProjectStatus.COMPLETED: "成片",
+            }.get(stage, "暂不可用")
+            st.info(f"当前制作阶段（系统派生） · {stage_label}")
             aspect = st.selectbox(
                 "画幅",
                 aspects,
@@ -355,36 +362,9 @@ def _edit_project(
                 value=project.target_duration_seconds,
                 step=15,
             )
-            resolutions = ["720p", "1080p", "1440p", "4K"]
-            delivery_resolution = st.selectbox(
-                "最终画质",
-                resolutions,
-                index=(
-                    resolutions.index(output_profile.delivery_resolution_label)
-                    if output_profile.delivery_resolution_label in resolutions else 1
-                ),
-            )
-            frame_rates = [24, 25, 30, 60]
-            current_fps = int(output_profile.target_fps)
-            target_fps = st.selectbox(
-                "最终帧率",
-                frame_rates,
-                index=frame_rates.index(current_fps) if current_fps in frame_rates else 2,
-            )
-            quality_modes = ["PREVIEW", "STANDARD", "HIGH", "FINAL"]
-            quality_mode = st.selectbox(
-                "生成质量",
-                quality_modes,
-                index=quality_modes.index(output_profile.quality_mode),
-                format_func=lambda value: {
-                    "PREVIEW": "快速预览", "STANDARD": "标准制作",
-                    "HIGH": "高质量", "FINAL": "最终成片",
-                }[value],
-            )
             st.caption(
-                f"当前 OutputProfile v{output_profile.version_number} · "
-                f"{output_profile.delivery_width}×{output_profile.delivery_height} · "
-                "保存变更会创建新版本，只影响新的 ProductionJob / RuntimePlan。"
+                "项目名称、描述、画幅和时长属于项目身份。输出分辨率、帧率和质量等默认值请在设置 · 默认输出中调整；"
+                "它们只影响之后创建的制作版本。"
             )
             save_col, cancel_col = st.columns(2)
             save = save_col.form_submit_button(
@@ -402,12 +382,9 @@ def _edit_project(
                     description=description,
                     aspect_ratio=aspect,
                     target_duration_seconds=int(duration),
-                    delivery_resolution_label=delivery_resolution,
-                    target_fps=float(target_fps),
-                    quality_mode=quality_mode,
                 )
-            except (ValueError, KeyError) as exc:
-                st.error(str(exc))
+            except (ValueError, KeyError):
+                st.error("项目未保存，请检查名称、画幅和目标时长。")
             except Exception:
                 logger.exception("failed to update AIDrama project")
                 st.error("项目保存失败，请稍后重试。")
@@ -470,7 +447,8 @@ def render() -> None:
         return
 
     current_state_service = CurrentProductionStateService(service.repository)
-    canonical_statuses: dict[str, ProjectStatus] = {}
+    canonical_statuses: dict[str, ProjectStatus | None] = {}
+    canonical_errors: set[str] = set()
     for project in projects:
         try:
             canonical_statuses[project.id] = current_state_service.workflow_stage(
@@ -478,14 +456,17 @@ def render() -> None:
             )
         except Exception:
             # Keep the dashboard readable if a legacy record is malformed, but
-            # make the fallback explicit rather than treating the DB column as
-            # a second workflow authority.
+            # never use the compatibility ``projects.status`` column as a
+            # second workflow authority.  ``None`` renders as an explicit
+            # degraded/unknown state in the card component.
             logger.exception("failed to derive canonical workflow stage")
-            canonical_statuses[project.id] = project.status
+            canonical_statuses[project.id] = None
+            canonical_errors.add(project.id)
 
     active_count = sum(
         canonical_statuses[project.id]
         not in {ProjectStatus.DRAFT, ProjectStatus.COMPLETED}
+        and canonical_statuses[project.id] is not None
         for project in projects
     )
     completed_count = sum(
@@ -493,14 +474,40 @@ def render() -> None:
         for project in projects
     )
     st.markdown(
-        '<section class="aidrama-primary-panel"><h2>开始一个短剧</h2>'
-        '<p>选择最自然的入口：写下一句话创意、粘贴已有故事，或导入剧本与参考图片。你可以随时保存并继续。</p>'
+        '<section class="aidrama-primary-panel"><h2>继续你的创作</h2>'
+        '<p>从当前项目与关键帧继续。创意输入、故事、分镜、制作和审片都保留在同一个工作上下文中。</p>'
         '<div class="aidrama-stage-rail"><span class="aidrama-stage-chip is-current">创意</span>'
         '<span class="aidrama-stage-chip">故事 / 剧本</span><span class="aidrama-stage-chip">角色与场景</span>'
         '<span class="aidrama-stage-chip">分镜</span><span class="aidrama-stage-chip">制作</span>'
         '<span class="aidrama-stage-chip">审片</span><span class="aidrama-stage-chip">成片</span></div></section>',
         unsafe_allow_html=True,
     )
+
+    editing_id = st.session_state.get("editing_project_id")
+    deleting_id = st.session_state.get("deleting_project_id")
+    contextual_action_active = bool(editing_id or deleting_id)
+    current_project_id = st.session_state.get("current_project_id")
+    current_project = next(
+        (item for item in projects if item.id == current_project_id), None
+    )
+    if current_project is not None:
+        current_status = canonical_statuses.get(current_project.id)
+        if current_status is None:
+            st.warning("当前项目阶段暂时无法读取；请稍后刷新或从创意工作区继续。")
+        continue_col, settings_col = st.columns([2, 5])
+        with continue_col:
+            if st.button(
+                "继续创作",
+                type="secondary" if contextual_action_active else "primary",
+                key="dashboard-continue-current",
+                use_container_width=True,
+            ):
+                st.query_params["project"] = current_project.id
+                _navigate(_stage_route(current_status))
+        with settings_col:
+            st.caption("当前项目 · " + current_project.title)
+    elif projects:
+        st.caption("选择一个项目后，工作台会带你回到它的当前创作阶段。")
     with st.expander("项目概览", expanded=False):
         metric_cols = st.columns(3)
         metric_cols[0].metric("项目总数", len(projects))
@@ -513,7 +520,11 @@ def render() -> None:
         st.success(f"项目恢复完成：{imported_title}")
 
     _create_project_form(service)
-    _render_archive_workspace(service, projects)
+    with st.container(border=True):
+        st.markdown("### 存储与备份")
+        st.caption("项目归档、恢复与本机备份集中在设置中管理。")
+        if st.button("打开设置 · 存储 / 备份", key="dashboard-open-storage"):
+            _navigate("settings")
 
     if not projects:
         st.markdown(
@@ -538,8 +549,6 @@ def render() -> None:
                 st.rerun()
         return
 
-    editing_id = st.session_state.get("editing_project_id")
-    deleting_id = st.session_state.get("deleting_project_id")
     if editing_id:
         editing = next((item for item in projects if item.id == editing_id), None)
         if editing:
@@ -554,12 +563,18 @@ def render() -> None:
     for index, project in enumerate(projects):
         with columns[index % 3]:
             action = project_card(
-                project, workflow_stage=canonical_statuses[project.id]
+                project,
+                workflow_stage=canonical_statuses[project.id],
+                primary=(
+                    current_project is None
+                    and index == 0
+                    and not contextual_action_active
+                ),
             )
             if action == "open":
                 st.session_state.current_project_id = project.id
                 st.query_params["project"] = project.id
-                _navigate("story")
+                _navigate(_stage_route(canonical_statuses[project.id]))
             elif action == "edit":
                 st.session_state.editing_project_id = project.id
                 st.rerun()

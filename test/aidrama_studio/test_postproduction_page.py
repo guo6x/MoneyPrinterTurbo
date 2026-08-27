@@ -77,7 +77,7 @@ page.render()
     assert not app.exception
     assert any("成片尚未就绪" in item.value for item in app.warning)
     assert any("镜头尚未通过 QC" in item.value for item in app.markdown)
-    assert not any(button.label == "生成成片" for button in app.button)
+    assert not any(button.label == "生成最终成片" for button in app.button)
 
 
 def test_ready_state_exposes_primary_generate_action():
@@ -106,8 +106,32 @@ page.render()
 """
     ).run(timeout=30)
     assert not app.exception
-    assert any(button.label == "生成成片" and not button.disabled for button in app.button)
+    assert any(button.label == "生成最终成片" and not button.disabled for button in app.button)
+    assert any("我已确认当前镜头顺序" in item.label for item in app.checkbox)
     assert any("3" in item.value for item in app.metric)
+
+
+def test_unchecked_final_confirmation_never_creates_or_enqueues(monkeypatch):
+    calls = []
+
+    class Manifest:
+        repository = None
+
+        def create_assembly(self, *args, **kwargs):
+            calls.append(("create", args, kwargs))
+
+    monkeypatch.setattr(page.st, "checkbox", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: True)
+    page._render_action(
+        SimpleNamespace(id="project-1"),
+        SimpleNamespace(id="job-1"),
+        {"ready": True},
+        None,
+        Manifest(),
+        SimpleNamespace(),
+    )
+
+    assert calls == []
 
 
 def test_safe_download_name_does_not_leak_path():
