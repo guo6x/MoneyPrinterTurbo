@@ -43,7 +43,12 @@ from .large_media_export import LargeMediaExportError, LargeMediaExportService
 from .credentials import CredentialReadinessService, CredentialStoreError, WindowsCredentialStore
 from .project_archive import ProjectArchiveError, ProjectArchiveService
 from .current_state import CurrentProductionState, CurrentProductionStateService
-from .vision_qc import VisionFrameSamplingService, VisionQCResult, VisionQCService
+from .vision_qc import (
+    VISION_BLOCKS_FINAL,
+    VisionFrameSamplingService,
+    VisionQCResult,
+    VisionQCService,
+)
 from .diagnostics import DiagnosticsError, DiagnosticsService, DiskSpaceService
 from .tts_runtime import TTS_LIVE_SMOKE_TEXT, TTSRuntimeError, TTSRuntimeService
 from .production_queue import ProductionAuthorizationPreview, ProductionQueueError, ProductionQueueService
@@ -82,10 +87,20 @@ from .ai_capabilities import (
     default_capability_registry,
 )
 from .providers import (
+    FrozenVisionInputResolver,
     GeminiHTTPTransport,
     GeminiVisionError,
     GeminiVisionProvider,
     GeminiVisionProviderConfig,
+    UniversalVisionAnalysisProvider,
+    UniversalVisionRuntimeError,
+    VISION_ANALYSIS_METRICS,
+    VISION_ANALYSIS_SEVERITIES,
+    VISION_PROMPT_TEMPLATE_SHA256,
+    VISION_PROMPT_TEMPLATE_VERSION,
+    build_universal_vision_providers,
+    validate_vision_analysis_output,
+    vision_analysis_response_schema,
 )
 from .adapters import (
     MPTAdapterError,
@@ -115,9 +130,9 @@ from .adapters import (
     SeedanceTransientError,
 )
 
-# Universal model-runtime foundation.  This is an additive export surface;
-# existing provider services above remain the compatibility implementation and
-# are not routed through these drivers until a later migration slice.
+# Universal model-runtime foundation. Vision QC is routed through its native
+# manifest/codec/driver facade; other legacy providers keep their staged
+# compatibility implementations until their own migration slices.
 from .model_runtime import (
     AsyncTaskDriver,
     Capability,
@@ -178,7 +193,7 @@ __all__ = [
     "LargeMediaExportError", "LargeMediaExportService",
     "WindowsCredentialStore", "CredentialStoreError", "CredentialReadinessService",
     "ProjectArchiveService", "ProjectArchiveError",
-    "VisionFrameSamplingService", "VisionQCResult", "VisionQCService",
+    "VISION_BLOCKS_FINAL", "VisionFrameSamplingService", "VisionQCResult", "VisionQCService",
     "DiagnosticsError", "DiagnosticsService", "DiskSpaceService",
     "TTS_LIVE_SMOKE_TEXT", "TTSRuntimeError", "TTSRuntimeService",
     "ProductionAuthorizationPreview", "ProductionQueueError", "ProductionQueueService",
@@ -194,6 +209,11 @@ __all__ = [
     "UnavailableImageProvider", "UnavailableVisionProvider", "UnavailableTTSProvider", "DeterministicMockVisionProvider",
     "default_capability_registry",
     "GeminiHTTPTransport", "GeminiVisionError", "GeminiVisionProvider", "GeminiVisionProviderConfig",
+    "FrozenVisionInputResolver", "UniversalVisionAnalysisProvider", "UniversalVisionRuntimeError",
+    "VISION_ANALYSIS_METRICS", "VISION_ANALYSIS_SEVERITIES",
+    "VISION_PROMPT_TEMPLATE_SHA256", "VISION_PROMPT_TEMPLATE_VERSION",
+    "build_universal_vision_providers", "validate_vision_analysis_output",
+    "vision_analysis_response_schema",
     "ProductionOrchestrator", "ProductionOrchestratorError",
     "ProductionRuntimeAdapter", "RuntimeSubmission", "RuntimeEvent", "RuntimeTransientError", "RuntimeReconciliationRequired", "RuntimeContentRejectedError", "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
     "WanAdapterError", "WanInputMapper", "WanProductionAdapter", "WanPromptMapper",

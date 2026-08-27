@@ -38,6 +38,9 @@ from aidrama_studio.domain import VisionAnalysisRecord, VisionFrameManifest
 from aidrama_studio.storage.repositories import ProjectRepository
 
 
+VISION_BLOCKS_FINAL = False
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -255,6 +258,8 @@ class VisionFrameSamplingService:
 
 
 class VisionQCService:
+    blocks_final = VISION_BLOCKS_FINAL
+
     def __init__(
         self,
         repository: ProjectRepository | None = None,
@@ -265,15 +270,26 @@ class VisionQCService:
         provider_profiles: ProviderProfileService | None = None,
     ) -> None:
         self.repository = repository or ProjectRepository()
-        self.registry = registry or (
-            CapabilityRegistry([provider])
-            if provider is not None
-            else CapabilityRegistry([UnavailableVisionProvider()])
-        )
+        if registry is not None:
+            self.registry = registry
+        elif provider is not None:
+            self.registry = CapabilityRegistry([provider])
+        else:
+            from .providers.universal_vision import (
+                build_universal_vision_providers,
+            )
+
+            providers = build_universal_vision_providers(self.repository)
+            self.registry = CapabilityRegistry(
+                providers or (UnavailableVisionProvider(),)
+            )
         self.provider_profiles = provider_profiles or ProviderProfileService(
             self.repository, registry=self.registry
         )
-        self.provider = provider or self.registry.get(CapabilityKind.VISION)
+        registered = self.registry.list(CapabilityKind.VISION)
+        self.provider = provider or (
+            registered[0] if registered else UnavailableVisionProvider()
+        )
         self._deterministic = ProductionQCService(self.repository)
         self.sampler = sampler or VisionFrameSamplingService(self.repository)
         self.references = ReferenceAssetService(self.repository)
@@ -342,6 +358,16 @@ class VisionQCService:
         invocation_id = uuid4().hex
         started_at = _now()
         model_id = str(status.metadata.get("model") or "unspecified")
+        runtime_selection: dict[str, object] = {}
+        selection_source = getattr(provider, "runtime_selection", None)
+        if callable(selection_source):
+            try:
+                raw_selection = selection_source()
+                safe_selection = sanitize_persistent_metadata(raw_selection)
+                if isinstance(safe_selection, Mapping):
+                    runtime_selection = dict(safe_selection)
+            except Exception:
+                runtime_selection = {}
         runtime_plan = (
             self.repository.get_runtime_plan(execution.runtime_plan_id)
             if execution.runtime_plan_id
@@ -367,6 +393,7 @@ class VisionQCService:
                 "correlation_id": invocation_id,
                 "input_provenance": request.public_dict(),
                 "provider_disclosure": safe_disclosure,
+                "runtime_selection": runtime_selection,
             }
             self.invocations.record(
                 project_id,
@@ -624,6 +651,32 @@ class VisionQCService:
             creative_context=dict(sanitized),
         )
 
+    def latest(
+        self,
+        project_id: str,
+        execution_id: str,
+    ) -> VisionQCResult | None:
+        """Project the latest durable advisory analysis for a cold Review UI."""
+
+        self._deterministic._get_execution(project_id, execution_id)
+        records = self.repository.list_vision_analyses(project_id, execution_id)
+        if not records:
+            return None
+        record = records[-1]
+        return VisionQCResult(
+            project_id=record.project_id,
+            execution_id=record.execution_id,
+            artifact_id=record.artifact_id,
+            status=record.status,
+            analysis_kind="AI_ANALYSIS",
+            provider=record.provider_id,
+            metrics=dict(record.metrics),
+            reason=str(record.input_provenance.get("failure_reason") or ""),
+            created_at=record.created_at,
+            analysis_id=record.id,
+            frame_manifest_id=record.frame_manifest_id,
+        )
+
     def _persist_analysis(
         self,
         project_id: str,
@@ -648,10 +701,14 @@ class VisionQCService:
         provenance: dict[str, object] = (
             request.public_dict() if request is not None else {}
         )
-        if "remote_file_lifecycle" in metadata:
-            provenance["remote_file_lifecycle"] = metadata[
-                "remote_file_lifecycle"
-            ]
+        for key in (
+            "failure_reason",
+            "remote_file_lifecycle",
+            "runtime_selection",
+            "summary",
+        ):
+            if key in metadata:
+                provenance[key] = metadata[key]
         safe_provenance = sanitize_persistent_metadata(provenance)
         safe_metrics = sanitize_persistent_metadata(dict(metrics))
         safe_comparison = sanitize_persistent_metadata(dict(comparison))
@@ -699,6 +756,7 @@ class VisionQCService:
     ) -> VisionQCResult:
         safe_reason = sanitize_error(reason)
         metadata: dict[str, object] = dict(provider_metadata or {})
+        metadata["failure_reason"] = safe_reason
         metadata["prompt_template_sha256"] = (
             metadata.get("prompt_template_sha256")
             or getattr(self.provider, "prompt_template_sha256", None)
@@ -753,6 +811,7 @@ class VisionQCService:
 
 
 __all__ = [
+    "VISION_BLOCKS_FINAL",
     "VisionFrameSamplingService",
     "VisionQCError",
     "VisionQCResult",
