@@ -1966,7 +1966,7 @@ def _migration_033_continuity_schema_compatibility(
     )
 
 
-def _migration_034_creative_pipeline_operations(
+def _migration_035_creative_pipeline_operations(
     connection: sqlite3.Connection,
 ) -> None:
     """Persist upstream AI intent and its human-review handoff."""
@@ -2005,7 +2005,7 @@ def _migration_034_creative_pipeline_operations(
     )
 
 
-def _migration_035_auto_mode_orchestrator(connection: sqlite3.Connection) -> None:
+def _migration_036_auto_mode_orchestrator(connection: sqlite3.Connection) -> None:
     """Persist AUTO Mode truth, explainability events, and bounded create budgets."""
     connection.executescript(
         """
@@ -2077,7 +2077,7 @@ def _migration_035_auto_mode_orchestrator(connection: sqlite3.Connection) -> Non
     )
 
 
-def _migration_036_paid_create_ledger_and_artifact_identity(
+def _migration_034_paid_create_ledger_and_artifact_identity(
     connection: sqlite3.Connection,
 ) -> None:
     """Add fail-closed paid-create accounting and content artifact identity."""
@@ -2129,6 +2129,73 @@ def _migration_036_paid_create_ledger_and_artifact_identity(
     )
 
 
+def _migration_037_audiovisual_delivery_pipeline(
+    connection: sqlite3.Connection,
+) -> None:
+    """Persist immutable dialogue, voice, TTS, and audio timing truth."""
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS post_dialogue_plans (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL, plan_id TEXT NOT NULL,
+            source_script_revision_id TEXT NOT NULL, source_shot_plan_revision_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1), lines_json TEXT NOT NULL,
+            lines_sha256 TEXT NOT NULL CHECK (length(lines_sha256) = 64), created_at TEXT NOT NULL,
+            UNIQUE(plan_id, version), FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_id) REFERENCES post_production_plans(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_script_revision_id) REFERENCES structured_script_revisions(id) ON DELETE RESTRICT,
+            FOREIGN KEY(source_shot_plan_revision_id) REFERENCES shot_plan_revisions(id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS post_voice_assignment_sets (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL, plan_id TEXT NOT NULL,
+            source_dialogue_plan_id TEXT NOT NULL, version INTEGER NOT NULL CHECK (version >= 1),
+            assignments_json TEXT NOT NULL, assignments_sha256 TEXT NOT NULL CHECK (length(assignments_sha256) = 64),
+            created_at TEXT NOT NULL, UNIQUE(source_dialogue_plan_id, version),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_id) REFERENCES post_production_plans(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_dialogue_plan_id) REFERENCES post_dialogue_plans(id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS post_tts_tasks (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL, plan_id TEXT NOT NULL,
+            source_dialogue_plan_id TEXT NOT NULL, source_voice_assignment_set_id TEXT NOT NULL,
+            source_script_revision_id TEXT NOT NULL, dialogue_line_id TEXT NOT NULL, shot_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1), text TEXT NOT NULL, voice_profile TEXT NOT NULL,
+            language TEXT NOT NULL, sample_rate INTEGER NOT NULL CHECK (sample_rate >= 8000 AND sample_rate <= 192000),
+            manifest_id TEXT NOT NULL, manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+            request_sha256 TEXT NOT NULL CHECK (length(request_sha256) = 64),
+            status TEXT NOT NULL CHECK (status IN ('PLANNED','SUCCEEDED','FAILED')),
+            output_relative_path TEXT, output_sha256 TEXT, output_size_bytes INTEGER, duration_seconds REAL,
+            metadata_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            UNIQUE(source_dialogue_plan_id, dialogue_line_id, version),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_id) REFERENCES post_production_plans(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_dialogue_plan_id) REFERENCES post_dialogue_plans(id) ON DELETE RESTRICT,
+            FOREIGN KEY(source_voice_assignment_set_id) REFERENCES post_voice_assignment_sets(id) ON DELETE RESTRICT,
+            FOREIGN KEY(source_script_revision_id) REFERENCES structured_script_revisions(id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS post_audio_timelines (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL, plan_id TEXT NOT NULL,
+            source_dialogue_plan_id TEXT NOT NULL, source_voice_assignment_set_id TEXT NOT NULL,
+            source_script_revision_id TEXT NOT NULL, version INTEGER NOT NULL CHECK (version >= 1),
+            sample_rate INTEGER NOT NULL, items_json TEXT NOT NULL,
+            content_end_seconds REAL NOT NULL CHECK (content_end_seconds > 0),
+            duration_seconds REAL NOT NULL CHECK (duration_seconds > 0), artifact_relative_path TEXT NOT NULL,
+            artifact_sha256 TEXT NOT NULL CHECK (length(artifact_sha256) = 64),
+            artifact_size_bytes INTEGER NOT NULL CHECK (artifact_size_bytes > 0),
+            timeline_sha256 TEXT NOT NULL CHECK (length(timeline_sha256) = 64), created_at TEXT NOT NULL,
+            UNIQUE(plan_id, version), FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_id) REFERENCES post_production_plans(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_dialogue_plan_id) REFERENCES post_dialogue_plans(id) ON DELETE RESTRICT,
+            FOREIGN KEY(source_voice_assignment_set_id) REFERENCES post_voice_assignment_sets(id) ON DELETE RESTRICT,
+            FOREIGN KEY(source_script_revision_id) REFERENCES structured_script_revisions(id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_post_dialogue_plans ON post_dialogue_plans(project_id, plan_id, version);
+        CREATE INDEX IF NOT EXISTS idx_post_voice_assignments ON post_voice_assignment_sets(project_id, plan_id, version);
+        CREATE INDEX IF NOT EXISTS idx_post_tts_tasks ON post_tts_tasks(project_id, plan_id, dialogue_line_id, version);
+        CREATE INDEX IF NOT EXISTS idx_post_audio_timelines ON post_audio_timelines(project_id, plan_id, version);
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -2163,9 +2230,10 @@ MIGRATIONS: tuple[Migration, ...] = (
     (31, _migration_031_runtime_plan_schema_forward_repair),
     (32, _migration_032_shot_source_selection_kind_forward_repair),
     (33, _migration_033_continuity_schema_compatibility),
-    (34, _migration_034_creative_pipeline_operations),
-    (35, _migration_035_auto_mode_orchestrator),
-    (36, _migration_036_paid_create_ledger_and_artifact_identity),
+    (34, _migration_034_paid_create_ledger_and_artifact_identity),
+    (35, _migration_035_creative_pipeline_operations),
+    (36, _migration_036_auto_mode_orchestrator),
+    (37, _migration_037_audiovisual_delivery_pipeline),
 )
 
 

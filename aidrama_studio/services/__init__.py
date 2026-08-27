@@ -49,6 +49,7 @@ from .vision_qc import (
     VisionQCResult,
     VisionQCService,
 )
+from .continuity import ContinuityEngine, ContinuityEngineError
 from .diagnostics import DiagnosticsError, DiagnosticsService, DiskSpaceService
 from .tts_runtime import TTS_LIVE_SMOKE_TEXT, TTSRuntimeError, TTSRuntimeService
 from .production_queue import ProductionAuthorizationPreview, ProductionQueueError, ProductionQueueService
@@ -194,6 +195,7 @@ __all__ = [
     "WindowsCredentialStore", "CredentialStoreError", "CredentialReadinessService",
     "ProjectArchiveService", "ProjectArchiveError",
     "VISION_BLOCKS_FINAL", "VisionFrameSamplingService", "VisionQCResult", "VisionQCService",
+    "ContinuityEngine", "ContinuityEngineError",
     "DiagnosticsError", "DiagnosticsService", "DiskSpaceService",
     "TTS_LIVE_SMOKE_TEXT", "TTSRuntimeError", "TTSRuntimeService",
     "ProductionAuthorizationPreview", "ProductionQueueError", "ProductionQueueService",

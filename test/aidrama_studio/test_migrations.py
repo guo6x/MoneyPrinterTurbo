@@ -112,6 +112,21 @@ def test_all_aidrama_migrations_apply_in_order_and_create_revision_tables() -> N
         "provider_tasks",
         "vision_frame_manifests",
         "vision_analysis_results",
+        "continuity_snapshots",
+        "continuity_issues",
+        "continuity_repair_recommendations",
+        "creative_pipeline_operations",
+        "auto_orchestrator_runs",
+        "auto_agent_events",
+        "auto_paid_authorizations",
+        "auto_paid_consumptions",
+        "paid_budget_ledgers",
+        "paid_create_reservations",
+        "production_artifact_identities",
+        "post_dialogue_plans",
+        "post_voice_assignment_sets",
+        "post_tts_tasks",
+        "post_audio_timelines",
     } <= tables
 
 
@@ -155,6 +170,9 @@ def test_migrations_are_idempotent_and_do_not_duplicate_schema_records() -> None
         "provider_tasks",
         "vision_frame_manifests",
         "vision_analysis_results",
+        "continuity_snapshots",
+        "continuity_issues",
+        "continuity_repair_recommendations",
     ):
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
@@ -227,8 +245,8 @@ def test_migration_029_adds_candidate_and_current_shot_source_truth() -> None:
 def test_migration_030_adds_final_duration_control_in_order_and_is_idempotent() -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
-    assert MIGRATIONS[-4][0] == 30
-    assert [version for version, _ in MIGRATIONS] == list(range(1, 34))
+    assert 30 in {version for version, _ in MIGRATIONS}
+    assert [version for version, _ in MIGRATIONS] == list(range(1, max(v for v, _ in MIGRATIONS) + 1))
     prior = [(version, migration) for version, migration in MIGRATIONS if version < 30]
     for _, migration in prior:
         migration(connection)
@@ -305,7 +323,7 @@ def test_migration_033_preserves_continuity_schema_and_accepts_recorded_version(
     assert apply_migrations(connection) == len(MIGRATIONS)
     assert connection.execute(
         "SELECT MAX(version) FROM schema_migrations"
-    ).fetchone()[0] == 33
+    ).fetchone()[0] == max(version for version, _ in MIGRATIONS)
     assert {
         row[0]
         for row in connection.execute(
@@ -457,11 +475,7 @@ def test_migration_032_repairs_recorded_legacy_source_decision_schema() -> None:
     }
     assert "selection_kind" not in before
 
-<<<<<<< HEAD
     assert apply_migrations(connection) == len(MIGRATIONS) - 31
-=======
-    assert apply_migrations(connection) == 2
->>>>>>> 25e23855222e43589c1654b9408eb73187014751
     columns = {
         row[1]
         for row in connection.execute(
