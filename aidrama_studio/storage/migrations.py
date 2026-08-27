@@ -1760,6 +1760,59 @@ def _migration_030_final_duration_control(connection: sqlite3.Connection) -> Non
         )
 
 
+def _migration_031_runtime_plan_schema_forward_repair(
+    connection: sqlite3.Connection,
+) -> None:
+    """Repair RuntimePlan columns missed by already-recorded old migrations.
+
+    Some durable databases recorded migrations 025-027 from an older source
+    snapshot before the current RuntimePlan persistence contract was complete.
+    Those versions will not run again, so keep the historical migrations
+    immutable and reconcile every later-added RuntimePlan column here.
+    """
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_plans'"
+    ).fetchone()
+    if table is None:
+        raise sqlite3.OperationalError(
+            "runtime_plans base table is missing before migration 031"
+        )
+
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(runtime_plans)")
+    }
+    additions = (
+        ("endpoint_profile_id", "TEXT"),
+        ("deployment_region", "TEXT NOT NULL DEFAULT 'UNSPECIFIED'"),
+        ("endpoint_class", "TEXT NOT NULL DEFAULT 'UNSPECIFIED'"),
+        ("credential_reference", "TEXT"),
+        ("selection_source", "TEXT NOT NULL DEFAULT 'LEGACY'"),
+        ("transmitted_content_types_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("estimated_request_count", "INTEGER NOT NULL DEFAULT 1"),
+        (
+            "native_generation_resolution",
+            "TEXT NOT NULL DEFAULT '1920x1080'",
+        ),
+        ("native_generation_fps", "REAL NOT NULL DEFAULT 24"),
+        ("delivery_width", "INTEGER NOT NULL DEFAULT 1920"),
+        ("delivery_height", "INTEGER NOT NULL DEFAULT 1080"),
+        ("target_fps", "REAL NOT NULL DEFAULT 24"),
+        ("delivery_strategy", "TEXT NOT NULL DEFAULT 'NATIVE'"),
+        ("quality_mode", "TEXT NOT NULL DEFAULT 'STANDARD'"),
+        ("duration_strategy", "TEXT NOT NULL DEFAULT 'EXACT'"),
+        ("generation_override_sha256", "TEXT"),
+    )
+    for name, definition in additions:
+        if name not in columns:
+            connection.execute(
+                f"ALTER TABLE runtime_plans ADD COLUMN {name} {definition}"
+            )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runtime_plans_endpoint "
+        "ON runtime_plans(project_id, endpoint_profile_id, created_at DESC)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1791,6 +1844,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (28, _migration_028_durable_heavy_jobs),
     (29, _migration_029_candidate_and_shot_source_truth),
     (30, _migration_030_final_duration_control),
+    (31, _migration_031_runtime_plan_schema_forward_repair),
 )
 
 

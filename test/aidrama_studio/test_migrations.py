@@ -4,7 +4,60 @@ import sqlite3
 
 import pytest
 
-from aidrama_studio.storage.migrations import MIGRATIONS, apply_migrations, _migration_015_reference_asset_repair_completion
+from aidrama_studio.domain import RuntimePlan
+from aidrama_studio.storage.database import DatabasePaths, initialize_database
+from aidrama_studio.storage.migrations import (
+    MIGRATIONS,
+    _migration_015_reference_asset_repair_completion,
+    apply_migrations,
+)
+from aidrama_studio.storage.repositories import ProjectRepository
+
+
+RUNTIME_PLAN_EXPECTED_COLUMNS = (
+    "id",
+    "project_id",
+    "production_job_id",
+    "execution_id",
+    "output_profile_id",
+    "generation_brief_id",
+    "provider_capability",
+    "provider_id",
+    "model_id",
+    "generation_mode",
+    "resolution",
+    "provider_generation_duration",
+    "target_creative_duration",
+    "audio_strategy",
+    "provider_parameters_json",
+    "reference_version_ids_json",
+    "reference_roles_json",
+    "continuity_strategy",
+    "generation_brief_hash",
+    "output_profile_hash",
+    "authorization_json",
+    "prompt_template_version",
+    "plan_hash",
+    "created_at",
+    "endpoint_profile_id",
+    "deployment_region",
+    "endpoint_class",
+    "credential_reference",
+    "selection_source",
+    "transmitted_content_types_json",
+    "estimated_request_count",
+    "native_generation_resolution",
+    "native_generation_fps",
+    "delivery_width",
+    "delivery_height",
+    "target_fps",
+    "delivery_strategy",
+    "quality_mode",
+    "duration_strategy",
+    "generation_override_sha256",
+)
+
+RUNTIME_PLAN_FORWARD_COLUMNS = RUNTIME_PLAN_EXPECTED_COLUMNS[24:]
 
 
 def _tables(connection: sqlite3.Connection) -> set[str]:
@@ -174,8 +227,8 @@ def test_migration_029_adds_candidate_and_current_shot_source_truth() -> None:
 def test_migration_030_adds_final_duration_control_in_order_and_is_idempotent() -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
-    assert MIGRATIONS[-1][0] == 30
-    assert [version for version, _ in MIGRATIONS] == list(range(1, 31))
+    assert MIGRATIONS[-2][0] == 30
+    assert [version for version, _ in MIGRATIONS] == list(range(1, 32))
     prior = [(version, migration) for version, migration in MIGRATIONS if version < 30]
     for _, migration in prior:
         migration(connection)
@@ -243,6 +296,171 @@ def test_migration_030_adds_final_duration_control_in_order_and_is_idempotent() 
         row[1]
         for row in connection.execute("PRAGMA table_info(final_assembly_items)")
     } == columns
+
+
+def _insert_legacy_runtime_plan(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "INSERT INTO projects("
+        "id,title,description,status,aspect_ratio,target_duration_seconds,"
+        "created_at,updated_at) VALUES "
+        "('project-runtime-plan','Legacy','','PREPRODUCTION','9:16',5,'now','now')"
+    )
+    connection.execute(
+        "INSERT INTO runtime_plans("
+        "id,project_id,provider_capability,provider_id,model_id,generation_mode,"
+        "resolution,provider_generation_duration,target_creative_duration,"
+        "audio_strategy,provider_parameters_json,reference_version_ids_json,"
+        "reference_roles_json,continuity_strategy,generation_brief_hash,"
+        "output_profile_hash,authorization_json,prompt_template_version,"
+        "plan_hash,created_at) VALUES ("
+        "'legacy-plan','project-runtime-plan','VIDEO_GENERATIVE','WAN_VIDEO',"
+        "'wan-model','REFERENCE_I2V','720x1280',5,5,'EXTERNAL_TTS','{}','[]',"
+        "'{}','REFERENCE_ONLY',?,?,?,?,?,'now')",
+        ("1" * 64, "2" * 64, "{}", "wan-v1", "3" * 64),
+    )
+
+
+def _database_recorded_through_030(connection: sqlite3.Connection) -> None:
+    for _, migration in MIGRATIONS:
+        if _ == 31:
+            break
+        migration(connection)
+    connection.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    connection.executemany(
+        "INSERT INTO schema_migrations VALUES (?,?)",
+        [(version, "2026-08-25") for version in range(1, 31)],
+    )
+
+
+def test_migration_031_repairs_recorded_legacy_duration_column_and_preserves_rows() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    _database_recorded_through_030(connection)
+    _insert_legacy_runtime_plan(connection)
+    before = connection.execute(
+        "SELECT id,provider_id,generation_brief_hash,plan_hash FROM runtime_plans"
+    ).fetchall()
+    connection.execute("ALTER TABLE runtime_plans DROP COLUMN duration_strategy")
+
+    assert apply_migrations(connection) == 1
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(runtime_plans)")
+    }
+    assert columns == set(RUNTIME_PLAN_EXPECTED_COLUMNS)
+    assert connection.execute(
+        "SELECT duration_strategy FROM runtime_plans WHERE id='legacy-plan'"
+    ).fetchone()[0] == "EXACT"
+    after = connection.execute(
+        "SELECT id,provider_id,generation_brief_hash,plan_hash FROM runtime_plans"
+    ).fetchall()
+    assert [tuple(row) for row in after] == [tuple(row) for row in before]
+    assert apply_migrations(connection) == 0
+
+
+def test_migration_031_repairs_complete_runtime_plan_forward_contract() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    _database_recorded_through_030(connection)
+    _insert_legacy_runtime_plan(connection)
+    connection.execute("DROP INDEX idx_runtime_plans_endpoint")
+    for column in reversed(RUNTIME_PLAN_FORWARD_COLUMNS):
+        connection.execute(f"ALTER TABLE runtime_plans DROP COLUMN {column}")
+
+    assert apply_migrations(connection) == 1
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(runtime_plans)")
+    }
+    assert columns == set(RUNTIME_PLAN_EXPECTED_COLUMNS)
+    legacy = connection.execute(
+        "SELECT id,provider_id,generation_brief_hash,plan_hash,"
+        "endpoint_profile_id,deployment_region,selection_source,"
+        "native_generation_resolution,duration_strategy "
+        "FROM runtime_plans WHERE id='legacy-plan'"
+    ).fetchone()
+    assert tuple(legacy) == (
+        "legacy-plan",
+        "WAN_VIDEO",
+        "1" * 64,
+        "3" * 64,
+        None,
+        "UNSPECIFIED",
+        "LEGACY",
+        "1920x1080",
+        "EXACT",
+    )
+    assert connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' "
+        "AND name='idx_runtime_plans_endpoint'"
+    ).fetchone()
+
+
+def test_fresh_initialize_is_idempotent_and_runtime_plan_insert_contract_works(
+    tmp_path,
+) -> None:
+    paths = DatabasePaths(
+        tmp_path / "db" / "aidrama.db",
+        tmp_path / "db" / "projects",
+        tmp_path / "db" / "archived_projects",
+    )
+    initialize_database(paths)
+    initialize_database(paths)
+    with sqlite3.connect(paths.database) as connection:
+        columns = tuple(
+            row[1] for row in connection.execute("PRAGMA table_info(runtime_plans)")
+        )
+        assert columns == RUNTIME_PLAN_EXPECTED_COLUMNS
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations"
+        ).fetchone()[0] == len(MIGRATIONS)
+        connection.execute(
+            "INSERT INTO projects("
+            "id,title,description,status,aspect_ratio,target_duration_seconds,"
+            "created_at,updated_at) VALUES "
+            "('project-runtime-plan','Fresh','','PREPRODUCTION','9:16',5,'now','now')"
+        )
+
+    repository = ProjectRepository(paths)
+    plan = RuntimePlan(
+        id="runtime-plan-insert",
+        project_id="project-runtime-plan",
+        provider_capability="VIDEO_GENERATIVE",
+        provider_id="WAN_VIDEO",
+        model_id="wan-model",
+        endpoint_profile_id="DASHSCOPE_CN_BEIJING_V1",
+        deployment_region="MAINLAND_CHINA",
+        endpoint_class="DASHSCOPE_CN",
+        credential_reference="DASHSCOPE_API_KEY",
+        selection_source="PROJECT_PROFILE",
+        transmitted_content_types=("PROMPT", "REFERENCE_IMAGE"),
+        estimated_request_count=1,
+        generation_mode="REFERENCE_I2V",
+        native_generation_resolution="720x1280",
+        native_generation_fps=24,
+        delivery_width=720,
+        delivery_height=1280,
+        target_fps=24,
+        delivery_strategy="NATIVE",
+        quality_mode="STANDARD",
+        provider_generation_duration=5,
+        target_creative_duration=5,
+        duration_strategy="EXACT",
+        audio_strategy="EXTERNAL_TTS",
+        provider_parameters={"provider_resolution": "720P"},
+        reference_version_ids=("version-1",),
+        reference_roles={"version-1": "first_frame"},
+        continuity_strategy="REFERENCE_ONLY",
+        generation_brief_hash="1" * 64,
+        output_profile_hash="2" * 64,
+        authorization={"approved": True, "max_paid_attempts": 1},
+        prompt_template_version="mainland-wan-i2v-v1",
+        plan_hash="3" * 64,
+        created_at="2026-08-27T00:00:00+00:00",
+    )
+
+    assert repository.create_runtime_plan(plan) == plan
+    assert repository.get_runtime_plan(plan.id) == plan
 
 
 def test_upgrade_from_023_adds_append_only_vision_provenance_and_is_idempotent() -> None:
