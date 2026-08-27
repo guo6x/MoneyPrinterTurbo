@@ -109,6 +109,8 @@ def test_page_loads_and_exposes_required_center_sections():
         "角色详情",
         "场景详情",
         "候选对比 / 锁定",
+        "自动参考检查",
+        "WAITING_HUMAN",
         "参考版本",
         "请求生成候选图",
         "我确认本次最多创建 1 张付费候选图，且不会自动重试",
@@ -128,6 +130,7 @@ location = SimpleNamespace(id="loc-1", name="Room", environment="interior", visu
 story = SimpleNamespace(characters=[character], locations=[location])
 
 class FakeService:
+    repository = object()
     def approved_story_revision(self, project_id):
         return {"id": "story-1", "content": story}
     def find_asset_for_binding(self, project_id, binding_type, binding_id):
@@ -141,6 +144,7 @@ class FakeService:
         }
 
 page.current_project_or_stop = lambda: project
+page.render_project_context = lambda *args, **kwargs: None
 page.ReferenceAssetService = FakeService
 page.ReferenceAssetStorageService = lambda service: SimpleNamespace()
 page.render()

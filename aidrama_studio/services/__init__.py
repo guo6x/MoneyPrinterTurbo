@@ -7,6 +7,7 @@ from .drafts import DraftState, draft_is_dirty, draft_state
 from .dependency_status import DependencyStatus, DependencyStatusService
 from .shot import ShotService, ShotServiceError
 from .reference_assets import ReferenceAssetService, ReferenceAssetServiceError
+from .reference_agent import ReferenceAgentError, ReferenceAgentService
 from .reference_asset_storage import ReferenceAssetStorageService, ReferenceAssetStorageError
 from .production import ProductionService, ProductionServiceError
 from .production_execution import ProductionExecutionService, ProductionExecutionServiceError
@@ -141,6 +142,7 @@ __all__ = [
     "DependencyStatus", "DependencyStatusService",
     "ShotService", "ShotServiceError",
     "ReferenceAssetService", "ReferenceAssetServiceError",
+    "ReferenceAgentService", "ReferenceAgentError",
     "ReferenceAssetStorageService", "ReferenceAssetStorageError",
     "ProductionService", "ProductionServiceError",
     "ProductionExecutionService", "ProductionExecutionServiceError", "ProductionWorker", "ProductionWorkerError",

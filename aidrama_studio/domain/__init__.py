@@ -16,6 +16,17 @@ from .reference_asset import (
     ReferenceImageCandidateEventType,
     ReferenceImageCandidateStatus,
 )
+from .reference_agent import (
+    GeneratedReferenceCandidate,
+    ReferenceActionKind,
+    ReferenceBrief,
+    ReferenceCoverageStatus,
+    ReferenceGenerationAction,
+    ReferenceGenerationAuthorization,
+    ReferenceReadiness,
+    ReferenceRequirement,
+    ReferenceSubjectType,
+)
 from .production import ProductionAttempt, ProductionAttemptStatus, ProductionJob, ProductionJobStatus, ProductionShot, ProductionShotStatus
 from .production_execution import ProductionArtifact, ProductionEvent, ProductionEventType, ProductionExecution, ProductionExecutionStatus
 from .production_qc import (
@@ -74,6 +85,8 @@ __all__ = [
     "ShotPlan", "Shot", "ShotSize", "CameraAngle", "CameraMovement", "Lens", "Eyeline", "Lighting", "Blocking", "RiskLevel", "ShotStatus", "ShotRevisionStatus",
     "ReferenceAsset", "ReferenceAssetType", "ReferenceAssetVersion", "ReferenceAssetBinding", "ReferenceBindingType",
     "ReferenceImageCandidate", "ReferenceImageCandidateEvent", "ReferenceImageCandidateEventType", "ReferenceImageCandidateStatus",
+    "GeneratedReferenceCandidate", "ReferenceActionKind", "ReferenceBrief", "ReferenceCoverageStatus",
+    "ReferenceGenerationAction", "ReferenceGenerationAuthorization", "ReferenceReadiness", "ReferenceRequirement", "ReferenceSubjectType",
     "ProductionJob", "ProductionJobStatus", "ProductionShot", "ProductionShotStatus", "ProductionAttempt", "ProductionAttemptStatus",
     "ProductionExecution", "ProductionExecutionStatus", "ProductionEvent", "ProductionEventType", "ProductionArtifact",
     "ProductionQCResult", "ProductionQCStatus", "ProductionQCMetric", "ProductionQCMetricStatus", "ProductionReview", "ProductionReviewDecision",
