@@ -160,7 +160,27 @@ class MainlandFrontendRuntimeBridge:
         runtime = self.runtime_factory(
             **runtime_options,
         )
-        manifest = runtime.primary_manifest(CapabilityKind.IMAGE)
+        manifest_registry = getattr(runtime, "manifest_registry", None)
+        binding_for = getattr(runtime, "binding_for", None)
+        if manifest_registry is None or not callable(binding_for):
+            # Compatibility for injected/offline runtimes that expose exactly
+            # one primary manifest and therefore have no alternate model to
+            # select. The packaged runtime always takes the exact branch below.
+            manifest = runtime.primary_manifest(CapabilityKind.IMAGE)
+        else:
+            try:
+                from .model_settings import SettingsModelService
+
+                selection = SettingsModelService(
+                    self.repository,
+                    manifest_registry=manifest_registry,
+                    credential_store=self.credential_store,
+                ).resolve(project_id, CapabilityKind.IMAGE)
+                manifest = binding_for(selection.option.manifest_id).manifest
+            except Exception as exc:
+                raise MainlandFrontendRuntimeError(
+                    "已保存的参考图模型无法解析；不会调用 Provider"
+                ) from exc
         request = CapabilityRequest(
             request_id=uuid4().hex,
             project_id=project_id,
