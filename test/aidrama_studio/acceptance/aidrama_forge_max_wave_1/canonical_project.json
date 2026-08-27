@@ -1,0 +1,65 @@
+{
+  "fixture_id": "forge-max-wave-1-rain-letter-60s-v1",
+  "project": {
+    "title": "雨夜来信：归还的红伞",
+    "logline": "雨夜，林澈在旧书店门口归还苏岚的红伞；两人决定一起面对一封迟到的来信。",
+    "target_duration_seconds": 60,
+    "aspect_ratio": "16:9",
+    "native_generation": {"width": 1280, "height": 720, "fps": 24, "codec": "h264"},
+    "delivery": {"width": 1920, "height": 1080, "fps": 24, "container": "mp4", "video_codec": "h264", "audio_codec": "aac"}
+  },
+  "characters": [
+    {"id": "character_lin", "name": "林澈", "locked_reference": true, "baseline": {"wardrobe": "black_coat", "prop": "red_umbrella"}},
+    {"id": "character_su", "name": "苏岚", "locked_reference": false, "baseline": {"wardrobe": "blue_scarf", "prop": "sealed_letter"}}
+  ],
+  "locations": [
+    {"id": "location_bookshop_exterior", "name": "旧书店雨夜门口", "locked_reference": true},
+    {"id": "location_bookshop_interior", "name": "旧书店暖光内景", "locked_reference": false}
+  ],
+  "important_props": [
+    {"id": "prop_red_umbrella", "name": "红伞", "owner": "character_lin"},
+    {"id": "prop_sealed_letter", "name": "封缄来信", "owner": "character_su"}
+  ],
+  "creative": {
+    "intake": {"source": "offline-canonical", "language": "zh-CN", "theme": "重逢与选择"},
+    "fake_llm": {"provider": "offline-universal", "model": "fake-llm-wave1-v1", "transport": "in_process", "revision_chain": ["story", "script", "shot_plan"]}
+  },
+  "shots": [
+    {
+      "id": "shot_01", "order": 1, "duration_seconds": 10, "location": "location_bookshop_exterior", "characters": ["character_lin"], "dialogue": "林澈：这把伞，我一直替你留着。", "expected": {"character_lin": {"wardrobe": "black_coat", "prop": "red_umbrella"}}
+    },
+    {
+      "id": "shot_02", "order": 2, "duration_seconds": 10, "location": "location_bookshop_exterior", "characters": ["character_lin", "character_su"], "dialogue": "苏岚：信里写了什么？", "expected": {"character_lin": {"wardrobe": "black_coat", "prop": "red_umbrella"}, "character_su": {"wardrobe": "blue_scarf", "prop": "sealed_letter"}}
+    },
+    {
+      "id": "shot_03", "order": 3, "duration_seconds": 10, "location": "location_bookshop_interior", "characters": ["character_lin", "character_su"], "dialogue": "林澈：进去再说，别让信淋湿。", "expected": {"character_lin": {"wardrobe": "black_coat", "prop": "red_umbrella"}, "character_su": {"wardrobe": "blue_scarf", "prop": "sealed_letter"}}, "fake_vision_observation": {"character_lin": {"wardrobe": "white_shirt", "prop": null}}
+    },
+    {
+      "id": "shot_04", "order": 4, "duration_seconds": 10, "location": "location_bookshop_interior", "characters": ["character_lin", "character_su"], "dialogue": "苏岚：那我们一起把它读完。", "expected": {"character_lin": {"wardrobe": "black_coat", "prop": "red_umbrella"}, "character_su": {"wardrobe": "blue_scarf", "prop": "sealed_letter"}}
+    },
+    {
+      "id": "shot_05", "order": 5, "duration_seconds": 10, "location": "location_bookshop_exterior", "characters": ["character_lin", "character_su"], "dialogue": "林澈：雨小了。", "expected": {"character_lin": {"wardrobe": "black_coat", "prop": "red_umbrella"}, "character_su": {"wardrobe": "blue_scarf", "prop": "sealed_letter"}}
+    },
+    {
+      "id": "shot_06", "order": 6, "duration_seconds": 10, "location": "location_bookshop_exterior", "characters": ["character_lin", "character_su"], "dialogue": "苏岚：那就从现在开始。", "expected": {"character_lin": {"wardrobe": "black_coat", "prop": "red_umbrella"}, "character_su": {"wardrobe": "blue_scarf", "prop": "sealed_letter"}}
+    }
+  ],
+  "reference_agent": {
+    "prelocked": ["character_lin", "location_bookshop_exterior"],
+    "expected_required_subjects": ["character_lin", "character_su", "location_bookshop_exterior", "location_bookshop_interior"],
+    "dedupe_key": "subject_identity_plus_approved_story_script_shot_chain",
+    "human_actions": ["approve_candidate_and_bind", "lock_bound_reference"]
+  },
+  "provider_scripts": {
+    "video": {"provider": "offline-video", "model": "fake-video-wave1-v1", "create_calls_per_shot": 1, "poll_sequence": ["SUBMITTED", "RUNNING", "SUCCEEDED"]},
+    "vision": {"provider": "offline-vision", "model": "fake-vision-wave1-v1", "transport": "in_process"},
+    "tts": {"provider": "offline-tts", "model": "fake-tts-wave1-v1", "sample_rate": 48000, "channels": 2, "format": "wav"}
+  },
+  "security_canaries": {
+    "api_key": "sk-wave1-canary-not-a-secret",
+    "bearer": "Bearer wave1-canary-token",
+    "signed_url": "https://provider.invalid/media.mp4?X-Amz-Signature=wave1-canary",
+    "temporary_provider_url": "https://provider.invalid/temporary/wave1-canary",
+    "private_path": "C:\\private\\wave1-canary\\source.mp4"
+  }
+}

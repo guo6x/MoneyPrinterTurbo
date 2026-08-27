@@ -1,0 +1,61 @@
+{
+  "phase": "AIDRAMA_FORGE_MAX_WAVE_1_INTEGRATED_FULL_AI_E2E_TEST_MATRIX",
+  "reference_base": "557b9af74a9ccb3e5f02445d9bb1fccd71a021f2",
+  "live_provider_calls": 0,
+  "test_stage_count": 26,
+  "fixture": "canonical_project.json",
+  "required_test_files": [
+    "conftest.py",
+    "test_00_environment_and_db_isolation.py",
+    "test_10_creative_and_settings.py",
+    "test_20_reference_and_auto.py",
+    "test_30_production_and_reliability.py",
+    "test_40_technical_vision_continuity.py",
+    "test_50_human_final_audio_post.py",
+    "test_60_director_migration_security.py",
+    "test_70_full_product_e2e.py",
+    "test_71_negative_e2e.py"
+  ],
+  "suites": {
+    "FAST_GATE": [
+      "test_00_environment_and_db_isolation.py",
+      "test_10_creative_and_settings.py",
+      "test_20_reference_and_auto.py",
+      "test_30_production_and_reliability.py",
+      "test_40_technical_vision_continuity.py",
+      "test_50_human_final_audio_post.py::test_human_governance_and_final_readiness",
+      "test_60_director_migration_security.py::test_migration_collision_and_future_schema_fail_closed",
+      "test_60_director_migration_security.py::test_security_canaries_are_absent_from_public_and_persistent_surfaces"
+    ],
+    "MEDIUM_GATE": [
+      "test_00_environment_and_db_isolation.py",
+      "test_10_creative_and_settings.py",
+      "test_20_reference_and_auto.py",
+      "test_30_production_and_reliability.py",
+      "test_40_technical_vision_continuity.py",
+      "test_50_human_final_audio_post.py",
+      "test_60_director_migration_security.py"
+    ],
+    "FULL_GATE": [
+      "test_00_environment_and_db_isolation.py",
+      "test_10_creative_and_settings.py",
+      "test_20_reference_and_auto.py",
+      "test_30_production_and_reliability.py",
+      "test_40_technical_vision_continuity.py",
+      "test_50_human_final_audio_post.py",
+      "test_60_director_migration_security.py",
+      "test_70_full_product_e2e.py",
+      "test_71_negative_e2e.py"
+    ]
+  },
+  "required_report_fields": [
+    "FULL_AI_OFFLINE_PRODUCT_E2E",
+    "LIVE_PROVIDER_CALLS",
+    "FAKE_VIDEO_CREATE_CALLS",
+    "PAID_CREATE_CALLS",
+    "DEFAULT_LOCALAPPDATA_DB_OPENED",
+    "MIGRATION_MAX_VERSION",
+    "PUBLIC_OR_PERSISTED_SECRET_LEAKS",
+    "FIRST_FAILED_STAGE"
+  ]
+}
