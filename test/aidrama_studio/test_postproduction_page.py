@@ -3,9 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from aidrama_studio.pages import postproduction as page
+
+
+@pytest.fixture(autouse=True)
+def _temporary_aidrama_data_dir(tmp_path, monkeypatch):
+    """Keep page projections away from a developer's persistent database."""
+    monkeypatch.setenv("AIDRAMA_DATA_DIR", str(tmp_path / "aidrama-data"))
 
 
 def _job(status="SUCCEEDED"):
@@ -77,6 +84,36 @@ page.render()
     assert not app.exception
     assert any("成片尚未就绪" in item.value for item in app.warning)
     assert any("镜头尚未通过 QC" in item.value for item in app.markdown)
+    assert not any(button.label == "生成最终成片" for button in app.button)
+
+
+def test_human_review_block_is_projected_as_waiting_for_review():
+    app = AppTest.from_string(
+        """
+from types import SimpleNamespace
+from aidrama_studio.pages import postproduction as page
+project = SimpleNamespace(id='project-1', title='Waiting review project')
+job = SimpleNamespace(id='job-1', status='SUCCEEDED', shot_plan_revision_id='plan-1')
+class Production:
+    def list_jobs(self, project_id): return [job]
+class Manifest:
+    repository = None
+    def calculate_readiness(self, project_id, job_id):
+        return {'ready': False, 'total_shots': 1, 'eligible_shots': 0, 'blocked_shots': 1,
+                'estimated_duration': 2, 'blocked_reasons': ['shot_001: 技术检查通过，等待人工审片']}
+    def list_assemblies(self, project_id, job_id): return []
+class Runtime:
+    def __init__(self, repository=None): pass
+    def list_attempts(self, project_id, assembly_id): return []
+page.current_project_or_stop = lambda: project
+page.ProductionService = Production
+page.FinalAssemblyService = Manifest
+page.FinalAssemblyRuntimeService = Runtime
+page.render()
+"""
+    ).run(timeout=30)
+    assert not app.exception
+    assert any("技术检查通过，等待人工审片" in item.value for item in app.markdown)
     assert not any(button.label == "生成最终成片" for button in app.button)
 
 

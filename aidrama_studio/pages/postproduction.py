@@ -108,14 +108,18 @@ def _reason_label(reason: object) -> str:
     """Turn service readiness reasons into concise product language."""
     text = str(reason or "").strip()
     lower = text.lower()
+    if "等待人工审片" in text or (
+        "human review" in lower and "rejected" not in lower
+    ):
+        return "技术检查通过，等待人工审片"
+    if "rejected" in lower:
+        return "人审拒绝了该镜头"
     if "qc_pass" in lower or "qc result" in lower:
         return "镜头尚未通过 QC"
     if "source 文件不存在" in text or "source file" in lower:
         return "成片文件缺失"
     if "succeeded" in lower:
         return "镜头尚未完成生产"
-    if "rejected" in lower:
-        return "人审拒绝了该镜头"
     if ":" in text:
         text = text.split(":", 1)[-1].strip()
     # Readiness reasons are persisted service diagnostics.  Keep the normal
@@ -161,7 +165,7 @@ def _render_readiness(readiness: Any) -> None:
         for reason in reasons:
             st.markdown(f"- {_reason_label(reason)}")
         if not reasons:
-            st.caption("请先完成镜头生产与 QC。")
+            st.caption("请先完成镜头生产、技术检查与人工审片。")
 
 
 def _job_label(job: Any, readiness: Any) -> str:

@@ -58,6 +58,8 @@ class FinalAssemblyItem(BaseModel):
     production_execution_id: str = Field(min_length=1, max_length=64)
     production_artifact_id: str = Field(min_length=1, max_length=64)
     qc_result_id: str = Field(min_length=1, max_length=64)
+    # Historical frozen manifest items deliberately remain nullable for
+    # backwards-compatible reads.  New source qualification is stricter.
     review_id: str | None = Field(default=None, max_length=64)
     source_decision_id: str | None = Field(default=None, max_length=64)
     source_path: str = Field(min_length=1, max_length=1000)
@@ -117,7 +119,9 @@ class FinalAssemblySource(BaseModel):
     production_execution_id: str = Field(min_length=1, max_length=64)
     production_artifact_id: str = Field(min_length=1, max_length=64)
     qc_result_id: str = Field(min_length=1, max_length=64)
-    review_id: str | None = Field(default=None, max_length=64)
+    # A newly qualified source always carries the latest APPROVED human
+    # review for this exact QC result / artifact.
+    review_id: str = Field(min_length=1, max_length=64)
     source_decision_id: str | None = Field(default=None, max_length=64)
     source_path: str = Field(min_length=1, max_length=1000)
     source_sha256: str | None = Field(default=None, max_length=64)
