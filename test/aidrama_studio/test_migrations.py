@@ -227,8 +227,9 @@ def test_migration_029_adds_candidate_and_current_shot_source_truth() -> None:
 def test_migration_030_adds_final_duration_control_in_order_and_is_idempotent() -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
-    assert MIGRATIONS[-3][0] == 30
-    assert [version for version, _ in MIGRATIONS] == list(range(1, 33))
+    migration_versions = [version for version, _ in MIGRATIONS]
+    assert 30 in migration_versions
+    assert migration_versions == list(range(1, migration_versions[-1] + 1))
     prior = [(version, migration) for version, migration in MIGRATIONS if version < 30]
     for _, migration in prior:
         migration(connection)
@@ -435,7 +436,9 @@ def test_migration_032_repairs_recorded_legacy_source_decision_schema() -> None:
     }
     assert "selection_kind" not in before
 
-    assert apply_migrations(connection) == 1
+    assert apply_migrations(connection) == len(
+        [version for version, _ in MIGRATIONS if version >= 32]
+    )
     columns = {
         row[1]
         for row in connection.execute(

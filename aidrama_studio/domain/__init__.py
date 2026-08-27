@@ -31,7 +31,27 @@ from .production_qc import (
 )
 from .production_snapshot import FrozenDict, ProductionInputSnapshot
 from .final_assembly import FinalAssembly, FinalAssemblyItem, FinalAssemblyManifest, FinalAssemblyReadiness, FinalAssemblySource, FinalAssemblyStatus, FinalAssemblyRenderAttempt, FinalAssemblyRenderAttemptStatus
-from .post_production import AudioMixConfig, BGMTrack, MusicTrack, PostProductionPlan, PostProductionProject, PostRenderAttempt, PostRenderAttemptStatus, SubtitleCue, SubtitleItem, SubtitleTrack, VoiceTrack
+from .post_production import (
+    AudioMixConfig,
+    AudioTimeline,
+    AudioTimelineItem,
+    BGMTrack,
+    DialogueLine,
+    DialoguePlan,
+    MusicTrack,
+    PostProductionPlan,
+    PostProductionProject,
+    PostRenderAttempt,
+    PostRenderAttemptStatus,
+    SubtitleCue,
+    SubtitleItem,
+    SubtitleTrack,
+    TTSTask,
+    TTSTaskStatus,
+    VoiceAssignment,
+    VoiceAssignmentSet,
+    VoiceTrack,
+)
 from .director import (
     DirectorDecision,
     DirectorDecisionEvent,
@@ -82,7 +102,10 @@ __all__ = [
     "FrozenDict", "ProductionInputSnapshot",
     "FinalAssembly", "FinalAssemblyItem", "FinalAssemblyManifest", "FinalAssemblyReadiness", "FinalAssemblySource", "FinalAssemblyStatus",
     "FinalAssemblyRenderAttempt", "FinalAssemblyRenderAttemptStatus",
-    "AudioMixConfig", "MusicTrack", "BGMTrack", "PostProductionPlan", "PostProductionProject", "PostRenderAttempt", "PostRenderAttemptStatus", "SubtitleCue", "SubtitleItem", "SubtitleTrack", "VoiceTrack",
+    "AudioMixConfig", "AudioTimeline", "AudioTimelineItem", "DialogueLine", "DialoguePlan",
+    "MusicTrack", "BGMTrack", "PostProductionPlan", "PostProductionProject", "PostRenderAttempt", "PostRenderAttemptStatus",
+    "SubtitleCue", "SubtitleItem", "SubtitleTrack", "TTSTask", "TTSTaskStatus",
+    "VoiceAssignment", "VoiceAssignmentSet", "VoiceTrack",
     "DirectorSession", "DirectorSessionStatus", "DirectorGoal", "DirectorGoalKind", "DirectorGoalStatus",
     "DirectorDecision", "DirectorDecisionStatus", "DirectorRecommendation",
     "DirectorDecisionEvent",

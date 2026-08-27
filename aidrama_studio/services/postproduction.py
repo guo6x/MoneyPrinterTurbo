@@ -743,6 +743,29 @@ class PostProductionService:
                         raise PostProductionServiceError("VoiceTrack 的 SubtitleTrack 已发生变化")
                     if subtitle_track is not None and source_track.id != subtitle_track.id:
                         raise PostProductionServiceError("VoiceTrack 与本次 SubtitleTrack 不匹配")
+                    source_audio_timeline_id = str(
+                        voice.metadata_json.get("source_audio_timeline_id") or ""
+                    )
+                    if source_audio_timeline_id:
+                        audio_timeline = self.repository.get_audio_timeline(
+                            source_audio_timeline_id
+                        )
+                        expected_timeline_sha = str(
+                            voice.metadata_json.get("source_audio_timeline_sha256")
+                            or ""
+                        )
+                        if (
+                            audio_timeline is None
+                            or audio_timeline.project_id != project_id
+                            or audio_timeline.plan_id != plan_id
+                            or audio_timeline.timeline_sha256
+                            != expected_timeline_sha
+                            or audio_timeline.artifact_relative_path != voice.path
+                            or audio_timeline.artifact_sha256 != expected_voice_sha
+                        ):
+                            raise PostProductionServiceError(
+                                "VoiceTrack 的 AudioTimeline provenance 无效"
+                            )
             if music_path is not None:
                 expected_music_sha = str(music.metadata_json.get("sha256") or "")
                 if not expected_music_sha or self._sha256(music_path) != expected_music_sha:
@@ -781,7 +804,16 @@ class PostProductionService:
                 require_audio=bool(music or voice),
                 expected_duration=source_duration,
             )
-            metadata.update({"size_bytes": temporary.stat().st_size, "sha256": self._sha256(temporary), "source_final_assembly_id": plan.source_final_assembly_id})
+            metadata.update(
+                {
+                    "artifact_role": "DELIVERY_FINAL",
+                    "relationship": "PICTURE_FINAL_TO_POSTPRODUCTION_TO_DELIVERY_FINAL",
+                    "postproduction_plan_id": plan.id,
+                    "size_bytes": temporary.stat().st_size,
+                    "sha256": self._sha256(temporary),
+                    "source_final_assembly_id": plan.source_final_assembly_id,
+                }
+            )
             metadata["input_fingerprints"] = input_fingerprints
             if plan.source_final_assembly_render_attempt_id:
                 metadata["source_final_assembly_render_attempt_id"] = plan.source_final_assembly_render_attempt_id

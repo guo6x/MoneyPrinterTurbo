@@ -21,6 +21,7 @@ from aidrama_studio.pages._shared import (
 )
 from aidrama_studio.services.current_state import CurrentProductionStateService
 from aidrama_studio.services import (
+    AudiovisualPipelineService,
     FinalAssemblyRuntimeService,
     FinalAssemblyService,
     HeavyJobService,
@@ -697,6 +698,102 @@ def _plan_for_assembly(plans: list[Any], assembly_id: str) -> Any | None:
     return matching[-1] if matching else None
 
 
+def _postproduction_state_snapshot(
+    service: PostProductionService,
+    pipeline: AudiovisualPipelineService,
+    project_id: str,
+    plan_id: str,
+) -> dict[str, str]:
+    """Return the four user-facing delivery states without mutating runtime."""
+
+    dialogue_plans = pipeline.list_dialogue_plans(project_id, plan_id)
+    dialogue = dialogue_plans[-1] if dialogue_plans else None
+    assignments = pipeline.list_voice_assignment_sets(project_id, plan_id)
+    assignment_candidates = [
+        item
+        for item in assignments
+        if dialogue is not None
+        and _value(item, "source_dialogue_plan_id") == _value(dialogue, "id")
+    ]
+    assignment = assignment_candidates[-1] if assignment_candidates else None
+    tasks = pipeline.list_tts_tasks(project_id, plan_id)
+    latest_tasks: dict[str, Any] = {}
+    for item in tasks:
+        if (
+            dialogue is None
+            or assignment is None
+            or _value(item, "source_dialogue_plan_id") != _value(dialogue, "id")
+            or _value(item, "source_voice_assignment_set_id")
+            != _value(assignment, "id")
+        ):
+            continue
+        line_id = str(_value(item, "dialogue_line_id", ""))
+        current = latest_tasks.get(line_id)
+        if current is None or int(_value(item, "version", 0)) > int(
+            _value(current, "version", 0)
+        ):
+            latest_tasks[line_id] = item
+    line_ids = {
+        str(_value(item, "id", "")) for item in (_value(dialogue, "lines", []) or [])
+    }
+    voice_ready = bool(
+        line_ids
+        and set(latest_tasks) == line_ids
+        and all(_status_value(item) == "SUCCEEDED" for item in latest_tasks.values())
+    )
+    audio_timelines = pipeline.list_audio_timelines(project_id, plan_id)
+    timeline_candidates = [
+        item
+        for item in audio_timelines
+        if dialogue is not None
+        and assignment is not None
+        and _value(item, "source_dialogue_plan_id") == _value(dialogue, "id")
+        and _value(item, "source_voice_assignment_set_id") == _value(assignment, "id")
+    ]
+    timeline = timeline_candidates[-1] if timeline_candidates else None
+    voice_tracks = service.list_voice_tracks(project_id, plan_id)
+    matching_voice_tracks = [
+        item
+        for item in voice_tracks
+        if timeline is not None
+        and _value(_value(item, "metadata_json", {}), "source_audio_timeline_id")
+        == _value(timeline, "id")
+    ]
+    subtitle_tracks = service.list_subtitle_tracks(project_id, plan_id)
+    subtitle_ready = False
+    if timeline is not None:
+        for subtitle in reversed(subtitle_tracks):
+            if _value(subtitle, "source_script_revision_id") != _value(
+                timeline, "source_script_revision_id"
+            ):
+                continue
+            try:
+                pipeline.assert_subtitle_timing_matches_audio(timeline, subtitle)
+            except Exception:
+                continue
+            subtitle_ready = True
+            break
+    delivery_attempts = [
+        item
+        for item in service.list_render_attempts(project_id, plan_id)
+        if _status_value(item) == "SUCCEEDED"
+    ]
+    return {
+        "Voice state": (
+            f"READY · {len(line_ids)} lines"
+            if voice_ready
+            else "NOT READY"
+        ),
+        "Audio state": "READY" if timeline and matching_voice_tracks else "NOT READY",
+        "Subtitle state": "READY" if subtitle_ready else "NOT READY",
+        "Delivery artifact": (
+            f"READY · v{_value(delivery_attempts[-1], 'attempt_number', len(delivery_attempts))}"
+            if delivery_attempts
+            else "NOT RENDERED"
+        ),
+    }
+
+
 def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: Any) -> None:
     """Thin post-production workspace backed exclusively by PostProductionService."""
     st.subheader("后期与成片")
@@ -740,6 +837,17 @@ def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: An
     st.caption("后期设置已连接到当前成片版本")
     subtitle_revision_id = _script_revision_id(repository, job)
     plan_id = _value(plan, "id", "plan")
+    pipeline = AudiovisualPipelineService(
+        repository=repository, postproduction_service=service
+    )
+    state_snapshot = _postproduction_state_snapshot(
+        service, pipeline, project.id, plan_id
+    )
+    state_columns = st.columns(4)
+    for column, (label, state) in zip(state_columns, state_snapshot.items()):
+        with column:
+            st.caption(label)
+            st.markdown(f"**{state}**")
     subtitle_tracks = service.list_subtitle_tracks(project.id, plan_id)
     subtitle_track = subtitle_tracks[-1] if subtitle_tracks else None
     with st.container(border=True):
@@ -785,6 +893,8 @@ def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: An
 
     with st.container(border=True):
         st.markdown("### 配音")
+        voice_tracks = service.list_voice_tracks(project.id, plan_id)
+        voice_track = voice_tracks[-1] if voice_tracks else None
         # Consume only the neutral capability projection.  In particular, do
         # not instantiate a provider or issue a live request while rendering.
         try:
@@ -801,21 +911,38 @@ def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: An
             ),
             None,
         )
-        if tts is not None and bool(_value(tts, "ready", False)):
+        if voice_track is not None:
+            st.success("本地 Fake TTS 配音轨已准备好；外部 Provider 调用为 0。")
+        elif tts is not None and bool(_value(tts, "ready", False)):
             st.success("配音能力已准备好，可接入配音轨。")
         elif tts is not None:
             state = _value(tts, "display_state", _value(tts, "state", "需要配置"))
             reason = _value(tts, "safe_reason", None)
-            st.info(f"配音能力：{state}。当前不会伪造音频。")
+            st.info(
+                f"配音能力：{state}。不会调用真实 Provider；"
+                "可使用下方显式标注的本地 Fake TTS 流程。"
+            )
             if reason:
                 st.caption(str(reason)[:180])
         else:
-            st.info("配音能力状态暂不可用；当前不会伪造音频。")
-        voice_tracks = service.list_voice_tracks(project.id, plan_id)
+            st.info(
+                "配音能力状态暂不可用；不会调用真实 Provider，"
+                "可使用下方显式标注的本地 Fake TTS 流程。"
+            )
         if voice_tracks:
             st.caption(f"已有配音轨：{len(voice_tracks)}")
         else:
             st.caption("尚无配音轨")
+            if subtitle_revision_id and st.button(
+                "生成离线 Fake TTS 配音与同步字幕",
+                key=f"post-fake-tts-{plan_id}",
+            ):
+                try:
+                    pipeline.run_fake_pipeline(project.id, plan_id)
+                    st.success("离线配音、音频时间线与同步字幕已生成；外部 Provider 调用为 0")
+                    st.rerun()
+                except Exception as exc:
+                    st.warning(_safe_error(exc, "离线配音与字幕生成失败"))
 
     with st.container(border=True):
         st.markdown("### BGM / 基础混音")
@@ -878,6 +1005,7 @@ def _render_post_workspace(project: Any, job: Any, assembly: Any, repository: An
                     plan_id,
                     subtitle_track_id=_value(subtitle_track, "id") if subtitle_track else None,
                     music_track_id=_value(music, "id") if music else None,
+                    voice_track_id=_value(voice_track, "id") if voice_track else None,
                 )
             st.success("最终后期成片任务已加入后台队列")
             st.session_state[f"post-latest-heavy-job-{plan_id}"] = _value(queued, "id")
@@ -1014,4 +1142,5 @@ __all__ = [
     "_render_history",
     "_render_preview_and_export",
     "_safe_download_name",
+    "_postproduction_state_snapshot",
 ]

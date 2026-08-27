@@ -44,6 +44,15 @@ from .current_state import CurrentProductionState, CurrentProductionStateService
 from .vision_qc import VisionFrameSamplingService, VisionQCResult, VisionQCService
 from .diagnostics import DiagnosticsError, DiagnosticsService, DiskSpaceService
 from .tts_runtime import TTS_LIVE_SMOKE_TEXT, TTSRuntimeError, TTSRuntimeService
+from .audiovisual import (
+    AUDIO_DURATION_CONFLICT,
+    FAKE_TTS_MANIFEST_ID,
+    AudiovisualDeliveryInputs,
+    AudiovisualPipelineError,
+    AudiovisualPipelineService,
+    FakeTTSUniversalRuntime,
+    fake_tts_manifest,
+)
 from .production_queue import ProductionAuthorizationPreview, ProductionQueueError, ProductionQueueService
 from .production_runtime_resolver import ProductionRuntimeResolutionError, ProductionRuntimeResolver
 from .security import (
@@ -168,6 +177,9 @@ __all__ = [
     "VisionFrameSamplingService", "VisionQCResult", "VisionQCService",
     "DiagnosticsError", "DiagnosticsService", "DiskSpaceService",
     "TTS_LIVE_SMOKE_TEXT", "TTSRuntimeError", "TTSRuntimeService",
+    "AUDIO_DURATION_CONFLICT", "FAKE_TTS_MANIFEST_ID",
+    "AudiovisualDeliveryInputs", "AudiovisualPipelineError", "AudiovisualPipelineService",
+    "FakeTTSUniversalRuntime", "fake_tts_manifest",
     "ProductionAuthorizationPreview", "ProductionQueueError", "ProductionQueueService",
     "ProductionRuntimeResolutionError", "ProductionRuntimeResolver",
     "configure_runtime_logging", "sanitize_error", "sanitize_persistent_metadata",

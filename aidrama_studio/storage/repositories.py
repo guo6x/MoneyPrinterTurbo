@@ -43,12 +43,20 @@ from aidrama_studio.domain.final_assembly import (
 )
 from aidrama_studio.domain.post_production import (
     AudioMixConfig,
+    AudioTimeline,
+    AudioTimelineItem,
+    DialogueLine,
+    DialoguePlan,
     MusicTrack,
     PostProductionPlan,
     PostRenderAttempt,
     PostRenderAttemptStatus,
     SubtitleCue,
     SubtitleTrack,
+    TTSTask,
+    TTSTaskStatus,
+    VoiceAssignment,
+    VoiceAssignmentSet,
     VoiceTrack,
 )
 from aidrama_studio.domain.director import (
@@ -2696,6 +2704,365 @@ class ProjectRepository:
         with connect(self.paths.database) as connection:
             rows = connection.execute("SELECT * FROM post_voice_tracks WHERE project_id=? AND plan_id=? ORDER BY created_at,id", (project_id, plan_id)).fetchall()
         return [self._post_voice_from_row(row) for row in rows]
+
+    # Audiovisual delivery truth ---------------------------------------
+    @staticmethod
+    def _dialogue_plan_from_row(row) -> DialoguePlan:
+        return DialoguePlan(
+            id=row["id"],
+            project_id=row["project_id"],
+            plan_id=row["plan_id"],
+            source_script_revision_id=row["source_script_revision_id"],
+            source_shot_plan_revision_id=row["source_shot_plan_revision_id"],
+            version=row["version"],
+            lines=[DialogueLine.model_validate(item) for item in json.loads(row["lines_json"])],
+            lines_sha256=row["lines_sha256"],
+            created_at=row["created_at"],
+        )
+
+    def create_dialogue_plan(self, plan: DialoguePlan) -> DialoguePlan:
+        with connect(self.paths.database) as connection:
+            post_plan = connection.execute(
+                "SELECT project_id FROM post_production_plans WHERE id=?", (plan.plan_id,)
+            ).fetchone()
+            script = connection.execute(
+                "SELECT project_id FROM structured_script_revisions WHERE id=?",
+                (plan.source_script_revision_id,),
+            ).fetchone()
+            shot_plan = connection.execute(
+                "SELECT project_id,source_script_revision_id FROM shot_plan_revisions WHERE id=?",
+                (plan.source_shot_plan_revision_id,),
+            ).fetchone()
+            if (
+                post_plan is None
+                or post_plan["project_id"] != plan.project_id
+                or script is None
+                or script["project_id"] != plan.project_id
+                or shot_plan is None
+                or shot_plan["project_id"] != plan.project_id
+                or shot_plan["source_script_revision_id"] != plan.source_script_revision_id
+            ):
+                raise ValueError("DialoguePlan provenance 不属于该项目/plan")
+            connection.execute(
+                "INSERT INTO post_dialogue_plans(id,project_id,plan_id,source_script_revision_id,source_shot_plan_revision_id,version,lines_json,lines_sha256,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    plan.id,
+                    plan.project_id,
+                    plan.plan_id,
+                    plan.source_script_revision_id,
+                    plan.source_shot_plan_revision_id,
+                    plan.version,
+                    json.dumps([item.model_dump(mode="json") for item in plan.lines], ensure_ascii=False, sort_keys=True),
+                    plan.lines_sha256,
+                    plan.created_at,
+                ),
+            )
+        created = self.get_dialogue_plan(plan.id)
+        if created is None:
+            raise RuntimeError("DialoguePlan persistence failed")
+        return created
+
+    def get_dialogue_plan(self, dialogue_plan_id: str) -> DialoguePlan | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM post_dialogue_plans WHERE id=?", (dialogue_plan_id,)
+            ).fetchone()
+        return self._dialogue_plan_from_row(row) if row else None
+
+    def list_dialogue_plans(self, project_id: str, plan_id: str) -> list[DialoguePlan]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(
+                "SELECT * FROM post_dialogue_plans WHERE project_id=? AND plan_id=? ORDER BY version,id",
+                (project_id, plan_id),
+            ).fetchall()
+        return [self._dialogue_plan_from_row(row) for row in rows]
+
+    @staticmethod
+    def _voice_assignment_set_from_row(row) -> VoiceAssignmentSet:
+        return VoiceAssignmentSet(
+            id=row["id"],
+            project_id=row["project_id"],
+            plan_id=row["plan_id"],
+            source_dialogue_plan_id=row["source_dialogue_plan_id"],
+            version=row["version"],
+            assignments=[VoiceAssignment.model_validate(item) for item in json.loads(row["assignments_json"])],
+            assignments_sha256=row["assignments_sha256"],
+            created_at=row["created_at"],
+        )
+
+    def create_voice_assignment_set(self, assignment_set: VoiceAssignmentSet) -> VoiceAssignmentSet:
+        with connect(self.paths.database) as connection:
+            dialogue = connection.execute(
+                "SELECT project_id,plan_id FROM post_dialogue_plans WHERE id=?",
+                (assignment_set.source_dialogue_plan_id,),
+            ).fetchone()
+            if (
+                dialogue is None
+                or dialogue["project_id"] != assignment_set.project_id
+                or dialogue["plan_id"] != assignment_set.plan_id
+            ):
+                raise ValueError("VoiceAssignmentSet provenance 不属于该项目/plan")
+            connection.execute(
+                "INSERT INTO post_voice_assignment_sets(id,project_id,plan_id,source_dialogue_plan_id,version,assignments_json,assignments_sha256,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    assignment_set.id,
+                    assignment_set.project_id,
+                    assignment_set.plan_id,
+                    assignment_set.source_dialogue_plan_id,
+                    assignment_set.version,
+                    json.dumps([item.model_dump(mode="json") for item in assignment_set.assignments], ensure_ascii=False, sort_keys=True),
+                    assignment_set.assignments_sha256,
+                    assignment_set.created_at,
+                ),
+            )
+        created = self.get_voice_assignment_set(assignment_set.id)
+        if created is None:
+            raise RuntimeError("VoiceAssignmentSet persistence failed")
+        return created
+
+    def get_voice_assignment_set(self, assignment_set_id: str) -> VoiceAssignmentSet | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM post_voice_assignment_sets WHERE id=?", (assignment_set_id,)
+            ).fetchone()
+        return self._voice_assignment_set_from_row(row) if row else None
+
+    def list_voice_assignment_sets(self, project_id: str, plan_id: str) -> list[VoiceAssignmentSet]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(
+                "SELECT * FROM post_voice_assignment_sets WHERE project_id=? AND plan_id=? ORDER BY version,id",
+                (project_id, plan_id),
+            ).fetchall()
+        return [self._voice_assignment_set_from_row(row) for row in rows]
+
+    @staticmethod
+    def _tts_task_from_row(row) -> TTSTask:
+        return TTSTask(
+            id=row["id"],
+            project_id=row["project_id"],
+            plan_id=row["plan_id"],
+            source_dialogue_plan_id=row["source_dialogue_plan_id"],
+            source_voice_assignment_set_id=row["source_voice_assignment_set_id"],
+            source_script_revision_id=row["source_script_revision_id"],
+            dialogue_line_id=row["dialogue_line_id"],
+            shot_id=row["shot_id"],
+            version=row["version"],
+            text=row["text"],
+            voice_profile=row["voice_profile"],
+            language=row["language"],
+            sample_rate=row["sample_rate"],
+            manifest_id=row["manifest_id"],
+            manifest_hash=row["manifest_hash"],
+            request_sha256=row["request_sha256"],
+            status=TTSTaskStatus(row["status"]),
+            output_relative_path=row["output_relative_path"],
+            output_sha256=row["output_sha256"],
+            output_size_bytes=row["output_size_bytes"],
+            duration_seconds=row["duration_seconds"],
+            metadata_json=json.loads(row["metadata_json"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def create_tts_task(self, task: TTSTask) -> TTSTask:
+        with connect(self.paths.database) as connection:
+            dialogue = connection.execute(
+                "SELECT project_id,plan_id,source_script_revision_id FROM post_dialogue_plans WHERE id=?",
+                (task.source_dialogue_plan_id,),
+            ).fetchone()
+            assignment_set = connection.execute(
+                "SELECT project_id,plan_id,source_dialogue_plan_id FROM post_voice_assignment_sets WHERE id=?",
+                (task.source_voice_assignment_set_id,),
+            ).fetchone()
+            if (
+                dialogue is None
+                or assignment_set is None
+                or dialogue["project_id"] != task.project_id
+                or dialogue["plan_id"] != task.plan_id
+                or dialogue["source_script_revision_id"] != task.source_script_revision_id
+                or assignment_set["project_id"] != task.project_id
+                or assignment_set["plan_id"] != task.plan_id
+                or assignment_set["source_dialogue_plan_id"] != task.source_dialogue_plan_id
+            ):
+                raise ValueError("TTSTask provenance 不属于该项目/plan")
+            connection.execute(
+                "INSERT INTO post_tts_tasks(id,project_id,plan_id,source_dialogue_plan_id,source_voice_assignment_set_id,source_script_revision_id,dialogue_line_id,shot_id,version,text,voice_profile,language,sample_rate,manifest_id,manifest_hash,request_sha256,status,output_relative_path,output_sha256,output_size_bytes,duration_seconds,metadata_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                self._tts_task_values(task),
+            )
+        created = self.get_tts_task(task.id)
+        if created is None:
+            raise RuntimeError("TTSTask persistence failed")
+        return created
+
+    @staticmethod
+    def _tts_task_values(task: TTSTask) -> tuple[object, ...]:
+        return (
+            task.id,
+            task.project_id,
+            task.plan_id,
+            task.source_dialogue_plan_id,
+            task.source_voice_assignment_set_id,
+            task.source_script_revision_id,
+            task.dialogue_line_id,
+            task.shot_id,
+            task.version,
+            task.text,
+            task.voice_profile,
+            task.language,
+            task.sample_rate,
+            task.manifest_id,
+            task.manifest_hash,
+            task.request_sha256,
+            task.status.value,
+            task.output_relative_path,
+            task.output_sha256,
+            task.output_size_bytes,
+            task.duration_seconds,
+            json.dumps(task.metadata_json, ensure_ascii=False, sort_keys=True),
+            task.created_at,
+            task.updated_at,
+        )
+
+    def update_tts_task(self, task: TTSTask) -> TTSTask:
+        current = self.get_tts_task(task.id)
+        if current is None:
+            raise KeyError("TTSTask 不存在")
+        immutable = (
+            "project_id",
+            "plan_id",
+            "source_dialogue_plan_id",
+            "source_voice_assignment_set_id",
+            "source_script_revision_id",
+            "dialogue_line_id",
+            "shot_id",
+            "version",
+            "text",
+            "voice_profile",
+            "language",
+            "sample_rate",
+            "manifest_id",
+            "manifest_hash",
+            "request_sha256",
+            "created_at",
+        )
+        if any(getattr(current, name) != getattr(task, name) for name in immutable):
+            raise ValueError("TTSTask immutable input/provenance 不可变更")
+        if current.status is TTSTaskStatus.SUCCEEDED:
+            raise ValueError("成功的 TTSTask artifact 不可覆盖")
+        with connect(self.paths.database) as connection:
+            connection.execute(
+                "UPDATE post_tts_tasks SET status=?,output_relative_path=?,output_sha256=?,output_size_bytes=?,duration_seconds=?,metadata_json=?,updated_at=? WHERE id=?",
+                (
+                    task.status.value,
+                    task.output_relative_path,
+                    task.output_sha256,
+                    task.output_size_bytes,
+                    task.duration_seconds,
+                    json.dumps(task.metadata_json, ensure_ascii=False, sort_keys=True),
+                    task.updated_at,
+                    task.id,
+                ),
+            )
+        updated = self.get_tts_task(task.id)
+        if updated is None:
+            raise RuntimeError("TTSTask update failed")
+        return updated
+
+    def get_tts_task(self, task_id: str) -> TTSTask | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute("SELECT * FROM post_tts_tasks WHERE id=?", (task_id,)).fetchone()
+        return self._tts_task_from_row(row) if row else None
+
+    def list_tts_tasks(self, project_id: str, plan_id: str) -> list[TTSTask]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(
+                "SELECT * FROM post_tts_tasks WHERE project_id=? AND plan_id=? ORDER BY created_at,id",
+                (project_id, plan_id),
+            ).fetchall()
+        return [self._tts_task_from_row(row) for row in rows]
+
+    @staticmethod
+    def _audio_timeline_from_row(row) -> AudioTimeline:
+        return AudioTimeline(
+            id=row["id"],
+            project_id=row["project_id"],
+            plan_id=row["plan_id"],
+            source_dialogue_plan_id=row["source_dialogue_plan_id"],
+            source_voice_assignment_set_id=row["source_voice_assignment_set_id"],
+            source_script_revision_id=row["source_script_revision_id"],
+            version=row["version"],
+            sample_rate=row["sample_rate"],
+            items=[AudioTimelineItem.model_validate(item) for item in json.loads(row["items_json"])],
+            content_end_seconds=row["content_end_seconds"],
+            duration_seconds=row["duration_seconds"],
+            artifact_relative_path=row["artifact_relative_path"],
+            artifact_sha256=row["artifact_sha256"],
+            artifact_size_bytes=row["artifact_size_bytes"],
+            timeline_sha256=row["timeline_sha256"],
+            created_at=row["created_at"],
+        )
+
+    def create_audio_timeline(self, timeline: AudioTimeline) -> AudioTimeline:
+        with connect(self.paths.database) as connection:
+            dialogue = connection.execute(
+                "SELECT project_id,plan_id,source_script_revision_id FROM post_dialogue_plans WHERE id=?",
+                (timeline.source_dialogue_plan_id,),
+            ).fetchone()
+            assignment_set = connection.execute(
+                "SELECT project_id,plan_id,source_dialogue_plan_id FROM post_voice_assignment_sets WHERE id=?",
+                (timeline.source_voice_assignment_set_id,),
+            ).fetchone()
+            if (
+                dialogue is None
+                or assignment_set is None
+                or dialogue["project_id"] != timeline.project_id
+                or dialogue["plan_id"] != timeline.plan_id
+                or dialogue["source_script_revision_id"] != timeline.source_script_revision_id
+                or assignment_set["project_id"] != timeline.project_id
+                or assignment_set["plan_id"] != timeline.plan_id
+                or assignment_set["source_dialogue_plan_id"] != timeline.source_dialogue_plan_id
+            ):
+                raise ValueError("AudioTimeline provenance 不属于该项目/plan")
+            connection.execute(
+                "INSERT INTO post_audio_timelines(id,project_id,plan_id,source_dialogue_plan_id,source_voice_assignment_set_id,source_script_revision_id,version,sample_rate,items_json,content_end_seconds,duration_seconds,artifact_relative_path,artifact_sha256,artifact_size_bytes,timeline_sha256,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    timeline.id,
+                    timeline.project_id,
+                    timeline.plan_id,
+                    timeline.source_dialogue_plan_id,
+                    timeline.source_voice_assignment_set_id,
+                    timeline.source_script_revision_id,
+                    timeline.version,
+                    timeline.sample_rate,
+                    json.dumps([item.model_dump(mode="json") for item in timeline.items], ensure_ascii=False, sort_keys=True),
+                    timeline.content_end_seconds,
+                    timeline.duration_seconds,
+                    timeline.artifact_relative_path,
+                    timeline.artifact_sha256,
+                    timeline.artifact_size_bytes,
+                    timeline.timeline_sha256,
+                    timeline.created_at,
+                ),
+            )
+        created = self.get_audio_timeline(timeline.id)
+        if created is None:
+            raise RuntimeError("AudioTimeline persistence failed")
+        return created
+
+    def get_audio_timeline(self, timeline_id: str) -> AudioTimeline | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM post_audio_timelines WHERE id=?", (timeline_id,)
+            ).fetchone()
+        return self._audio_timeline_from_row(row) if row else None
+
+    def list_audio_timelines(self, project_id: str, plan_id: str) -> list[AudioTimeline]:
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(
+                "SELECT * FROM post_audio_timelines WHERE project_id=? AND plan_id=? ORDER BY version,id",
+                (project_id, plan_id),
+            ).fetchall()
+        return [self._audio_timeline_from_row(row) for row in rows]
 
     def create_post_music_track(self, track: MusicTrack) -> MusicTrack:
         with connect(self.paths.database) as connection:

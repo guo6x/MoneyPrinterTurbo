@@ -1847,6 +1847,127 @@ def _migration_032_shot_source_selection_kind_forward_repair(
         )
 
 
+def _migration_033_audiovisual_delivery_pipeline(
+    connection: sqlite3.Connection,
+) -> None:
+    """Persist immutable dialogue, voice, TTS, and audio timing truth."""
+
+    connection.execute(
+        """
+        CREATE TABLE post_dialogue_plans (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            source_script_revision_id TEXT NOT NULL,
+            source_shot_plan_revision_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            lines_json TEXT NOT NULL,
+            lines_sha256 TEXT NOT NULL CHECK (length(lines_sha256) = 64),
+            created_at TEXT NOT NULL,
+            UNIQUE(plan_id, version),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_id) REFERENCES post_production_plans(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_script_revision_id) REFERENCES structured_script_revisions(id) ON DELETE RESTRICT,
+            FOREIGN KEY(source_shot_plan_revision_id) REFERENCES shot_plan_revisions(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE post_voice_assignment_sets (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            source_dialogue_plan_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            assignments_json TEXT NOT NULL,
+            assignments_sha256 TEXT NOT NULL CHECK (length(assignments_sha256) = 64),
+            created_at TEXT NOT NULL,
+            UNIQUE(source_dialogue_plan_id, version),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_id) REFERENCES post_production_plans(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_dialogue_plan_id) REFERENCES post_dialogue_plans(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE post_tts_tasks (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            source_dialogue_plan_id TEXT NOT NULL,
+            source_voice_assignment_set_id TEXT NOT NULL,
+            source_script_revision_id TEXT NOT NULL,
+            dialogue_line_id TEXT NOT NULL,
+            shot_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            text TEXT NOT NULL,
+            voice_profile TEXT NOT NULL,
+            language TEXT NOT NULL,
+            sample_rate INTEGER NOT NULL CHECK (sample_rate >= 8000 AND sample_rate <= 192000),
+            manifest_id TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+            request_sha256 TEXT NOT NULL CHECK (length(request_sha256) = 64),
+            status TEXT NOT NULL CHECK (status IN ('PLANNED','SUCCEEDED','FAILED')),
+            output_relative_path TEXT,
+            output_sha256 TEXT,
+            output_size_bytes INTEGER,
+            duration_seconds REAL,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source_dialogue_plan_id, dialogue_line_id, version),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_id) REFERENCES post_production_plans(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_dialogue_plan_id) REFERENCES post_dialogue_plans(id) ON DELETE RESTRICT,
+            FOREIGN KEY(source_voice_assignment_set_id) REFERENCES post_voice_assignment_sets(id) ON DELETE RESTRICT,
+            FOREIGN KEY(source_script_revision_id) REFERENCES structured_script_revisions(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE post_audio_timelines (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            source_dialogue_plan_id TEXT NOT NULL,
+            source_voice_assignment_set_id TEXT NOT NULL,
+            source_script_revision_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            sample_rate INTEGER NOT NULL,
+            items_json TEXT NOT NULL,
+            content_end_seconds REAL NOT NULL CHECK (content_end_seconds > 0),
+            duration_seconds REAL NOT NULL CHECK (duration_seconds > 0),
+            artifact_relative_path TEXT NOT NULL,
+            artifact_sha256 TEXT NOT NULL CHECK (length(artifact_sha256) = 64),
+            artifact_size_bytes INTEGER NOT NULL CHECK (artifact_size_bytes > 0),
+            timeline_sha256 TEXT NOT NULL CHECK (length(timeline_sha256) = 64),
+            created_at TEXT NOT NULL,
+            UNIQUE(plan_id, version),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_id) REFERENCES post_production_plans(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_dialogue_plan_id) REFERENCES post_dialogue_plans(id) ON DELETE RESTRICT,
+            FOREIGN KEY(source_voice_assignment_set_id) REFERENCES post_voice_assignment_sets(id) ON DELETE RESTRICT,
+            FOREIGN KEY(source_script_revision_id) REFERENCES structured_script_revisions(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_post_dialogue_plans ON post_dialogue_plans(project_id, plan_id, version)"
+    )
+    connection.execute(
+        "CREATE INDEX idx_post_voice_assignments ON post_voice_assignment_sets(project_id, plan_id, version)"
+    )
+    connection.execute(
+        "CREATE INDEX idx_post_tts_tasks ON post_tts_tasks(project_id, plan_id, dialogue_line_id, version)"
+    )
+    connection.execute(
+        "CREATE INDEX idx_post_audio_timelines ON post_audio_timelines(project_id, plan_id, version)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1880,6 +2001,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (30, _migration_030_final_duration_control),
     (31, _migration_031_runtime_plan_schema_forward_repair),
     (32, _migration_032_shot_source_selection_kind_forward_repair),
+    (33, _migration_033_audiovisual_delivery_pipeline),
 )
 
 
