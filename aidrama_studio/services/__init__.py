@@ -50,6 +50,7 @@ from .production_queue import ProductionAuthorizationPreview, ProductionQueueErr
 from .production_reliability import PaidBudgetError, PaidBudgetExhausted, PaidBudgetService
 from .production_recovery import ProductionRecoveryService
 from .production_runtime_resolver import ProductionRuntimeResolutionError, ProductionRuntimeResolver
+from .auto_orchestrator import AutoOrchestratorError, AutoOrchestratorService
 from .security import (
     configure_runtime_logging,
     sanitize_error,
@@ -183,6 +184,7 @@ __all__ = [
     "ProductionAuthorizationPreview", "ProductionQueueError", "ProductionQueueService",
     "PaidBudgetError", "PaidBudgetExhausted", "PaidBudgetService", "ProductionRecoveryService",
     "ProductionRuntimeResolutionError", "ProductionRuntimeResolver",
+    "AutoOrchestratorError", "AutoOrchestratorService",
     "configure_runtime_logging", "sanitize_error", "sanitize_persistent_metadata",
     "ProviderReadinessService", "CapabilityReadiness", "ReadinessState",
     "OfflineLivePreflightService", "OfflineProfilePreflight",

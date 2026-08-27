@@ -457,7 +457,11 @@ def test_migration_032_repairs_recorded_legacy_source_decision_schema() -> None:
     }
     assert "selection_kind" not in before
 
+<<<<<<< HEAD
     assert apply_migrations(connection) == len(MIGRATIONS) - 31
+=======
+    assert apply_migrations(connection) == 2
+>>>>>>> 25e23855222e43589c1654b9408eb73187014751
     columns = {
         row[1]
         for row in connection.execute(

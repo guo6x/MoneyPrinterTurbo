@@ -81,6 +81,16 @@ from .production_reliability import (
     PaidCreateReservation,
     PaidCreateStatus,
 )
+from .auto_orchestrator import (
+    AutoAction,
+    AutoAgentEvent,
+    AutoDecision,
+    AutoOrchestrationState,
+    AutoPaidAuthorization,
+    AutoPaidAuthorizationPreview,
+    AutoRunStatus,
+    AutoStage,
+)
 
 __all__ = [
     "AspectRatio",
@@ -121,4 +131,6 @@ __all__ = [
     "ProviderSelectionSettings", "ProviderTask", "ProviderVerificationState",
     "PaidBudgetLedger", "PaidBudgetProjection", "PaidCreateReservation", "PaidCreateStatus",
     "VisionFrameManifest", "VisionAnalysisRecord",
+    "AutoAction", "AutoAgentEvent", "AutoDecision", "AutoOrchestrationState",
+    "AutoPaidAuthorization", "AutoPaidAuthorizationPreview", "AutoRunStatus", "AutoStage",
 ]
