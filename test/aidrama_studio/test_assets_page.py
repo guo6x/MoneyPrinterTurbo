@@ -104,7 +104,14 @@ def _version(*, version_id="v1", source_revision="story-v1"):
 def test_page_loads_and_exposes_required_center_sections():
     assert callable(assets.render)
     source = Path(assets.__file__).read_text(encoding="utf-8")
-    for label in ("Reference Readiness", "Characters", "Locations", "Styles", "Props", "Version history", "生成候选图"):
+    for label in (
+        "资产总览",
+        "角色详情",
+        "场景详情",
+        "候选对比 / 锁定",
+        "参考版本",
+        "请求生成候选图",
+    ):
         assert label in source
 
 
@@ -140,10 +147,15 @@ page.render()
     ).run(timeout=30)
 
     assert not app.exception
-    assert [tab.label for tab in app.tabs] == ["Characters", "Locations", "Styles", "Props"]
+    assert [tab.label for tab in app.tabs] == [
+        "资产总览",
+        "角色详情",
+        "场景详情",
+        "候选对比 / 锁定",
+    ]
     assert [metric.label for metric in app.metric] == [
-        "Characters total", "Characters used", "Characters locked", "Characters missing",
-        "Locations total", "Locations used", "Locations locked", "Locations missing",
+        "角色总数", "已使用", "已锁定", "待补齐",
+        "场景总数", "已使用", "已锁定", "待补齐",
     ]
 
 

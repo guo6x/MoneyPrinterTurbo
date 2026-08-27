@@ -5,6 +5,7 @@ import streamlit as st
 from aidrama_studio.branding import BRAND
 from aidrama_studio.pages import (
     assets,
+    creative,
     dashboard,
     director,
     postproduction,
@@ -17,7 +18,8 @@ from aidrama_studio.pages import (
 
 PAGE_DEFINITIONS = (
     ("dashboard", "工作台", "dashboard", dashboard.render),
-    ("story", "创意与剧本", "story", story.render),
+    ("creative", "创意", "creative", creative.render),
+    ("story", "故事 / 剧本", "story", story.render),
     ("assets", "角色与场景", "assets", assets.render),
     ("director", "分镜", "director", director.render),
     ("production", "制作", "production", production.render),
@@ -25,6 +27,32 @@ PAGE_DEFINITIONS = (
     ("postproduction", "成片", "postproduction", postproduction.render),
     ("settings", "设置", "settings", settings.render),
 )
+
+# Deep links from the pre-V1 shell may still contain these keys.  Keep them as
+# non-visible aliases so bookmarks and in-app recovery links land on the new
+# information architecture without adding duplicate navigation items.
+PAGE_ALIASES = {
+    "workbench": "dashboard",
+    "creative-intake": "creative",
+    "creative_intake": "creative",
+    "story-script": "story",
+    "story_script": "story",
+    "references": "assets",
+    "storyboard": "director",
+    "final": "postproduction",
+    "post": "postproduction",
+}
+
+
+def canonical_page_key(page_key: str | None) -> str | None:
+    """Return a visible route key for a route or its legacy deep-link alias."""
+
+    if page_key is None:
+        return None
+    key = str(page_key).strip().strip("/").casefold()
+    if not key:
+        return None
+    return PAGE_ALIASES.get(key, key)
 
 
 def build_navigation():
@@ -37,6 +65,7 @@ def build_navigation():
         {
             BRAND.product_name: [
                 pages["dashboard"],
+                pages["creative"],
                 pages["story"],
                 pages["assets"],
                 pages["director"],
@@ -48,7 +77,7 @@ def build_navigation():
         },
         position="sidebar",
     )
-    requested = st.session_state.pop("_aidrama_next_page", None)
+    requested = canonical_page_key(st.session_state.pop("_aidrama_next_page", None))
     if requested in pages:
         project_id = st.session_state.get("current_project_id")
         if project_id:
@@ -64,6 +93,7 @@ def build_navigation():
 
 
 def request_navigation(page_key: str) -> None:
+    page_key = canonical_page_key(page_key) or "dashboard"
     project_id = st.session_state.get("current_project_id")
     if project_id:
         st.query_params["project"] = project_id
@@ -73,3 +103,13 @@ def request_navigation(page_key: str) -> None:
 
 def set_current_project(project_id: str | None) -> None:
     st.session_state.current_project_id = project_id
+
+
+__all__ = [
+    "PAGE_ALIASES",
+    "PAGE_DEFINITIONS",
+    "build_navigation",
+    "canonical_page_key",
+    "request_navigation",
+    "set_current_project",
+]

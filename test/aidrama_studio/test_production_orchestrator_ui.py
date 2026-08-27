@@ -23,7 +23,7 @@ def _execution(shot_id, status="SUCCEEDED"):
 
 def test_director_console_has_required_user_facing_sections():
     source = Path(page.__file__).read_text(encoding="utf-8")
-    for label in ("制作准备度", "开始整剧制作", "继续制作", "停止制作", "镜头生产 Board", "当前镜头", "QC未通过", "人审拒绝", "高级信息 / 调试信息"):
+    for label in ("制作准备度", "开始整剧制作", "继续制作", "停止制作", "镜头生产 Board", "当前镜头", "QC 未通过", "人审要求修改", "执行详情（高级）"):
         assert label in source
     assert "Traceback (most recent call last)" in source
     assert "生成视频" not in source
@@ -44,7 +44,7 @@ def test_default_flow_precedes_technical_job_controls():
     readiness = source.index("_render_readiness_console(readiness)")
     primary = source.index("_render_primary_action(", readiness)
     board = source.index("_render_shot_board(", primary)
-    advanced = source.index('st.expander("高级信息 / 调试信息"', board)
+    advanced = source.index('st.expander("执行详情（高级）"', board)
     assert readiness < primary < board < advanced
 
 
@@ -71,8 +71,8 @@ page.render()
 """
     ).run()
     assert not app.exception
-    assert any(button.label == "开始整剧制作" and not button.disabled for button in app.button)
-    assert app.expander and app.expander[0].label == "高级信息 / 调试信息"
+    assert any(button.label == "开始整剧制作" and button.disabled for button in app.button)
+    assert app.expander and app.expander[-1].label == "执行详情（高级）"
     source = Path(page.__file__).read_text(encoding="utf-8")
     assert 'expanded=bool(st.session_state.get(advanced_key))' in source
 
@@ -140,7 +140,7 @@ page._render_shot_board(Production(), Execution(), QC(), project, job, {'total_s
     ).run()
     assert not app.exception
     assert any("QC 未通过" in item.value for item in app.error)
-    assert any("人审拒绝" in item.value for item in app.warning)
+    assert any("人审要求修改" in item.value for item in app.warning)
 
 
 def test_runtime_failed_shot_renders_sanitized_reason():
@@ -242,7 +242,7 @@ def test_interrupted_primary_action_invokes_resume(monkeypatch):
     assert calls and calls[0][0][0] == "project-1" and calls[0][0][1] == "job-1"
 
 
-def test_ready_primary_action_creates_job_then_runs_canonical_orchestrator(monkeypatch):
+def test_ready_primary_action_without_authorization_preview_fails_closed(monkeypatch):
     calls = []
     job = _job("READY")
 
@@ -254,12 +254,14 @@ def test_ready_primary_action_creates_job_then_runs_canonical_orchestrator(monke
         calls.append(("create",))
         return job
 
-    monkeypatch.setattr(page.st, "button", lambda label, **kwargs: label == "开始整剧制作")
+    rendered = []
+    monkeypatch.setattr(page.st, "button", lambda label, **kwargs: rendered.append((label, kwargs)) or False)
     monkeypatch.setattr(page.st, "rerun", lambda: None)
     page._render_primary_action(
         Orchestrator(), None, SimpleNamespace(id="project-1"), None, {"ready": True}, {}, ensure_job=ensure_job
     )
-    assert calls == [("create",), ("run", ("project-1", "job-1"))]
+    assert calls == []
+    assert rendered == [("开始整剧制作", {"type": "primary", "disabled": True, "key": "prepare-production-project-1"})]
 
 
 def test_blocked_primary_action_is_disabled(monkeypatch):
@@ -269,7 +271,7 @@ def test_blocked_primary_action_is_disabled(monkeypatch):
     assert calls == [("开始整剧制作", True)]
 
 
-def test_paid_authorization_renders_region_reference_count_and_cloud_disclosure():
+def test_paid_authorization_is_creator_facing_and_hides_provider_identifiers():
     app = AppTest.from_string(
         """
 from types import SimpleNamespace
@@ -334,23 +336,24 @@ page._render_primary_action(
 
     assert not app.exception
     metrics = {item.label: str(item.value) for item in app.metric}
-    assert metrics["视频 Provider"] == "CN_VIDEO"
-    assert metrics["模型"] == "video-model-v1"
-    assert metrics["区域 / 部署类型"] == "MAINLAND_CHINA / CN_VIDEO_PUBLIC"
+    assert metrics["镜头数量"] == "1"
     assert metrics["参考图数量"] == "2"
-    assert metrics["目标成片时长"] == "120s"
-    assert metrics["Provider 原生生成"] == "1920x1080 · 24fps"
-    assert metrics["最终交付"] == "3840x2160 · 30fps"
-    assert any(item.label == "生成简报 · 付费前可编辑" for item in app.expander)
-    assert any(item.label == "人物 / 动作" for item in app.text_area)
-    info = "\n".join(str(item.value) for item in app.info)
-    assert "不是原生 4K" in info
+    assert metrics["目标时长"] == "120 秒"
+    assert metrics["最多新建"] == "1 个视频任务"
+    assert "生成画面 1920x1080 → 最终交付 3840x2160" in "\n".join(str(item.value) for item in app.caption)
     warning = "\n".join(str(item.value) for item in app.warning)
-    assert "CN_VIDEO" in warning
-    assert "MAINLAND_CHINA" in warning
+    assert "中国大陆" in warning
     assert "文本" in warning and "参考图片" in warning
+    visible = "\n".join(
+        str(item.value)
+        for collection in (app.markdown, app.caption, app.info, app.warning)
+        for item in collection
+    )
+    for technical in ("CN_VIDEO", "video-model-v1", "cn-video-endpoint", "CN_VIDEO_PUBLIC"):
+        assert technical not in visible
     assert app.checkbox[0].key.endswith("a" * 64)
-    assert "区域与传输内容披露" in app.checkbox[0].label
+    assert "确认素材传输范围" in app.checkbox[0].label
+    assert "最多新建 1 个视频任务" in app.checkbox[0].label
 
 
 def test_failure_reason_does_not_leak_traceback():
