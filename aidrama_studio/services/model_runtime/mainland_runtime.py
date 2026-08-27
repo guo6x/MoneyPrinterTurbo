@@ -12,8 +12,10 @@ import base64
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 import hashlib
+import ipaddress
 import os
 from pathlib import Path
+import socket
 import tempfile
 from types import MappingProxyType
 from typing import Any
@@ -258,6 +260,7 @@ class ContentAddressedArtifactSink(ProviderArtifactSink):
         root: str | Path,
         *,
         session: Any | None = None,
+        resolver: Any | None = None,
         timeout_seconds: float = 120.0,
         max_bytes: int = 1024 * 1024 * 1024,
     ) -> None:
@@ -271,6 +274,7 @@ class ContentAddressedArtifactSink(ProviderArtifactSink):
         self.session = session or requests.Session()
         if session is None and hasattr(self.session, "trust_env"):
             self.session.trust_env = False
+        self._resolver = resolver or socket.getaddrinfo
 
     def persist_bytes(
         self,
@@ -300,23 +304,14 @@ class ContentAddressedArtifactSink(ProviderArtifactSink):
         mime_type: str,
         safe_metadata: Mapping[str, object],
     ) -> ContentRef:
-        try:
-            parsed = urlsplit(url)
-            port = parsed.port
-        except ValueError as exc:
-            raise TransportError("provider artifact URL is invalid") from exc
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or port is not None
-            or parsed.fragment
-        ):
-            raise TransportError("provider artifact URL must be credential-free HTTPS")
+        safe_url = self._validate_remote_url(url)
+        persisted_metadata: dict[str, object] = {}
+        provider = safe_metadata.get("provider")
+        if isinstance(provider, str) and provider.strip() and "://" not in provider:
+            persisted_metadata["provider"] = provider.strip()
         try:
             response = self.session.get(
-                url,
+                safe_url,
                 headers={"Accept": mime_type + ",application/octet-stream"},
                 timeout=self.timeout_seconds,
                 stream=True,
@@ -326,12 +321,18 @@ class ContentAddressedArtifactSink(ProviderArtifactSink):
             raise TransportError(
                 f"provider artifact fetch failed: {type(exc).__name__}"
             ) from exc
-        if int(response.status_code) < 200 or int(response.status_code) >= 300:
+        status_code = int(response.status_code)
+        if 300 <= status_code < 400:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+            raise TransportError("provider artifact redirects are not allowed")
+        if status_code < 200 or status_code >= 300:
             close = getattr(response, "close", None)
             if callable(close):
                 close()
             raise TransportError(
-                f"provider artifact fetch returned {int(response.status_code)}"
+                f"provider artifact fetch returned {status_code}"
             )
         self.root.mkdir(parents=True, exist_ok=True)
         handle = tempfile.NamedTemporaryFile(
@@ -384,8 +385,69 @@ class ContentAddressedArtifactSink(ProviderArtifactSink):
             request_id=request_id,
             role=role,
             mime_type=mime_type,
-            safe_metadata=safe_metadata,
+            safe_metadata=persisted_metadata,
         )
+
+    def _validate_remote_url(self, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise TransportError("provider artifact URL is invalid")
+        url = value.strip()
+        if "\\" in url or any(ord(character) < 32 for character in url):
+            raise TransportError("provider artifact URL is invalid")
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError as exc:
+            raise TransportError("provider artifact URL is invalid") from exc
+        raw_hostname = (parsed.hostname or "").casefold().rstrip(".")
+        if (
+            parsed.scheme.casefold() != "https"
+            or not raw_hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in (None, 443)
+            or parsed.fragment
+        ):
+            raise TransportError("provider artifact URL must use public HTTPS")
+        if raw_hostname == "localhost" or raw_hostname.endswith(".localhost"):
+            raise TransportError("provider artifact destination is not public")
+        if "%" in raw_hostname:
+            raise TransportError("provider artifact hostname is invalid")
+        try:
+            address = ipaddress.ip_address(raw_hostname)
+        except ValueError:
+            address = None
+        if address is not None:
+            self._require_public_address(address)
+            return url
+        try:
+            hostname = raw_hostname.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise TransportError("provider artifact hostname is invalid") from exc
+        self._resolve_public_addresses(hostname)
+        return url
+
+    def _resolve_public_addresses(self, hostname: str) -> None:
+        try:
+            answers = tuple(self._resolver(hostname, 443, type=socket.SOCK_STREAM))
+        except (OSError, socket.gaierror) as exc:
+            raise TransportError("provider artifact hostname cannot resolve") from exc
+        if not answers:
+            raise TransportError("provider artifact hostname cannot resolve")
+        for answer in answers:
+            try:
+                raw_address = answer[4][0]
+                address = ipaddress.ip_address(str(raw_address).split("%", 1)[0])
+            except (IndexError, TypeError, ValueError) as exc:
+                raise TransportError("provider artifact DNS answer is invalid") from exc
+            self._require_public_address(address)
+
+    @staticmethod
+    def _require_public_address(
+        address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    ) -> None:
+        if not address.is_global:
+            raise TransportError("provider artifact destination is not public")
 
     def _persist(
         self,

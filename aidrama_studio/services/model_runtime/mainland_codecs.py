@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-import hashlib
+import ipaddress
 import json
 import math
 from typing import Any, ClassVar, Protocol, runtime_checkable
@@ -42,12 +42,6 @@ _ALIBABA_MAINLAND_RESULT_HOST_SUFFIXES = (
     ".oss-cn-hangzhou.aliyuncs.com",
     ".oss-cn-shanghai.aliyuncs.com",
     ".oss-cn-shenzhen.aliyuncs.com",
-)
-_WAN_MAINLAND_RESULT_HOSTS = frozenset(
-    {
-        "dashscope-result-bj.oss-cn-beijing.aliyuncs.com",
-        "dashscope-result-hz.oss-cn-hangzhou.aliyuncs.com",
-    }
 )
 _SEEDANCE_MAINLAND_RESULT_HOSTS = frozenset(
     {"ark-content-generation-v2-cn-beijing.tos-cn-beijing.volces.com"}
@@ -315,6 +309,48 @@ def _provider_input_uri(
     return value
 
 
+def _validate_ephemeral_result_url(
+    value: object,
+    *,
+    provider: str,
+) -> str:
+    """Accept dynamic provider storage hosts without accepting local targets."""
+
+    url = _non_empty_text(value, name=f"{provider} result URL")
+    if "\\" in url or any(ord(character) < 32 for character in url):
+        raise MalformedProviderResult(f"{provider} result URL is invalid")
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise MalformedProviderResult(f"{provider} result URL is invalid") from exc
+    raw_hostname = (parsed.hostname or "").casefold().rstrip(".")
+    if (
+        parsed.scheme.casefold() != "https"
+        or not raw_hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.fragment
+    ):
+        raise MalformedProviderResult(
+            f"{provider} result URL is outside the public HTTPS scope"
+        )
+    if raw_hostname == "localhost" or raw_hostname.endswith(".localhost"):
+        raise MalformedProviderResult(
+            f"{provider} result URL is outside the public HTTPS scope"
+        )
+    try:
+        literal = ipaddress.ip_address(raw_hostname.split("%", 1)[0])
+    except ValueError:
+        literal = None
+    if literal is not None and not literal.is_global:
+        raise MalformedProviderResult(
+            f"{provider} result URL is outside the public HTTPS scope"
+        )
+    return url
+
+
 def _validate_result_url(
     value: object,
     *,
@@ -322,25 +358,12 @@ def _validate_result_url(
     exact_hosts: frozenset[str] | None = None,
     allowed_suffixes: tuple[str, ...] = (),
 ) -> str:
-    url = _non_empty_text(value, name=f"{provider} result URL")
-    try:
-        parsed = urlsplit(url)
-        port = parsed.port
-    except ValueError as exc:
-        raise MalformedProviderResult(f"{provider} result URL is invalid") from exc
-    hostname = (parsed.hostname or "").casefold()
+    url = _validate_ephemeral_result_url(value, provider=provider)
+    hostname = (urlsplit(url).hostname or "").casefold().rstrip(".")
     allowed = bool(exact_hosts and hostname in exact_hosts) or any(
         hostname.endswith(suffix) for suffix in allowed_suffixes
     )
-    if (
-        parsed.scheme != "https"
-        or not hostname
-        or not allowed
-        or parsed.username is not None
-        or parsed.password is not None
-        or port is not None
-        or parsed.fragment
-    ):
+    if not allowed:
         raise MalformedProviderResult(
             f"{provider} result URL is outside the selected Mainland endpoint scope"
         )
@@ -376,10 +399,7 @@ def _persist_remote(
         request_id=request.request_id,
         role=role,
         mime_type=mime_type,
-        safe_metadata={
-            "provider": provider,
-            "locator_sha256": hashlib.sha256(url.encode("utf-8")).hexdigest(),
-        },
+        safe_metadata={"provider": provider},
     )
     if not isinstance(result, ContentRef):
         raise MalformedProviderResult("artifact sink did not return ContentRef")
@@ -624,17 +644,31 @@ class DashScopeZImageCodec:
         self, request: CapabilityRequest, manifest: ModelManifest | None = None
     ) -> EncodedRequest:
         self.validate(request, manifest)
-        parameters: dict[str, object] = {"n": 1}
+        parameters: dict[str, object] = {}
         size = request.provider_parameters.get("resolution", "1024*1024")
-        if not isinstance(size, str) or size not in {
-            "512*512",
-            "1024*1024",
-            "2048*2048",
-        }:
-            raise CodecError("Z-Image resolution is unsupported")
+        if not isinstance(size, str):
+            raise CodecError("Z-Image dimensions must be integers from 512 to 2048")
+        dimensions = size.split("*")
+        if len(dimensions) != 2 or not all(item.isdecimal() for item in dimensions):
+            raise CodecError("Z-Image dimensions must be integers from 512 to 2048")
+        width, height = (int(item) for item in dimensions)
+        if (
+            size != f"{width}*{height}"
+            or not 512 <= width <= 2048
+            or not 512 <= height <= 2048
+        ):
+            raise CodecError("Z-Image dimensions must be integers from 512 to 2048")
         parameters["size"] = size
         if "seed" in request.provider_parameters:
-            parameters.update(_generation_parameters(request))
+            seed = request.provider_parameters["seed"]
+            if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+                raise CodecError("seed must be a non-negative integer")
+            parameters["seed"] = seed
+        if "prompt_extend" in request.provider_parameters:
+            prompt_extend = request.provider_parameters["prompt_extend"]
+            if not isinstance(prompt_extend, bool):
+                raise CodecError("prompt_extend must be boolean")
+            parameters["prompt_extend"] = prompt_extend
         return EncodedRequest(
             payload={
                 "model": _manifest_model(request, manifest),
@@ -660,10 +694,9 @@ class DashScopeZImageCodec:
             raise MalformedProviderResult("DashScope image response must contain one result")
         kind, value = candidates[0]
         if kind == "url":
-            url = _validate_result_url(
+            url = _validate_ephemeral_result_url(
                 value,
                 provider="DashScope Z-Image",
-                allowed_suffixes=_ALIBABA_MAINLAND_RESULT_HOST_SUFFIXES,
             )
             output = _persist_remote(
                 self.artifact_sink,
@@ -907,10 +940,9 @@ class DashScopeWanI2VCodec:
             first = results[0]
             if isinstance(first, Mapping):
                 raw_url = first.get("url", first.get("video_url"))
-        url = _validate_result_url(
+        url = _validate_ephemeral_result_url(
             raw_url,
             provider="DashScope Wan",
-            exact_hosts=_WAN_MAINLAND_RESULT_HOSTS,
         )
         artifact = _persist_remote(
             self.artifact_sink,
