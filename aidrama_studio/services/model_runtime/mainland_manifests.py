@@ -22,7 +22,7 @@ ARK_CN_BEIJING_ENDPOINT_PROFILE = "ARK_CN_BEIJING_V3"
 
 MAINLAND_PRIMARY_MANIFEST_IDS: Mapping[CapabilityKind, str] = MappingProxyType({
     CapabilityKind.LLM: "mainland:alibaba:qwen-max:v1",
-    CapabilityKind.IMAGE: "mainland:alibaba:z-image-turbo:v1",
+    CapabilityKind.IMAGE: "mainland:alibaba:qwen-image-3.0:v1",
     CapabilityKind.VIDEO: "mainland:alibaba:wan2.7-i2v-2026-04-25:v1",
     CapabilityKind.VISION: "mainland:alibaba:qwen3-vl-flash:v1",
     CapabilityKind.TTS: "mainland:alibaba:qwen3-tts-flash:v1",
@@ -134,6 +134,47 @@ def build_mainland_manifests(
         ),
         ModelManifest(
             id=MAINLAND_PRIMARY_MANIFEST_IDS[CapabilityKind.IMAGE],
+            display_name="Qwen Image 3.0 (Mainland China)",
+            provider_id="alibaba_model_studio",
+            capability=CapabilityKind.IMAGE,
+            protocol=ProtocolFamily.REQUEST_RESPONSE,
+            model_id="qwen-image-3.0",
+            deployment_region="MAINLAND_CHINA",
+            endpoint_class="DASHSCOPE_CN",
+            endpoint_profile_id=DASHSCOPE_CN_ENDPOINT_PROFILE,
+            credential_reference="DASHSCOPE_API_KEY",
+            # Qwen Image 3.0's recommended synchronous API uses the same
+            # messages/size/result protocol already implemented by this codec.
+            codec_id="dashscope.zimage.v1",
+            input_modalities=("text",),
+            output_modalities=("image",),
+            supported_modes=("text_to_image",),
+            resolution=(
+                "1280*720",
+                "720*1280",
+                "1024*1024",
+            ),
+            reference={"images": False, "videos": False, "max_count": 0},
+            authorization=_authorization(),
+            readiness=dashscope_media_ready,
+            selection_policy={"priority": 10, "profile": "MAINLAND_CHEAP"},
+            limits={
+                "image_count": 1,
+                "dimension_min": 512,
+                "dimension_max": 2048,
+                "aspect_ratio_min": "1:8",
+                "aspect_ratio_max": "8:1",
+                "result_retention_hours": 24,
+            },
+            pricing={"status": "PRICE_UNVERIFIED", "unit": "IMAGE"},
+            metadata={
+                "provider_family": "ALIBABA",
+                "region_scope": "MAINLAND_ONLY",
+                "requires_artifact_sink": True,
+            },
+        ),
+        ModelManifest(
+            id="mainland:alibaba:z-image-turbo:v1",
             display_name="Z-Image Turbo (Mainland China)",
             provider_id="alibaba_model_studio",
             capability=CapabilityKind.IMAGE,
@@ -157,7 +198,7 @@ def build_mainland_manifests(
             reference={"images": False, "videos": False, "max_count": 0},
             authorization=_authorization(),
             readiness=dashscope_media_ready,
-            selection_policy={"priority": 10, "profile": "MAINLAND_CHEAP"},
+            selection_policy={"priority": 50, "profile": "MAINLAND_COMPATIBILITY"},
             limits={
                 "image_count": 1,
                 "dimension_min": 512,

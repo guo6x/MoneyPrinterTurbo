@@ -32,7 +32,7 @@ from aidrama_studio.storage.repositories import ProjectRepository
 DASHSCOPE_CREDENTIAL_REQUIREMENT = {
     "key": "DASHSCOPE_API_KEY",
     "label": "阿里云百炼 / DashScope",
-    "description": "用于中国大陆的 Z-Image 参考图与 Wan 视频生成。保存不会发起请求。",
+    "description": "用于中国大陆的 Qwen Image 参考图与 Wan 视频生成。保存不会发起请求。",
 }
 DASHSCOPE_WORKSPACE_BASE_URL_REQUIREMENT = {
     "key": DASHSCOPE_WORKSPACE_BASE_URL_KEY,
@@ -102,7 +102,7 @@ class MainlandFrontendRuntimeBridge:
         return {
             "IMAGE": {
                 "capability": "IMAGE",
-                "model_or_profile": "Z-Image Turbo · 中国大陆",
+                "model_or_profile": "Qwen Image 3.0 · 中国大陆",
                 **common,
             },
             "VIDEO": {
@@ -184,9 +184,9 @@ class MainlandFrontendRuntimeBridge:
             authorization={"approved": True, "create_authorized": True},
         )
         if not isinstance(result, CapabilityResult) or not result.succeeded:
-            raise MainlandFrontendRuntimeError("Z-Image 未返回可用结果")
+            raise MainlandFrontendRuntimeError("Qwen Image 未返回可用结果")
         if len(result.outputs) != 1:
-            raise MainlandFrontendRuntimeError("Z-Image 结果数量无效")
+            raise MainlandFrontendRuntimeError("Qwen Image 结果数量无效")
         output = result.outputs[0]
         path_for = getattr(sink, "path_for", None)
         if not callable(path_for):
@@ -213,7 +213,7 @@ class MainlandFrontendRuntimeBridge:
             deployment_region=manifest.deployment_region,
             prompt=prompt,
             content=content,
-            filename=f"z-image-{output.sha256[:16]}.png",
+            filename=f"qwen-image-{output.sha256[:16]}.png",
             mime_type=output.mime_type,
             request_parameters={
                 "resolution": resolution,

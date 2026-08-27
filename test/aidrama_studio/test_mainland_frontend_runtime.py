@@ -195,13 +195,13 @@ def test_reference_image_action_uses_mainland_contract_and_records_draft(context
     assert store.read_count == 1
     assert len(_OfflineMainlandRuntime.requests) == 1
     request = _OfflineMainlandRuntime.requests[0]
-    assert request.manifest_id == "mainland:alibaba:z-image-turbo:v1"
+    assert request.manifest_id == "mainland:alibaba:qwen-image-3.0:v1"
     assert dict(request.provider_parameters) == {
         "resolution": "720*1280",
         "prompt_extend": False,
     }
     assert "n" not in request.provider_parameters
-    assert candidate.model_id == "z-image-turbo"
+    assert candidate.model_id == "qwen-image-3.0"
     assert candidate.sha256
     service = ReferenceAssetService(repository)
     asset = service.find_workspace_asset(

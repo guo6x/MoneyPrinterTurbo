@@ -34,6 +34,7 @@ from aidrama_studio.services.model_runtime.mainland_runtime import (
 
 
 MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"video" * 32
+PNG = b"\x89PNG\r\n\x1a\n" + b"qwen-image-fixture" * 16
 
 
 def _public_resolver(host, port, **_kwargs):
@@ -89,7 +90,7 @@ def _image_manifest():
     return next(
         manifest
         for manifest in build_mainland_manifests(artifact_sink_available=True)
-        if manifest.capability is CapabilityKind.IMAGE
+        if manifest.model_id == "z-image-turbo"
     )
 
 
@@ -137,6 +138,92 @@ def test_zimage_prompt_extend_is_opt_in_and_dimensions_are_bounded():
             DashScopeZImageCodec().encode_request(
                 _request(manifest, resolution=resolution), manifest
             )
+
+
+def test_qwen_image_3_is_primary_and_reuses_verified_sync_image_contract():
+    runtime = MainlandProviderRuntime(
+        credentials={"DASHSCOPE_API_KEY": "unit-test-secret"},
+        create_authorized=True,
+        artifact_sink=object(),
+    )
+    manifest = runtime.primary_manifest(CapabilityKind.IMAGE)
+
+    assert manifest.id == "mainland:alibaba:qwen-image-3.0:v1"
+    assert manifest.model_id == "qwen-image-3.0"
+    assert manifest.protocol is ProtocolFamily.REQUEST_RESPONSE
+    assert manifest.codec_id == "dashscope.zimage.v1"
+    assert "720*1280" in manifest.resolution.supported
+
+    encoded = DashScopeZImageCodec().encode_request(
+        _request(manifest, resolution="720*1280", prompt_extend=False),
+        manifest,
+    )
+
+    assert encoded.path == "/services/aigc/multimodal-generation/generation"
+    assert encoded.payload == {
+        "model": "qwen-image-3.0",
+        "input": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"text": "A cinematic frame"}],
+                }
+            ]
+        },
+        "parameters": {"size": "720*1280", "prompt_extend": False},
+    }
+    assert "n" not in encoded.payload["parameters"]
+
+
+def test_qwen_image_3_sync_result_becomes_content_addressed_artifact(tmp_path):
+    response = Response([PNG])
+    session = Session([response])
+    sink = ContentAddressedArtifactSink(
+        tmp_path, session=session, resolver=_public_resolver
+    )
+    codec = DashScopeZImageCodec(artifact_sink=sink)
+    manifest = next(
+        manifest
+        for manifest in build_mainland_manifests(artifact_sink_available=True)
+        if manifest.model_id == "qwen-image-3.0"
+    )
+    request = _request(
+        manifest, resolution="720*1280", prompt_extend=False
+    )
+
+    result = codec.decode_response(
+        DriverResponse(
+            {
+                "output": {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {
+                                        "image": (
+                                            "https://bucket.oss-cn-beijing."
+                                            "aliyuncs.com/result.png"
+                                        )
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        ),
+        request,
+    )
+
+    expected_hash = hashlib.sha256(PNG).hexdigest()
+    artifact = result.outputs[0]
+    assert artifact.source_kind == "CONTENT_ADDRESSED_ARTIFACT"
+    assert artifact.source_id == f"sha256:{expected_hash}"
+    assert artifact.sha256 == expected_hash
+    assert sink.path_for(artifact).read_bytes() == PNG
+    assert "http" not in repr(artifact).lower()
+    assert session.calls[0][1]["allow_redirects"] is False
+    assert response.closed is True
 
 
 def test_mainland_quality_profile_and_paid_create_retry_count_are_frozen():
