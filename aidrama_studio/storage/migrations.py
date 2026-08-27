@@ -2127,6 +2127,28 @@ def _migration_034_paid_create_ledger_and_artifact_identity(
         );
         """
     )
+    rows = connection.execute(
+        "SELECT id,execution_id,artifact_type,metadata_json,created_at "
+        "FROM production_artifacts ORDER BY created_at,rowid"
+    ).fetchall()
+    for row in rows:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        digest = metadata.get("sha256") if isinstance(metadata, dict) else None
+        if not isinstance(digest, str) or len(digest) != 64:
+            continue
+        try:
+            int(digest, 16)
+        except ValueError:
+            continue
+        connection.execute(
+            "INSERT OR IGNORE INTO production_artifact_identities("
+            "execution_id,artifact_type,sha256,artifact_id,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (row["execution_id"], row["artifact_type"], digest.lower(), row["id"], row["created_at"]),
+        )
 
 
 def _migration_037_audiovisual_delivery_pipeline(

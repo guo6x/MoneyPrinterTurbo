@@ -338,6 +338,44 @@ def test_migration_033_preserves_continuity_schema_and_accepts_recorded_version(
     assert apply_migrations(connection) == 0
 
 
+@pytest.mark.parametrize("recorded_through", [31, 32, 33])
+def test_canonical_forward_upgrade_from_historical_schema_fixtures(
+    recorded_through: int,
+) -> None:
+    """Historical 31/32/33 fixtures upgrade forward without rewriting history."""
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    for version, migration in MIGRATIONS:
+        if version > recorded_through:
+            break
+        migration(connection)
+    connection.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    connection.executemany(
+        "INSERT INTO schema_migrations VALUES (?,?)",
+        [(version, "2026-08-28") for version in range(1, recorded_through + 1)],
+    )
+    connection.execute(
+        "INSERT INTO projects(id,title,description,status,aspect_ratio,target_duration_seconds,created_at,updated_at) "
+        "VALUES ('historical-project','Historical','','DRAFT','9:16',1,'now','now')"
+    )
+    before = connection.execute(
+        "SELECT id,title,target_duration_seconds FROM projects WHERE id='historical-project'"
+    ).fetchone()
+
+    applied = apply_migrations(connection)
+    assert applied == max(version for version, _ in MIGRATIONS) - recorded_through
+    assert connection.execute(
+        "SELECT MAX(version) FROM schema_migrations"
+    ).fetchone()[0] == 37
+    after = connection.execute(
+        "SELECT id,title,target_duration_seconds FROM projects WHERE id='historical-project'"
+    ).fetchone()
+    assert tuple(after) == tuple(before)
+    assert apply_migrations(connection) == 0
+
+
 def _insert_legacy_runtime_plan(connection: sqlite3.Connection) -> None:
     connection.execute(
         "INSERT INTO projects("
