@@ -1847,6 +1847,126 @@ def _migration_032_shot_source_selection_kind_forward_repair(
         )
 
 
+def _migration_033_continuity_truth_and_repair_policy(
+    connection: sqlite3.Connection,
+) -> None:
+    """Persist immutable continuity truth, evidence, and recommendations."""
+    connection.execute(
+        """
+        CREATE TABLE continuity_snapshots (
+            id TEXT PRIMARY KEY,
+            snapshot_version INTEGER NOT NULL CHECK (snapshot_version >= 1),
+            kind TEXT NOT NULL CHECK (kind IN ('EXPECTED','OBSERVED')),
+            project_id TEXT NOT NULL,
+            script_revision_id TEXT NOT NULL,
+            shot_plan_revision_id TEXT NOT NULL,
+            shot_id TEXT NOT NULL,
+            sequence_order INTEGER NOT NULL CHECK (sequence_order >= 1),
+            execution_id TEXT,
+            artifact_id TEXT,
+            reference_version_ids_json TEXT NOT NULL,
+            facts_json TEXT NOT NULL,
+            field_provenance_json TEXT NOT NULL,
+            source_conflicts_json TEXT NOT NULL,
+            analysis_source TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(script_revision_id)
+                REFERENCES structured_script_revisions(id),
+            FOREIGN KEY(shot_plan_revision_id) REFERENCES shot_plan_revisions(id),
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id),
+            FOREIGN KEY(artifact_id) REFERENCES production_artifacts(id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_continuity_snapshots_shot "
+        "ON continuity_snapshots(project_id, shot_plan_revision_id, "
+        "sequence_order, shot_id, created_at DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX idx_continuity_snapshots_execution "
+        "ON continuity_snapshots(project_id, execution_id, artifact_id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE continuity_issues (
+            id TEXT PRIMARY KEY,
+            expected_snapshot_id TEXT NOT NULL,
+            observed_snapshot_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            script_revision_id TEXT NOT NULL,
+            shot_plan_revision_id TEXT NOT NULL,
+            shot_id TEXT NOT NULL,
+            execution_id TEXT,
+            artifact_id TEXT,
+            reference_version_ids_json TEXT NOT NULL,
+            analysis_source TEXT NOT NULL,
+            issue_type TEXT NOT NULL,
+            severity TEXT NOT NULL
+                CHECK (severity IN ('INFO','LOW','MEDIUM','HIGH','CRITICAL')),
+            confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+            affected_subject_json TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            source_json TEXT NOT NULL,
+            repairability TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(expected_snapshot_id)
+                REFERENCES continuity_snapshots(id) ON DELETE CASCADE,
+            FOREIGN KEY(observed_snapshot_id)
+                REFERENCES continuity_snapshots(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id),
+            FOREIGN KEY(artifact_id) REFERENCES production_artifacts(id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_continuity_issues_shot "
+        "ON continuity_issues(project_id, shot_plan_revision_id, shot_id, "
+        "severity, created_at DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE continuity_repair_recommendations (
+            id TEXT PRIMARY KEY,
+            issue_ids_json TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            script_revision_id TEXT NOT NULL,
+            shot_plan_revision_id TEXT NOT NULL,
+            shot_id TEXT NOT NULL,
+            execution_id TEXT,
+            artifact_id TEXT,
+            reference_version_ids_json TEXT NOT NULL,
+            analysis_source TEXT NOT NULL,
+            action TEXT NOT NULL,
+            eligibility_json TEXT NOT NULL,
+            rationale TEXT NOT NULL,
+            requires_paid_create INTEGER NOT NULL
+                CHECK (requires_paid_create IN (0,1)),
+            estimated_scope TEXT NOT NULL,
+            requires_human_confirmation INTEGER NOT NULL
+                CHECK (requires_human_confirmation IN (0,1)),
+            created_at TEXT NOT NULL,
+            CHECK (
+                requires_paid_create = 0 OR requires_human_confirmation = 1
+            ),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(script_revision_id)
+                REFERENCES structured_script_revisions(id),
+            FOREIGN KEY(shot_plan_revision_id) REFERENCES shot_plan_revisions(id),
+            FOREIGN KEY(execution_id) REFERENCES production_executions(id),
+            FOREIGN KEY(artifact_id) REFERENCES production_artifacts(id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_continuity_repairs_shot "
+        "ON continuity_repair_recommendations(project_id, "
+        "shot_plan_revision_id, shot_id, created_at DESC)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, _migration_001_projects),
     (2, _migration_002_story_bible_revisions),
@@ -1880,6 +2000,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (30, _migration_030_final_duration_control),
     (31, _migration_031_runtime_plan_schema_forward_repair),
     (32, _migration_032_shot_source_selection_kind_forward_repair),
+    (33, _migration_033_continuity_truth_and_repair_policy),
 )
 
 

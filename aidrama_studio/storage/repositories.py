@@ -80,6 +80,20 @@ from aidrama_studio.domain.runtime_operations import (
     VisionAnalysisRecord,
     VisionFrameManifest,
 )
+from aidrama_studio.domain.continuity import (
+    AffectedContinuitySubject,
+    ContinuityEvaluationResult,
+    ContinuityEvidence,
+    ContinuityFacts,
+    ContinuityFieldProvenance,
+    ContinuityIssue,
+    ContinuityRepairability,
+    ContinuitySnapshot,
+    ContinuitySource,
+    ContinuitySourceConflict,
+    RepairEligibility,
+    RepairRecommendation,
+)
 
 from .database import DatabasePaths, connect, initialize_database, transaction
 
@@ -4044,3 +4058,389 @@ class ProjectRepository:
         with connect(self.paths.database) as connection:
             rows = connection.execute(query, tuple(args)).fetchall()
         return [self._vision_analysis_from_row(row) for row in rows]
+
+    @staticmethod
+    def _continuity_snapshot_from_row(row) -> ContinuitySnapshot:
+        return ContinuitySnapshot(
+            id=row["id"],
+            snapshot_version=row["snapshot_version"],
+            kind=row["kind"],
+            project_id=row["project_id"],
+            script_revision_id=row["script_revision_id"],
+            shot_plan_revision_id=row["shot_plan_revision_id"],
+            shot_id=row["shot_id"],
+            sequence_order=row["sequence_order"],
+            execution_id=row["execution_id"],
+            artifact_id=row["artifact_id"],
+            reference_version_ids=tuple(
+                json.loads(row["reference_version_ids_json"])
+            ),
+            facts=ContinuityFacts.model_validate(json.loads(row["facts_json"])),
+            field_provenance=tuple(
+                ContinuityFieldProvenance.model_validate(item)
+                for item in json.loads(row["field_provenance_json"])
+            ),
+            source_conflicts=tuple(
+                ContinuitySourceConflict.model_validate(item)
+                for item in json.loads(row["source_conflicts_json"])
+            ),
+            analysis_source=row["analysis_source"],
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _continuity_issue_from_row(row) -> ContinuityIssue:
+        return ContinuityIssue(
+            id=row["id"],
+            expected_snapshot_id=row["expected_snapshot_id"],
+            observed_snapshot_id=row["observed_snapshot_id"],
+            project_id=row["project_id"],
+            script_revision_id=row["script_revision_id"],
+            shot_plan_revision_id=row["shot_plan_revision_id"],
+            shot_id=row["shot_id"],
+            execution_id=row["execution_id"],
+            artifact_id=row["artifact_id"],
+            reference_version_ids=tuple(
+                json.loads(row["reference_version_ids_json"])
+            ),
+            analysis_source=row["analysis_source"],
+            issue_type=row["issue_type"],
+            severity=row["severity"],
+            confidence=row["confidence"],
+            affected_subject=AffectedContinuitySubject.model_validate(
+                json.loads(row["affected_subject_json"])
+            ),
+            evidence=tuple(
+                ContinuityEvidence.model_validate(item)
+                for item in json.loads(row["evidence_json"])
+            ),
+            source=tuple(
+                ContinuitySource.model_validate(item)
+                for item in json.loads(row["source_json"])
+            ),
+            repairability=ContinuityRepairability(row["repairability"]),
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _continuity_repair_from_row(row) -> RepairRecommendation:
+        return RepairRecommendation(
+            id=row["id"],
+            issue_ids=tuple(json.loads(row["issue_ids_json"])),
+            project_id=row["project_id"],
+            script_revision_id=row["script_revision_id"],
+            shot_plan_revision_id=row["shot_plan_revision_id"],
+            shot_id=row["shot_id"],
+            execution_id=row["execution_id"],
+            artifact_id=row["artifact_id"],
+            reference_version_ids=tuple(
+                json.loads(row["reference_version_ids_json"])
+            ),
+            analysis_source=row["analysis_source"],
+            action=row["action"],
+            eligibility=RepairEligibility.model_validate(
+                json.loads(row["eligibility_json"])
+            ),
+            rationale=row["rationale"],
+            requires_paid_create=bool(row["requires_paid_create"]),
+            estimated_scope=row["estimated_scope"],
+            requires_human_confirmation=bool(
+                row["requires_human_confirmation"]
+            ),
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _validate_continuity_scope(
+        connection: sqlite3.Connection, snapshot: ContinuitySnapshot
+    ) -> None:
+        project = connection.execute(
+            "SELECT 1 FROM projects WHERE id=?", (snapshot.project_id,)
+        ).fetchone()
+        script = connection.execute(
+            "SELECT project_id FROM structured_script_revisions WHERE id=?",
+            (snapshot.script_revision_id,),
+        ).fetchone()
+        shot_plan = connection.execute(
+            "SELECT project_id,source_script_revision_id FROM shot_plan_revisions "
+            "WHERE id=?",
+            (snapshot.shot_plan_revision_id,),
+        ).fetchone()
+        if project is None:
+            raise ValueError("ContinuitySnapshot project 不存在")
+        if script is None or script["project_id"] != snapshot.project_id:
+            raise ValueError("ContinuitySnapshot script revision 不属于该项目")
+        if (
+            shot_plan is None
+            or shot_plan["project_id"] != snapshot.project_id
+            or shot_plan["source_script_revision_id"] != snapshot.script_revision_id
+        ):
+            raise ValueError("ContinuitySnapshot shot-plan revision scope 无效")
+        if snapshot.execution_id is not None:
+            execution = connection.execute(
+                "SELECT j.project_id FROM production_executions e "
+                "JOIN production_jobs j ON j.id=e.production_job_id WHERE e.id=?",
+                (snapshot.execution_id,),
+            ).fetchone()
+            if execution is None or execution["project_id"] != snapshot.project_id:
+                raise ValueError("ContinuitySnapshot execution 不属于该项目")
+        if snapshot.artifact_id is not None:
+            artifact = connection.execute(
+                "SELECT a.execution_id,j.project_id FROM production_artifacts a "
+                "JOIN production_executions e ON e.id=a.execution_id "
+                "JOIN production_jobs j ON j.id=e.production_job_id WHERE a.id=?",
+                (snapshot.artifact_id,),
+            ).fetchone()
+            if artifact is None or artifact["project_id"] != snapshot.project_id:
+                raise ValueError("ContinuitySnapshot artifact 不属于该项目")
+            if (
+                snapshot.execution_id is not None
+                and artifact["execution_id"] != snapshot.execution_id
+            ):
+                raise ValueError("ContinuitySnapshot artifact/execution scope 无效")
+        for version_id in snapshot.reference_version_ids:
+            version = connection.execute(
+                "SELECT project_id FROM reference_asset_versions WHERE id=?",
+                (version_id,),
+            ).fetchone()
+            if version is None or version["project_id"] != snapshot.project_id:
+                raise ValueError("ContinuitySnapshot reference version 不属于该项目")
+
+    @staticmethod
+    def _insert_continuity_snapshot(
+        connection: sqlite3.Connection, snapshot: ContinuitySnapshot
+    ) -> None:
+        connection.execute(
+            "INSERT INTO continuity_snapshots("
+            "id,snapshot_version,kind,project_id,script_revision_id,"
+            "shot_plan_revision_id,shot_id,sequence_order,execution_id,artifact_id,"
+            "reference_version_ids_json,facts_json,field_provenance_json,"
+            "source_conflicts_json,analysis_source,created_at"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                snapshot.id,
+                snapshot.snapshot_version,
+                snapshot.kind.value,
+                snapshot.project_id,
+                snapshot.script_revision_id,
+                snapshot.shot_plan_revision_id,
+                snapshot.shot_id,
+                snapshot.sequence_order,
+                snapshot.execution_id,
+                snapshot.artifact_id,
+                json.dumps(list(snapshot.reference_version_ids), ensure_ascii=False),
+                json.dumps(
+                    snapshot.facts.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                json.dumps(
+                    [
+                        item.model_dump(mode="json")
+                        for item in snapshot.field_provenance
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                json.dumps(
+                    [item.model_dump(mode="json") for item in snapshot.source_conflicts],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                snapshot.analysis_source,
+                snapshot.created_at,
+            ),
+        )
+
+    def create_continuity_evaluation(
+        self, result: ContinuityEvaluationResult
+    ) -> ContinuityEvaluationResult:
+        """Persist one evaluation atomically without executing any repair."""
+        expected = result.expected_snapshot
+        observed = result.observed_snapshot
+        if (
+            expected.project_id,
+            expected.script_revision_id,
+            expected.shot_plan_revision_id,
+            expected.shot_id,
+        ) != (
+            observed.project_id,
+            observed.script_revision_id,
+            observed.shot_plan_revision_id,
+            observed.shot_id,
+        ):
+            raise ValueError("continuity snapshot scopes do not match")
+        with self.transaction() as connection:
+            self._validate_continuity_scope(connection, expected)
+            self._validate_continuity_scope(connection, observed)
+            self._insert_continuity_snapshot(connection, expected)
+            self._insert_continuity_snapshot(connection, observed)
+            issue_ids = {issue.id for issue in result.issues}
+            for issue in result.issues:
+                if (
+                    issue.expected_snapshot_id != expected.id
+                    or issue.observed_snapshot_id != observed.id
+                    or issue.project_id != observed.project_id
+                    or issue.shot_id != observed.shot_id
+                    or issue.execution_id != observed.execution_id
+                    or issue.artifact_id != observed.artifact_id
+                    or issue.reference_version_ids
+                    != observed.reference_version_ids
+                    or issue.analysis_source != observed.analysis_source
+                ):
+                    raise ValueError("continuity issue scope does not match snapshots")
+                connection.execute(
+                    "INSERT INTO continuity_issues("
+                    "id,expected_snapshot_id,observed_snapshot_id,project_id,"
+                    "script_revision_id,shot_plan_revision_id,shot_id,execution_id,"
+                    "artifact_id,reference_version_ids_json,analysis_source,"
+                    "issue_type,severity,confidence,"
+                    "affected_subject_json,evidence_json,source_json,repairability,"
+                    "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        issue.id,
+                        issue.expected_snapshot_id,
+                        issue.observed_snapshot_id,
+                        issue.project_id,
+                        issue.script_revision_id,
+                        issue.shot_plan_revision_id,
+                        issue.shot_id,
+                        issue.execution_id,
+                        issue.artifact_id,
+                        json.dumps(
+                            list(issue.reference_version_ids), ensure_ascii=False
+                        ),
+                        issue.analysis_source,
+                        issue.issue_type.value,
+                        issue.severity.value,
+                        issue.confidence,
+                        json.dumps(
+                            issue.affected_subject.model_dump(mode="json"),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in issue.evidence],
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in issue.source],
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        issue.repairability.value,
+                        issue.created_at,
+                    ),
+                )
+            for repair in result.repair_recommendations:
+                if (
+                    repair.project_id != observed.project_id
+                    or repair.script_revision_id != observed.script_revision_id
+                    or repair.shot_plan_revision_id
+                    != observed.shot_plan_revision_id
+                    or repair.shot_id != observed.shot_id
+                    or repair.execution_id != observed.execution_id
+                    or repair.artifact_id != observed.artifact_id
+                    or repair.reference_version_ids
+                    != observed.reference_version_ids
+                    or repair.analysis_source != observed.analysis_source
+                    or not set(repair.issue_ids) <= issue_ids
+                ):
+                    raise ValueError("continuity repair scope does not match evaluation")
+                connection.execute(
+                    "INSERT INTO continuity_repair_recommendations("
+                    "id,issue_ids_json,project_id,script_revision_id,"
+                    "shot_plan_revision_id,shot_id,execution_id,artifact_id,"
+                    "reference_version_ids_json,analysis_source,action,"
+                    "eligibility_json,rationale,"
+                    "requires_paid_create,estimated_scope,"
+                    "requires_human_confirmation,created_at"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        repair.id,
+                        json.dumps(list(repair.issue_ids), ensure_ascii=False),
+                        repair.project_id,
+                        repair.script_revision_id,
+                        repair.shot_plan_revision_id,
+                        repair.shot_id,
+                        repair.execution_id,
+                        repair.artifact_id,
+                        json.dumps(
+                            list(repair.reference_version_ids), ensure_ascii=False
+                        ),
+                        repair.analysis_source,
+                        repair.action.value,
+                        json.dumps(
+                            repair.eligibility.model_dump(mode="json"),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        repair.rationale,
+                        int(repair.requires_paid_create),
+                        repair.estimated_scope.value,
+                        int(repair.requires_human_confirmation),
+                        repair.created_at,
+                    ),
+                )
+        return result
+
+    def get_continuity_snapshot(
+        self, snapshot_id: str
+    ) -> ContinuitySnapshot | None:
+        with connect(self.paths.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM continuity_snapshots WHERE id=?", (snapshot_id,)
+            ).fetchone()
+        return self._continuity_snapshot_from_row(row) if row else None
+
+    def list_continuity_snapshots(
+        self,
+        project_id: str,
+        *,
+        shot_id: str | None = None,
+        kind: str | None = None,
+    ) -> list[ContinuitySnapshot]:
+        query = "SELECT * FROM continuity_snapshots WHERE project_id=?"
+        args: list[object] = [project_id]
+        if shot_id is not None:
+            query += " AND shot_id=?"
+            args.append(shot_id)
+        if kind is not None:
+            query += " AND kind=?"
+            args.append(kind)
+        query += " ORDER BY sequence_order,created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(args)).fetchall()
+        return [self._continuity_snapshot_from_row(row) for row in rows]
+
+    def list_continuity_issues(
+        self, project_id: str, *, shot_id: str | None = None
+    ) -> list[ContinuityIssue]:
+        query = "SELECT * FROM continuity_issues WHERE project_id=?"
+        args: list[object] = [project_id]
+        if shot_id is not None:
+            query += " AND shot_id=?"
+            args.append(shot_id)
+        query += (
+            " ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 "
+            "WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 3 ELSE 4 END,created_at,id"
+        )
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(args)).fetchall()
+        return [self._continuity_issue_from_row(row) for row in rows]
+
+    def list_continuity_repair_recommendations(
+        self, project_id: str, *, shot_id: str | None = None
+    ) -> list[RepairRecommendation]:
+        query = (
+            "SELECT * FROM continuity_repair_recommendations WHERE project_id=?"
+        )
+        args: list[object] = [project_id]
+        if shot_id is not None:
+            query += " AND shot_id=?"
+            args.append(shot_id)
+        query += " ORDER BY created_at,id"
+        with connect(self.paths.database) as connection:
+            rows = connection.execute(query, tuple(args)).fetchall()
+        return [self._continuity_repair_from_row(row) for row in rows]

@@ -112,6 +112,9 @@ def test_all_aidrama_migrations_apply_in_order_and_create_revision_tables() -> N
         "provider_tasks",
         "vision_frame_manifests",
         "vision_analysis_results",
+        "continuity_snapshots",
+        "continuity_issues",
+        "continuity_repair_recommendations",
     } <= tables
 
 
@@ -155,6 +158,9 @@ def test_migrations_are_idempotent_and_do_not_duplicate_schema_records() -> None
         "provider_tasks",
         "vision_frame_manifests",
         "vision_analysis_results",
+        "continuity_snapshots",
+        "continuity_issues",
+        "continuity_repair_recommendations",
     ):
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
@@ -227,8 +233,8 @@ def test_migration_029_adds_candidate_and_current_shot_source_truth() -> None:
 def test_migration_030_adds_final_duration_control_in_order_and_is_idempotent() -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
-    assert MIGRATIONS[-3][0] == 30
-    assert [version for version, _ in MIGRATIONS] == list(range(1, 33))
+    assert 30 in {version for version, _ in MIGRATIONS}
+    assert [version for version, _ in MIGRATIONS] == list(range(1, 34))
     prior = [(version, migration) for version, migration in MIGRATIONS if version < 30]
     for _, migration in prior:
         migration(connection)
@@ -435,7 +441,7 @@ def test_migration_032_repairs_recorded_legacy_source_decision_schema() -> None:
     }
     assert "selection_kind" not in before
 
-    assert apply_migrations(connection) == 1
+    assert apply_migrations(connection) == len(MIGRATIONS) - 31
     columns = {
         row[1]
         for row in connection.execute(
