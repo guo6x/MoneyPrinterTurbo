@@ -494,6 +494,33 @@ def _render_storyboard_board(
     st.caption(
         f"结构化剧本已确认 · 第 {approved['version']} 版；镜头数量随当前分镜动态变化。"
     )
+    if plan is not None and _value(plan, "source_script_revision_id") != _value(
+        approved, "id"
+    ):
+        st.warning(
+            "当前分镜来自旧版结构化剧本。请基于当前已确认剧本创建新的分镜草稿；"
+            "历史分镜与历史制作任务会保持不变。"
+        )
+        if st.button(
+            "基于当前剧本创建新分镜草稿",
+            type="primary",
+            key=f"new-current-plan-{project.id}{key_suffix}",
+        ):
+            try:
+                if callable(getattr(service, "create_manual_plan", None)):
+                    created = service.create_manual_plan(project, approved)
+                elif callable(getattr(service, "create_plan", None)):
+                    created = service.create_plan(project.id, approved["id"])
+                else:
+                    created = None
+                if created:
+                    _set_director_state(project, "plan", _value(created, "id"))
+                    st.rerun()
+            except (ShotServiceError, ValueError, KeyError) as exc:
+                st.error(
+                    _safe_error(exc, fallback="无法基于当前剧本创建分镜草稿。")
+                )
+        return
     if plan is None:
         st.info("还没有分镜。先创建一个手动分镜草稿，再逐镜补充画面和时长。")
         if st.button(
