@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -17,7 +16,14 @@ def context(tmp_path):
     return _execution_context.__wrapped__(tmp_path)
 
 
-def _artifact_context(context, *, create_file: bool = True, **overrides):
+def _artifact_context(
+    context,
+    *,
+    create_file: bool = True,
+    source_filter: str | None = None,
+    provider_reference_subset: bool = False,
+    **overrides,
+):
     repository, project = context
     job = _ready_job(repository, project)
     execution_service = ProductionExecutionService(repository)
@@ -30,7 +36,11 @@ def _artifact_context(context, *, create_file: bool = True, **overrides):
         if ffmpeg is None:
             import imageio_ffmpeg
             ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-        source = f"color=c=black:s=160x120:d=1" if overrides.get("black_frame_detected") else "testsrc=size=160x120:rate=25:d=1"
+        source = source_filter or (
+            "color=c=black:s=160x120:d=1"
+            if overrides.get("black_frame_detected")
+            else "testsrc=size=160x120:rate=25:d=1"
+        )
         completed = subprocess.run(
             [ffmpeg, "-y", "-f", "lavfi", "-i", source, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(target)],
             capture_output=True, text=True, check=False,
@@ -49,6 +59,22 @@ def _artifact_context(context, *, create_file: bool = True, **overrides):
         "static_frame_detected": False,
         "audio_required": False,
     }
+    if provider_reference_subset:
+        binding_key, version_id = next(iter(execution.input_snapshot.reference_asset_versions.items()))
+        metadata.update(
+            {
+                "reference_versions": {binding_key: version_id},
+                "snapshot_references_available": dict(
+                    execution.input_snapshot.reference_asset_versions
+                ),
+                "provider_references_actually_used": [
+                    {
+                        "binding_key": binding_key,
+                        "reference_asset_version_id": version_id,
+                    }
+                ],
+            }
+        )
     metadata.update(overrides)
     artifact = execution_service.record_artifact(project.id, execution.id, "video", relative_path, metadata)
     return repository, project, execution, artifact
@@ -108,6 +134,39 @@ def test_black_frame_detection_fails(context):
     assert result.status is ProductionQCStatus.QC_FAILED
     metric = next(metric for metric in ProductionQCService(repository).list_metrics(project.id, result.id) if metric.metric_name == "black_frame")
     assert metric.status.value == "FAIL"
+
+
+def test_dark_cinematic_scene_is_not_misclassified_as_black(context):
+    repository, project, execution, artifact = _artifact_context(
+        context,
+        source_filter="color=c=0x303030:s=160x120:d=1",
+    )
+
+    result = ProductionQCService(repository).run_qc(project.id, execution.id, artifact.id)
+
+    metric = next(
+        metric
+        for metric in ProductionQCService(repository).list_metrics(project.id, result.id)
+        if metric.metric_name == "black_frame"
+    )
+    assert metric.status.value == "PASS"
+
+
+def test_traceability_accepts_full_snapshot_with_provider_reference_subset(context):
+    repository, project, execution, artifact = _artifact_context(
+        context,
+        provider_reference_subset=True,
+    )
+
+    result = ProductionQCService(repository).run_qc(project.id, execution.id, artifact.id)
+
+    assert result.status is ProductionQCStatus.QC_PASS
+    metric = next(
+        metric
+        for metric in ProductionQCService(repository).list_metrics(project.id, result.id)
+        if metric.metric_name == "traceability"
+    )
+    assert metric.status.value == "PASS"
 
 
 def test_missing_audio_stream_fails_when_shot_requires_audio(context):

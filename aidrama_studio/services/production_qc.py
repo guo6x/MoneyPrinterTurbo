@@ -33,6 +33,11 @@ class ProductionQCServiceError(RuntimeError):
 class ProductionQCService:
     """Run reproducible file/metadata/traceability checks and persist reports."""
 
+    # FFmpeg blackdetect treats pix_th as the luminance threshold below which
+    # a pixel is black.  A value near 1.0 classifies normal low-key/night
+    # footage as black; 0.10 keeps the check focused on genuinely black frames.
+    BLACK_PIXEL_THRESHOLD = 0.10
+
     SUPPORTED_MEDIA_TYPES = {
         "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
         "audio/mpeg", "audio/wav", "audio/x-wav", "audio/ogg",
@@ -261,7 +266,21 @@ class ProductionQCService:
 
             binary = get_ffmpeg_binary()
             completed = subprocess.run(
-                [binary, "-hide_banner", "-i", str(path), "-vf", "blackdetect=d=0:pix_th=0.98,freezedetect=n=0.003:d=0.5", "-an", "-f", "null", "-"],
+                [
+                    binary,
+                    "-hide_banner",
+                    "-i",
+                    str(path),
+                    "-vf",
+                    (
+                        f"blackdetect=d=0:pix_th={cls.BLACK_PIXEL_THRESHOLD:.2f},"
+                        "freezedetect=n=0.003:d=0.5"
+                    ),
+                    "-an",
+                    "-f",
+                    "null",
+                    "-",
+                ],
                 capture_output=True, text=True, check=False, timeout=90,
             )
         except Exception:
@@ -289,10 +308,24 @@ class ProductionQCService:
         execution_ok = metadata.get("execution_id") == execution.id
         shot_id = metadata.get("shot_id")
         shot_ok = isinstance(shot_id, str) and shot_id in expected_shots
-        references = metadata.get("reference_versions", metadata.get("reference_asset_versions"))
-        refs_ok = isinstance(references, Mapping) and all(references.get(key) == value for key, value in expected_refs.items())
+        references = metadata.get(
+            "snapshot_references_available",
+            metadata.get("reference_versions", metadata.get("reference_asset_versions")),
+        )
+        refs_ok = isinstance(references, Mapping) and all(
+            references.get(key) == value for key, value in expected_refs.items()
+        )
+        provider_references = metadata.get("provider_references_actually_used")
+        provider_refs_ok = True
+        if isinstance(provider_references, (list, tuple)):
+            provider_refs_ok = all(
+                isinstance(item, Mapping)
+                and expected_refs.get(str(item.get("binding_key") or ""))
+                == str(item.get("reference_asset_version_id") or "")
+                for item in provider_references
+            )
         artifact_relation_ok = artifact.execution_id == execution.id
-        passed = execution_ok and shot_ok and refs_ok and artifact_relation_ok
+        passed = execution_ok and shot_ok and refs_ok and provider_refs_ok and artifact_relation_ok
         return ProductionQCService._check(
             "traceability", "TRACEABILITY", passed,
             {"execution_id": metadata.get("execution_id"), "shot_id": shot_id, "reference_versions": dict(references) if isinstance(references, Mapping) else {}},
