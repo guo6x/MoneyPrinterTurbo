@@ -312,6 +312,113 @@ button[title="Deploy"],
 .aidrama-director-expanded small { color: var(--aidrama-muted); display: block; font-size: .72rem; line-height: 1.55; margin: .2rem 0; overflow-wrap: anywhere; }
 .aidrama-director-expanded .aidrama-director-stage { color: var(--aidrama-text); }
 
+/* Director Workspace V1. Streamlit owns the interactive controls while the
+   marker-based selectors give the page a dense, cinematic workstation shell
+   without creating a second client-side state store. */
+.aidrama-director-workspace-marker,
+.aidrama-director-mode-marker,
+.aidrama-shot-card-marker,
+.aidrama-preview-stage-marker { display: none; }
+.aidrama-director-workspace-summary {
+  align-items: stretch;
+  background: linear-gradient(110deg, rgba(239,111,97,.14), rgba(15,20,28,.98) 42%);
+  border: 1px solid rgba(239,111,97,.32);
+  border-radius: 12px;
+  display: grid;
+  gap: 0;
+  grid-template-columns: minmax(190px, 1.5fr) repeat(3, minmax(110px, .7fr));
+  margin: -.2rem 0 .8rem;
+  min-width: 0;
+  overflow: hidden;
+}
+.aidrama-director-workspace-summary > div {
+  border-left: 1px solid rgba(52,64,82,.72);
+  min-width: 0;
+  padding: .68rem .82rem;
+}
+.aidrama-director-workspace-summary > div:first-child { border-left: 0; }
+.aidrama-director-workspace-summary span,
+.aidrama-director-workspace-summary strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aidrama-director-workspace-summary span { color: var(--aidrama-muted); font-size: max(.625rem, 10px); letter-spacing: .12em; }
+.aidrama-director-workspace-summary strong { color: var(--aidrama-text); font-size: .82rem; margin-top: .2rem; }
+
+.st-key-director-workspace-shell { min-width: 0; }
+.st-key-director-workspace-shell [data-testid="stHorizontalBlock"],
+.st-key-director-workspace-shell [data-testid="stColumn"] { min-width: 0; }
+.st-key-director-workspace-shell
+  > [data-testid="stLayoutWrapper"]
+  > [data-testid="stHorizontalBlock"]
+  > [data-testid="stColumn"]:first-child,
+.st-key-director-workspace-shell
+  > [data-testid="stLayoutWrapper"]
+  > [data-testid="stHorizontalBlock"]
+  > [data-testid="stColumn"]:last-child {
+  max-height: 38rem;
+  overflow-y: auto;
+  padding-right: .22rem;
+  scrollbar-color: #465367 #111720;
+  scrollbar-width: thin;
+}
+.st-key-director-workspace-shell h4 { color: #dce3ec; font-size: .82rem; letter-spacing: .02em; margin: .15rem 0 .45rem; }
+.st-key-director-workspace-shell button { min-height: 2.15rem; }
+
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-shot-card-marker) {
+  background: linear-gradient(155deg, #1b2430, #111720);
+  border-color: #303b4c !important;
+  border-radius: 9px;
+  box-shadow: none;
+}
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-shot-card-marker.state-ready) { border-color: #445266 !important; }
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-shot-card-marker.state-generating) { border-color: rgba(91,151,219,.62) !important; }
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-shot-card-marker.state-qc) { border-color: rgba(225,174,76,.62) !important; }
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-shot-card-marker.state-waiting-human) { border-color: rgba(166,119,220,.68) !important; }
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-shot-card-marker.state-accepted) { border-color: rgba(86,182,139,.68) !important; }
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-shot-card-marker.state-blocked) { border-color: rgba(239,111,97,.76) !important; }
+.aidrama-shot-state-stack { border-top: 1px solid rgba(52,64,82,.58); margin-top: .4rem; padding-top: .4rem; }
+.aidrama-shot-state-stack strong,
+.aidrama-shot-state-stack span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aidrama-shot-state-stack strong { color: #dce3ec; font-size: max(.625rem, 10px); letter-spacing: .08em; margin-bottom: .28rem; }
+.aidrama-shot-state-stack span { color: #8491a2; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: max(.5625rem, 9px); line-height: 1.55; }
+
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-preview-stage-marker) {
+  background: radial-gradient(circle at 74% 18%, rgba(239,111,97,.13), transparent 36%), #090d13;
+  border-color: #303b4c !important;
+  min-height: 25rem;
+  overflow: hidden;
+  position: relative;
+}
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-preview-stage-marker) video,
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-preview-stage-marker) img {
+  background: #05070a;
+  border-radius: 8px;
+  max-height: 34rem;
+  object-fit: contain;
+  width: 100%;
+}
+.aidrama-preview-empty { align-items: center; display: flex; flex-direction: column; justify-content: center; min-height: 18rem; padding: 2rem; text-align: center; }
+.aidrama-preview-empty span { color: var(--aidrama-accent); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .65rem; letter-spacing: .18em; }
+.aidrama-preview-empty strong { color: #dce3ec; font-size: 1rem; margin: .75rem 0 .25rem; }
+.aidrama-preview-empty small { color: var(--aidrama-muted); font-size: .72rem; }
+.aidrama-preview-overlay { align-items: center; background: rgba(8,12,17,.84); border: 1px solid rgba(65,78,96,.72); border-radius: 8px; display: flex; gap: .75rem; margin-top: .55rem; padding: .5rem .62rem; }
+.aidrama-preview-overlay span { color: #ffaaa0; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: max(.5625rem, 9px); letter-spacing: .09em; }
+.aidrama-preview-overlay strong { color: #dce3ec; font-size: .72rem; margin-left: auto; }
+.aidrama-preview-overlay small { color: var(--aidrama-muted); font-size: .65rem; }
+
+.aidrama-director-timeline { align-items: stretch; background: #0b1017; border: 1px solid #2d3745; border-radius: 10px; display: flex; gap: 3px; min-height: 5.1rem; overflow-x: auto; padding: .4rem; scrollbar-color: #465367 #111720; }
+.aidrama-timeline-segment,
+.aidrama-timeline-gap { background: linear-gradient(155deg, #253142, #171f2b); border: 1px solid #354358; border-radius: 6px; display: flex; flex-basis: 3.8rem; flex-direction: column; justify-content: center; min-width: 3.8rem; padding: .42rem .48rem; }
+.aidrama-timeline-segment.is-selected { background: linear-gradient(155deg, rgba(239,111,97,.38), #221921); border-color: rgba(239,111,97,.82); box-shadow: 0 0 0 2px rgba(239,111,97,.1); }
+.aidrama-timeline-segment strong,
+.aidrama-timeline-gap strong { color: #dce3ec; font-size: .72rem; }
+.aidrama-timeline-segment span,
+.aidrama-timeline-gap span { color: #9aa7b8; font-size: .65rem; margin-top: .15rem; }
+.aidrama-timeline-segment small { color: #68778a; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: max(.5625rem, 9px); margin-top: .28rem; }
+.aidrama-timeline-gap { background: repeating-linear-gradient(135deg, rgba(239,111,97,.12) 0 5px, rgba(30,24,30,.92) 5px 10px); border-color: rgba(239,111,97,.42); }
+.st-key-director-timeline-buttons { overflow-x: auto; padding-bottom: .18rem; scrollbar-color: #465367 #111720; scrollbar-width: thin; }
+.st-key-director-timeline-buttons button { min-width: 4.6rem; white-space: nowrap; }
+
+.st-key-director-auto-foundation { background: radial-gradient(circle at 84% 0%, rgba(91,151,219,.16), transparent 38%); }
+
 /* Thin, non-blocking activity tray. A progress bar is shown only when the
    adapter supplies a real value; the UI never fabricates one. */
 .aidrama-activity-strip { align-items: center; background: linear-gradient(100deg, rgba(239,111,97,.12), rgba(18,23,32,.96)); border: 1px solid rgba(239,111,97,.30); border-radius: 10px; display: flex; gap: .65rem; margin: .45rem 0 .9rem; min-height: 2.7rem; min-width: 0; padding: .58rem .72rem; }
@@ -607,6 +714,21 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-creative-source-row
   .aidrama-workspace-context { margin-bottom: .55rem; padding-bottom: .62rem; padding-top: .62rem; }
   .aidrama-shot-slot-grid { grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); }
   .aidrama-production-locked-board { min-height: 10.5rem; }
+  .aidrama-director-workspace-summary { grid-template-columns: minmax(150px, 1.25fr) repeat(3, minmax(85px, .65fr)); }
+  .aidrama-director-workspace-summary > div { padding: .52rem .62rem; }
+  .st-key-director-workspace-shell [data-testid="stHorizontalBlock"] { gap: .55rem; }
+  .st-key-director-workspace-shell
+    > [data-testid="stLayoutWrapper"]
+    > [data-testid="stHorizontalBlock"]
+    > [data-testid="stColumn"]:first-child,
+  .st-key-director-workspace-shell
+    > [data-testid="stLayoutWrapper"]
+    > [data-testid="stHorizontalBlock"]
+    > [data-testid="stColumn"]:last-child { max-height: 31rem; }
+  .st-key-director-workspace-shell p,
+  .st-key-director-workspace-shell label { font-size: max(.6875rem, 11px); }
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-preview-stage-marker) { min-height: 19rem; }
+  .aidrama-preview-empty { min-height: 13rem; }
 }
 
 @media (max-width: 760px) {
@@ -616,6 +738,11 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-creative-source-row
   .aidrama-director-inspector { margin-top: .2rem; }
   .aidrama-activity-strip { align-items: flex-start; flex-wrap: wrap; }
   .aidrama-activity-progress { margin-left: 0; max-width: none; width: 100%; }
+  .aidrama-director-workspace-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .aidrama-director-workspace-summary > div:nth-child(3) { border-left: 0; border-top: 1px solid rgba(52,64,82,.72); }
+  .aidrama-director-workspace-summary > div:nth-child(4) { border-top: 1px solid rgba(52,64,82,.72); }
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-preview-stage-marker) { min-height: 16rem; }
+  .aidrama-preview-empty { min-height: 10rem; }
 }
 
 @media (min-width: 1500px) {

@@ -41,6 +41,19 @@ from .large_media_export import LargeMediaExportError, LargeMediaExportService
 from .credentials import CredentialReadinessService, CredentialStoreError, WindowsCredentialStore
 from .project_archive import ProjectArchiveError, ProjectArchiveService
 from .current_state import CurrentProductionState, CurrentProductionStateService
+from .director_workspace import (
+    DirectorWorkspaceProjection,
+    DirectorWorkspaceProjectionService,
+    TimelineGap,
+    TimelineSegment,
+    WorkspaceBeat,
+    WorkspaceCandidate,
+    WorkspaceContinuity,
+    WorkspaceQCMetric,
+    WorkspaceReference,
+    WorkspaceShot,
+    build_timeline,
+)
 from .vision_qc import VisionFrameSamplingService, VisionQCResult, VisionQCService
 from .diagnostics import DiagnosticsError, DiagnosticsService, DiskSpaceService
 from .tts_runtime import TTS_LIVE_SMOKE_TEXT, TTSRuntimeError, TTSRuntimeService
@@ -151,6 +164,10 @@ __all__ = [
     "PostProductionService", "PostRenderService", "PostProductionServiceError", "PostProductionMediaAdapter", "FFmpegPostProductionAdapter", "PostRenderRequest",
     "DirectorService", "DirectorServiceError", "ProducerService", "ProducerServiceError",
     "CurrentProductionState", "CurrentProductionStateService",
+    "DirectorWorkspaceProjection", "DirectorWorkspaceProjectionService",
+    "TimelineGap", "TimelineSegment", "WorkspaceBeat", "WorkspaceCandidate",
+    "WorkspaceContinuity", "WorkspaceQCMetric", "WorkspaceReference",
+    "WorkspaceShot", "build_timeline",
     "OutputProfileService", "GenerationBriefCompiler", "GenerationBriefService", "RuntimePlanService", "AIInvocationService", "RuntimeFoundationError",
     "CreativeControlError", "CreativeLockService",
     "LLM_LIVE_SMOKE_PROMPT", "LLMInvocationGateway", "LLMInvocationError",

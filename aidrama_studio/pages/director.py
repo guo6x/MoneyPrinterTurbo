@@ -26,6 +26,10 @@ from aidrama_studio.services import (  # noqa: E402
 )
 from aidrama_studio.services.security import sanitize_error  # noqa: E402
 from aidrama_studio.domain import DirectorGoalKind  # noqa: E402
+from aidrama_studio.pages import director_workspace  # noqa: E402
+from aidrama_studio.services.director_workspace import (  # noqa: E402
+    DirectorWorkspaceProjectionService,
+)
 
 
 def _shot_service():
@@ -971,18 +975,41 @@ def _render_director_console(project, *, compact: bool = False) -> None:
 
 def render() -> None:
     page_header(
-        "分镜",
-        "STORYBOARD WORKSPACE",
-        "把已确认的结构化剧本拆成可编辑、可审核、可执行的镜头序列。",
+        "Director Workspace",
+        "SCRIPT · SHOTS · PREVIEW · TIMELINE",
+        "在同一创作工作台联动剧本、镜头、正式制作来源、参考与审片状态。",
     )
     project = current_project_or_stop()
     render_project_context(
         project, stage="分镜", next_action="检查并确认分镜", next_page="production"
     )
     _render_shot_activity(project)
-    st.markdown('<span class="aidrama-storyboard-workstation-marker" aria-hidden="true"></span>', unsafe_allow_html=True)
-    main_col, rail_col = st.columns([3.1, 1], gap="large")
-    with main_col:
+    mode = director_workspace.render_mode_selector(project.id)
+    workspace_service = DirectorWorkspaceProjectionService(
+        continuity_adapter=(
+            st.session_state.get("_aidrama_continuity_projection_adapter")
+            if callable(st.session_state.get("_aidrama_continuity_projection_adapter"))
+            else None
+        )
+    )
+    if mode == "AUTO":
+        try:
+            projection = workspace_service.project(project.id)
+            director_workspace.render_auto_foundation(project, projection)
+        except (ValueError, KeyError) as exc:
+            st.warning(f"正式 AUTO 状态暂不可读：{_safe_error(exc)}")
+    else:
+        director_workspace.render(
+            project,
+            compact=mode == "PRO",
+            projection_service=workspace_service,
+        )
+
+    st.markdown(
+        '<span class="aidrama-storyboard-workstation-marker" aria-hidden="true"></span>',
+        unsafe_allow_html=True,
+    )
+    with st.expander("分镜计划编辑 / Generation Brief", expanded=False):
         tabs = st.tabs(["Storyboard", "镜头编辑器", "时长规划", "Generation Brief"])
         with tabs[0]:
             _render_shot_plan(project, view="Storyboard")
@@ -992,13 +1019,12 @@ def render() -> None:
             _render_shot_plan(project, view="时长规划")
         with tabs[3]:
             _render_shot_plan(project, view="Generation Brief")
-    with rail_col:
-        _render_director_expanded_summary(project)
-        # Closed is the safe 1366 default. CSS expands this rail at desktop
-        # workstation widths without relying on a guessed server viewport.
-        with st.expander("AI 导演", expanded=False):
-            st.markdown(
-                '<span class="aidrama-director-collapsed-marker" aria-hidden="true"></span>',
-                unsafe_allow_html=True,
-            )
-            _render_director_console(project, compact=True)
+    _render_director_expanded_summary(project)
+    # Closed is the safe 1366 default. CSS expands this rail at desktop
+    # workstation widths without relying on a guessed server viewport.
+    with st.expander("AI 导演", expanded=False):
+        st.markdown(
+            '<span class="aidrama-director-collapsed-marker" aria-hidden="true"></span>',
+            unsafe_allow_html=True,
+        )
+        _render_director_console(project, compact=True)
