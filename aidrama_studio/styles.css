@@ -65,29 +65,181 @@ code {
   color: var(--aidrama-text) !important;
 }
 
+html,
+body,
+[data-testid="stAppViewContainer"] {
+  font-size: 13px;
+}
+
 [data-testid="stCaptionContainer"] {
   color: var(--aidrama-muted) !important;
+  font-size: max(.6875rem, 11px) !important;
+}
+
+.aidrama-context-kicker,
+.aidrama-context-diagnostic,
+.aidrama-inspector-collapsed .aidrama-inspector-label,
+.aidrama-inspector-copy,
+.aidrama-director-expanded p,
+.aidrama-director-expanded small,
+.aidrama-activity-copy span,
+.aidrama-capability-label,
+.aidrama-page-stage,
+.aidrama-page-activity,
+.aidrama-eyebrow,
+.aidrama-empty-label,
+.aidrama-status,
+.story-revision-status {
+  font-size: max(.6875rem, 11px) !important;
 }
 
 [data-testid="stTextInput"] input,
 [data-testid="stTextArea"] textarea,
 [data-testid="stNumberInput"] input {
-  color: #15202b !important;
+  background: transparent !important;
+  color: var(--aidrama-text) !important;
+  font-size: max(.75rem, 12px) !important;
+  caret-color: var(--aidrama-accent);
 }
 
-.stButton > button {
-  color: #15202b !important;
+/* Streamlit/BaseWeb controls must belong to the workstation instead of
+   retaining their default white browser surfaces. Keep selectors broad
+   enough to cover widgets rendered by current and adjacent Streamlit builds. */
+[data-testid="stTextInput"] [data-baseweb="input"],
+[data-testid="stTextArea"] [data-baseweb="textarea"],
+[data-testid="stNumberInput"] [data-baseweb="input"],
+[data-testid="stTextInputRootElement"],
+[data-testid="stTextAreaRootElement"],
+[data-testid="stNumberInputContainer"],
+[data-testid="stSelectbox"] [data-rac][role="group"],
+[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+[data-testid="stMultiSelect"] [data-baseweb="select"] > div,
+[data-testid="stDateInput"] [data-baseweb="input"],
+[data-testid="stTimeInput"] [data-baseweb="input"],
+[data-testid="stFileUploaderDropzone"] {
+  background: #151c26 !important;
+  border-color: #344052 !important;
+  color: var(--aidrama-text) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025) !important;
+}
+[data-testid="stTextInput"] [data-baseweb="input"]:focus-within,
+[data-testid="stTextArea"] [data-baseweb="textarea"]:focus-within,
+[data-testid="stNumberInput"] [data-baseweb="input"]:focus-within,
+[data-testid="stTextInputRootElement"]:focus-within,
+[data-testid="stTextAreaRootElement"]:focus-within,
+[data-testid="stNumberInputContainer"]:focus-within,
+[data-testid="stSelectbox"] [data-rac][role="group"]:focus-within,
+[data-testid="stSelectbox"] [data-baseweb="select"] > div:focus-within,
+[data-testid="stMultiSelect"] [data-baseweb="select"] > div:focus-within,
+[data-testid="stFileUploaderDropzone"]:focus-within {
+  border-color: var(--aidrama-accent) !important;
+  box-shadow: 0 0 0 1px rgba(239,111,97,.3) !important;
+}
+[data-baseweb="select"] input,
+[data-baseweb="select"] div,
+[data-baseweb="select"] span,
+[data-testid="stSelectbox"] input,
+[data-testid="stSelectbox"] button,
+[data-testid="stFileUploaderDropzone"] span,
+[data-testid="stFileUploaderDropzone"] small,
+[data-testid="stFileUploaderFile"] {
+  color: var(--aidrama-text) !important;
+  font-size: max(.75rem, 12px) !important;
+}
+[data-testid="stSelectbox"] input,
+[data-testid="stSelectbox"] button,
+[data-testid="stNumberInput"] button {
+  background: transparent !important;
+  border-color: #344052 !important;
+  color: var(--aidrama-text) !important;
+}
+[data-baseweb="select"] svg,
+[data-testid="stNumberInput"] button svg {
+  fill: #aab5c4 !important;
+}
+[data-baseweb="tag"] {
+  background: #26313e !important;
+  border: 1px solid #3a4759 !important;
+  color: var(--aidrama-text) !important;
+}
+input::placeholder,
+textarea::placeholder {
+  color: #788698 !important;
+  opacity: 1 !important;
+}
+[role="radiogroup"] label,
+[data-testid="stRadio"] label,
+[data-testid="stCheckbox"] label {
+  color: var(--aidrama-text) !important;
+  font-size: max(.75rem, 12px) !important;
+}
+[role="radiogroup"] [data-baseweb="radio"] > div:first-child {
+  background: #151c26 !important;
+  border-color: #4a5668 !important;
+}
+[data-baseweb="popover"] > div,
+[role="listbox"],
+[data-baseweb="menu"] {
+  background: #151c26 !important;
+  border-color: #344052 !important;
+  color: var(--aidrama-text) !important;
+}
+[role="option"] {
+  background: #151c26 !important;
+  color: var(--aidrama-text) !important;
+  font-size: max(.75rem, 12px) !important;
+}
+[role="option"]:hover,
+[role="option"][aria-selected="true"] {
+  background: #26313e !important;
 }
 
-.stButton > button[kind="primary"] {
+.stButton > button,
+.stDownloadButton > button,
+[data-testid="stFormSubmitButton"] > button,
+[data-testid="stFileUploaderDropzone"] button {
+  background: #202936 !important;
+  border: 1px solid #3a4657 !important;
+  color: #e2e8f0 !important;
+  font-size: max(.75rem, 12px) !important;
+  font-weight: 650 !important;
+  min-height: 2.45rem;
+}
+.stButton > button:hover,
+.stDownloadButton > button:hover,
+[data-testid="stFormSubmitButton"] > button:hover,
+[data-testid="stFileUploaderDropzone"] button:hover {
+  background: #2a3544 !important;
+  border-color: #58667a !important;
+  color: #fff !important;
+}
+
+.stButton > button[kind="primary"],
+.stDownloadButton > button[kind="primary"],
+[data-testid="stFormSubmitButton"] > button[kind="primary"] {
   background: var(--aidrama-accent) !important;
   border-color: var(--aidrama-accent) !important;
-  color: #171b22 !important;
+  box-shadow: 0 8px 24px rgba(239,111,97,.2) !important;
+  color: #14181f !important;
+  font-weight: 760 !important;
 }
-.stButton > button[kind="primary"]:hover {
+.stButton > button[kind="primary"]:hover,
+.stDownloadButton > button[kind="primary"]:hover,
+[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover {
   background: #ff8b7e !important;
   border-color: #ff8b7e !important;
   color: #111820 !important;
+}
+.stButton > button:disabled,
+.stDownloadButton > button:disabled,
+[data-testid="stFormSubmitButton"] > button:disabled,
+[data-testid="stFileUploaderDropzone"] button:disabled {
+  background: #151b24 !important;
+  border-color: #2a3442 !important;
+  box-shadow: none !important;
+  color: #626f80 !important;
+  cursor: not-allowed !important;
+  opacity: .7 !important;
 }
 
 [data-testid="stSidebar"] {
@@ -239,6 +391,88 @@ button[title="Deploy"],
   margin: 0;
 }
 
+/* Creative stays one page, but its two responsibilities read as workstation
+   modules instead of an undifferentiated white form grid. */
+.aidrama-creative-panel-marker { display: none; }
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-creative-panel-marker) {
+  background: linear-gradient(155deg, rgba(28,36,48,.98), rgba(15,20,28,.98));
+  border-color: #303b4c !important;
+  box-shadow: 0 18px 38px rgba(0,0,0,.18);
+}
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-creative-source-marker) {
+  border-color: rgba(239,111,97,.3) !important;
+}
+.aidrama-source-pack-hero {
+  align-items: center;
+  background: radial-gradient(circle at 88% 15%, rgba(239,111,97,.2), transparent 40%), #151c26;
+  border: 1px solid rgba(239,111,97,.3);
+  border-radius: 12px;
+  display: flex;
+  gap: .8rem;
+  margin: .15rem 0 1rem;
+  padding: .8rem .9rem;
+}
+.aidrama-source-pack-icon {
+  align-items: center;
+  background: rgba(239,111,97,.16);
+  border: 1px solid rgba(239,111,97,.34);
+  border-radius: 9px;
+  color: #ffaaa0;
+  display: flex;
+  flex: 0 0 2.65rem;
+  font-size: 1.15rem;
+  height: 2.65rem;
+  justify-content: center;
+}
+.aidrama-source-pack-hero strong,
+.aidrama-source-pack-hero span { display: block; }
+.aidrama-source-pack-hero strong { color: var(--aidrama-text); font-size: .88rem; }
+.aidrama-source-pack-hero span { color: var(--aidrama-muted); font-size: max(.6875rem, 11px); margin-top: .12rem; }
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-creative-source-row) {
+  background: #171e28;
+  box-shadow: none;
+}
+
+/* Locked Production is still a production workspace. The canonical Shot Plan
+   count drives these slots; no generated state or progress is invented. */
+.aidrama-production-locked-board {
+  background: radial-gradient(circle at 85% 0%, rgba(239,111,97,.14), transparent 38%), #111720;
+  border: 1px solid rgba(239,111,97,.28);
+  border-radius: 16px;
+  margin: .25rem 0 1rem;
+  min-height: 13rem;
+  padding: 1rem;
+}
+.aidrama-production-board-head { align-items: flex-end; display: flex; gap: 1rem; justify-content: space-between; }
+.aidrama-production-board-head strong { color: var(--aidrama-text); font-size: 1rem; }
+.aidrama-production-board-head span { color: var(--aidrama-muted); font-size: max(.6875rem, 11px); }
+.aidrama-shot-slot-grid { display: grid; gap: .6rem; grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); margin-top: .9rem; }
+.aidrama-shot-slot {
+  background: linear-gradient(145deg, #1d2632, #141a23);
+  border: 1px solid #303b4c;
+  border-radius: 9px;
+  min-height: 6.5rem;
+  padding: .65rem;
+}
+.aidrama-shot-slot strong { color: #dce3ec; display: block; font-size: .78rem; }
+.aidrama-shot-slot span { color: #778496; display: block; font-size: max(.6875rem, 11px); margin-top: 2.5rem; }
+.aidrama-production-empty-board { align-items: center; color: var(--aidrama-muted); display: flex; flex-direction: column; justify-content: center; min-height: 9rem; text-align: center; }
+.aidrama-production-empty-board strong { color: var(--aidrama-text); font-size: .95rem; margin-bottom: .3rem; }
+.aidrama-production-prereqs {
+  background: #121821;
+  border: 1px solid #2d3745;
+  border-radius: 12px;
+  margin: .65rem 0 .75rem;
+  padding: .8rem .9rem;
+}
+.aidrama-production-prereqs h3 { color: var(--aidrama-text); font-size: .9rem; margin: 0 0 .55rem; }
+.aidrama-prereq-row { align-items: center; border-top: 1px solid rgba(52,64,82,.55); display: flex; gap: .55rem; padding: .48rem 0; }
+.aidrama-prereq-row:first-of-type { border-top: 0; }
+.aidrama-prereq-mark { color: #7f8b9b; font-size: .9rem; width: 1rem; }
+.aidrama-prereq-row.is-complete .aidrama-prereq-mark { color: var(--aidrama-success); }
+.aidrama-prereq-copy strong { color: #dce3ec; display: block; font-size: .78rem; }
+.aidrama-prereq-copy span { color: var(--aidrama-muted); display: block; font-size: max(.6875rem, 11px); margin-top: .06rem; }
+
 .aidrama-eyebrow,
 .aidrama-empty-label {
   color: var(--aidrama-accent);
@@ -367,6 +601,12 @@ button[title="Deploy"],
     min-width: 0 !important;
     width: 9.5rem !important;
   }
+  .block-container { padding-bottom: 2rem; padding-top: 1.15rem; }
+  .aidrama-page-header { margin-bottom: .9rem; padding-bottom: .8rem; }
+  .aidrama-page-header h1 { font-size: 2rem; margin-top: .2rem; }
+  .aidrama-workspace-context { margin-bottom: .55rem; padding-bottom: .62rem; padding-top: .62rem; }
+  .aidrama-shot-slot-grid { grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); }
+  .aidrama-production-locked-board { min-height: 10.5rem; }
 }
 
 @media (max-width: 760px) {

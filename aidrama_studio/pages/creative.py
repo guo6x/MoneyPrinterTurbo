@@ -132,6 +132,10 @@ def _render_source_item(project, service: CreativeIntakeService, item, analysis)
         _enum_value(getattr(item, "extraction_state", "")), "状态未知"
     )
     with st.container(border=True):
+        st.markdown(
+            '<span class="aidrama-creative-source-row" aria-hidden="true"></span>',
+            unsafe_allow_html=True,
+        )
         title_col, action_col = st.columns([5, 1])
         title_col.markdown(f"**{_source_name(item)}**")
         title_col.caption(f"{kind} · {extraction}")
@@ -172,6 +176,14 @@ def _render_source_pack(project, service: CreativeIntakeService) -> list[object]
 
     st.markdown("### Source Pack")
     st.caption("文档、图片和已有故事集中保留在当前项目；原始来源不会被 AI 草稿覆盖。")
+    st.markdown(
+        '<div class="aidrama-source-pack-hero">'
+        '<span class="aidrama-source-pack-icon" aria-hidden="true">◇</span>'
+        '<div><strong>项目素材入口</strong>'
+        '<span>创意、文档与视觉参考会作为可追溯的本地来源保存。</span></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
     idea_key = _key(project.id, "idea")
     idea = st.text_area(
@@ -468,11 +480,23 @@ def render() -> None:
 
     service = CreativeIntakeService()
     latest = _latest_brief(service, project.id)
-    left, right = st.columns([1.03, 0.97], gap="large")
+    left, right = st.columns([0.94, 1.06], gap="large")
     with left:
-        items = _render_source_pack(project, service)
+        with st.container(border=True):
+            st.markdown(
+                '<span class="aidrama-creative-panel-marker aidrama-creative-source-marker" '
+                'aria-hidden="true"></span>',
+                unsafe_allow_html=True,
+            )
+            items = _render_source_pack(project, service)
     with right:
-        _render_brief(project, service, items, latest)
+        with st.container(border=True):
+            st.markdown(
+                '<span class="aidrama-creative-panel-marker aidrama-creative-brief-marker" '
+                'aria-hidden="true"></span>',
+                unsafe_allow_html=True,
+            )
+            _render_brief(project, service, items, latest)
     _render_provenance(project, service, latest)
 
 

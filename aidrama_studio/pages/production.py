@@ -14,7 +14,6 @@ from aidrama_studio.domain import (
 )
 from aidrama_studio.pages._shared import (
     current_project_or_stop,
-    render_actionable_blockers,
     render_automation_mode,
     render_background_activity,
     render_project_context,
@@ -377,6 +376,9 @@ def _readiness_check(readiness: Mapping[str, object], key: str, reason_tokens: t
 
 def _render_readiness_console(readiness: Mapping[str, object]) -> None:
     ready = bool(readiness.get("ready"))
+    if not ready:
+        _render_locked_production_workspace(readiness)
+        return
     st.markdown("### 制作准备度")
     st.markdown("项目 → 制作准备 → 镜头生产 → QC → 完成")
     status_col, story_col = st.columns(2)
@@ -392,18 +394,102 @@ def _render_readiness_console(readiness: Mapping[str, object]) -> None:
     coverage_col.metric("人物参考资产", str(character_coverage if character_coverage is not None else ("已满足" if ready else "需检查")))
     location_col.metric("场景参考资产", str(location_coverage if location_coverage is not None else ("已满足" if ready else "需检查")))
 
-    reasons = _readiness_reasons(readiness)
-    if ready:
-        st.success("制作准备已完成，可以开始整剧制作。")
-    else:
-        st.warning("Production 尚未就绪。请先完成以下前置条件：")
-        render_actionable_blockers(
-            reasons or ["approved Story Bible, Structured Script, Shot Plan and Reference Assets are required"],
-            project_id=str(readiness.get("project_id") or "production"),
+    st.success("制作准备已完成，可以开始整剧制作。")
+
+
+def _coverage_complete(value: object) -> bool:
+    """Interpret the service's canonical coverage projection without recomputing it."""
+
+    current, separator, required = str(value or "").partition("/")
+    if not separator:
+        return False
+    try:
+        return int(current) == int(required)
+    except ValueError:
+        return False
+
+
+def _locked_prerequisites(readiness: Mapping[str, object]) -> list[tuple[str, str, str, bool]]:
+    story_ready = _readiness_check(readiness, "story_bible_approved", ("story bible", "story_bible"))
+    script_ready = _readiness_check(readiness, "structured_script_approved", ("structured script", "script"))
+    plan_ready = _readiness_check(readiness, "shot_plan_approved", ("shot plan", "shot_plan"))
+    references_ready = (
+        plan_ready
+        and _coverage_complete(readiness.get("character_reference_coverage"))
+        and _coverage_complete(readiness.get("location_reference_coverage"))
+    )
+    return [
+        ("确认故事设定", "Story Bible 已批准后才能固定制作基础。", "story", story_ready),
+        ("确认结构化剧本", "剧本需与当前故事版本保持一致。", "story", script_ready),
+        ("确认分镜方案", "镜头顺序与时长必须经过人工确认。", "director", plan_ready),
+        ("锁定角色与场景参考", "生产只使用已明确锁定的参考资产。", "assets", references_ready),
+    ]
+
+
+def _render_locked_shot_board(readiness: Mapping[str, object]) -> None:
+    shot_count = int(readiness.get("shot_count") or 0)
+    if shot_count:
+        visible = min(shot_count, 10)
+        slots = "".join(
+            '<div class="aidrama-shot-slot">'
+            f'<strong>镜头 {index:02d}</strong><span>等待制作</span></div>'
+            for index in range(1, visible + 1)
         )
-        missing = [reason for reason in reasons if "reference" in reason.lower() or "参考" in reason]
-        if missing:
-            st.info("参考资产缺失时，请前往「创意与剧本 → Reference Assets」补齐人物或场景覆盖。")
+        if shot_count > visible:
+            slots += (
+                '<div class="aidrama-shot-slot"><strong>更多镜头</strong>'
+                f'<span>另有 {shot_count - visible} 个已规划镜头</span></div>'
+            )
+        body = f'<div class="aidrama-shot-slot-grid">{slots}</div>'
+        summary = f"已确认的 Shot Plan · {shot_count} 个镜头"
+    else:
+        body = (
+            '<div class="aidrama-production-empty-board">'
+            '<strong>镜头生产区等待 Shot Plan</strong>'
+            '<span>确认分镜后，真实镜头会在这里进入制作队列。</span></div>'
+        )
+        summary = "尚无可用于制作的已确认镜头"
+    st.markdown(
+        '<section class="aidrama-production-locked-board">'
+        '<div class="aidrama-production-board-head">'
+        '<strong>Shot Production Board</strong>'
+        f'<span>{summary}</span></div>{body}</section>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_locked_production_workspace(readiness: Mapping[str, object]) -> None:
+    _render_locked_shot_board(readiness)
+    prerequisites = _locked_prerequisites(readiness)
+    rows = "".join(
+        '<div class="aidrama-prereq-row{}">'
+        '<span class="aidrama-prereq-mark">{}</span>'
+        '<div class="aidrama-prereq-copy"><strong>{}</strong><span>{}</span></div></div>'.format(
+            " is-complete" if complete else "",
+            "✓" if complete else "○",
+            title,
+            detail,
+        )
+        for title, detail, _page, complete in prerequisites
+    )
+    st.markdown(
+        '<section class="aidrama-production-prereqs">'
+        '<h3>开始制作前</h3>' + rows + '</section>',
+        unsafe_allow_html=True,
+    )
+    next_item = next((item for item in prerequisites if not item[3]), None)
+    if next_item is None:
+        return
+    title, _detail, page, _complete = next_item
+    if st.button(
+        f"去完成：{title}",
+        type="primary",
+        key=f"production-next-prerequisite-{readiness.get('project_id') or 'project'}-{page}",
+        use_container_width=True,
+    ):
+        from aidrama_studio.components.navigation import request_navigation
+
+        request_navigation(page)
 
 
 def _board_entries(production_service: ProductionService, project, job) -> list[dict[str, object]]:
@@ -1261,8 +1347,13 @@ def _render_empty_shot_board(readiness: Mapping[str, object]) -> None:
 def render() -> None:
     page_header("制作", "PRODUCTION WORKSPACE", "查看镜头进度，处理失败项，并在明确授权后开始制作。")
     project = current_project_or_stop()
-    render_project_context(project, stage="制作", next_action="查看制作进度", next_page="production")
-    render_automation_mode(project.id, compact=True)
+    render_project_context(
+        project,
+        stage="制作",
+        next_action="查看制作进度",
+        next_page="production",
+        suppress_next=True,
+    )
     production_service = ProductionService()
     execution_service = ProductionExecutionService(production_service=production_service)
     qc_service = ProductionQCService()
@@ -1282,6 +1373,10 @@ def render() -> None:
 
     # Legacy label retained for discoverability: Production Readiness Check.
     _render_readiness_console(readiness)
+    if not bool(readiness.get("ready")):
+        render_automation_mode(project.id, compact=True)
+        return
+    render_automation_mode(project.id, compact=True)
 
     selected_job = _select_current_job(project.id, jobs, production_service)
     job_readiness = readiness
