@@ -615,6 +615,19 @@ def _print_build_version() -> int:
                 f"AIDrama Studio {value.get('product_version', 'unknown')} "
                 f"({value.get('delivery_head', 'unknown')})"
             )
+            if os.name == "nt" and getattr(sys, "frozen", False):
+                try:
+                    import ctypes
+
+                    ctypes.windll.user32.MessageBoxW(
+                        None,
+                        f"AIDrama Studio {value.get('product_version', 'unknown')}\n"
+                        f"Build SHA: {value.get('delivery_head', 'unknown')}",
+                        "AIDrama Studio version",
+                        0x40,
+                    )
+                except Exception:
+                    pass
             return 0
     print("AIDrama Studio version metadata unavailable", file=sys.stderr)
     return 2
