@@ -256,11 +256,14 @@ subtitle_provider = "edge"
 # Windows example: ffmpeg_path = "C:\\path\\to\\ffmpeg.exe"
 # ffmpeg_path = ""
 
-# Leave unset to follow the app default (libx264). Hardware encoders are optional;
-# unsupported encoders automatically fall back to libx264.
+# The packaged AIDrama Studio desktop build selects its reviewed H.264 encoder
+# with AIDRAMA_FFMPEG_H264_ENCODER=h264_mf. If that encoder is unavailable, the
+# Final Assembly path fails explicitly; it never substitutes libx264.
 # Available values: "libx264", "h264_nvenc", "h264_amf", "h264_qsv",
 # "h264_mf", "h264_videotoolbox".
-# video_codec = "libx264"
+# This legacy MoneyPrinterTurbo option does not override the packaged AIDrama
+# Final Assembly encoder contract.
+# video_codec = "h264_mf"
 
 # -----------------------------------------------------------------------------
 # Storage and Task Runtime / 存储与任务运行

@@ -13,6 +13,9 @@ param(
     [string]$ArtifactRoot,
 
     [Parameter(Mandatory = $false)]
+    [string]$FfmpegArchive = $env:AIDRAMA_FFMPEG_ARCHIVE,
+
+    [Parameter(Mandatory = $false)]
     [string]$InnoCompiler = $env:AIDRAMA_INNO_COMPILER,
 
     [switch]$KeepStaging,
@@ -109,6 +112,12 @@ try {
         '--delivery-head', $DeliveryHead,
         '--source-root', $stageRoot
     )
+    if (-not [string]::IsNullOrWhiteSpace($FfmpegArchive)) {
+        if (-not (Test-Path -LiteralPath $FfmpegArchive -PathType Leaf)) {
+            Fail-Closed "AIDRAMA_FFMPEG_ARCHIVE does not point to a readable archive"
+        }
+        $buildArgs += @('--ffmpeg-archive', (Resolve-Path -LiteralPath $FfmpegArchive -ErrorAction Stop).Path)
+    }
     # Keep the packaging-only launcher out of the staged product tree. The
     # temporary tooling directory contains no product modules, so PyInstaller
     # resolves aidrama_studio/app/webui exclusively from SOURCE_ROOT.
@@ -173,13 +182,43 @@ try {
         Fail-Closed "embedded build provenance does not match DELIVERY_HEAD/VERSION"
     }
 
-    $ffmpeg = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^ffmpeg(?:[-_].*)?\.exe$' })
-    if ($ffmpeg.Count -eq 0) {
-        Fail-Closed "FFmpeg binary is not bundled; refusing a package that depends on global PATH"
+    $ffmpeg = Join-Path $packageRoot '_internal\ffmpeg\ffmpeg.exe'
+    $ffprobe = Join-Path $packageRoot '_internal\ffmpeg\ffprobe.exe'
+    $ffmpegEvidencePath = Join-Path $packageRoot '_internal\ffmpeg\distribution-evidence.json'
+    if (-not (Test-Path -LiteralPath $ffmpeg -PathType Leaf)) {
+        Fail-Closed "reviewed FFmpeg binary is not bundled at the fixed package path"
     }
-    $ffprobe = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^ffprobe(?:[-_].*)?\.exe$' })
+    if (-not (Test-Path -LiteralPath $ffprobe -PathType Leaf)) {
+        Fail-Closed "reviewed FFprobe binary is not bundled at the fixed package path"
+    }
+    if (-not (Test-Path -LiteralPath $ffmpegEvidencePath -PathType Leaf)) {
+        Fail-Closed "reviewed FFmpeg distribution evidence is missing"
+    }
+    $allFfmpeg = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^ffmpeg(?:[-_].*)?\.exe$' })
+    if ($allFfmpeg.Count -ne 1 -or $allFfmpeg[0].FullName -ne (Resolve-Path -LiteralPath $ffmpeg).Path) {
+        Fail-Closed "package contains an unexpected secondary FFmpeg binary"
+    }
+    $encoderInventory = @(& $ffmpeg -hide_banner -encoders 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        Fail-Closed "bundled FFmpeg failed encoder inventory probe"
+    }
+    $encoderText = $encoderInventory -join "`n"
+    if ($encoderText -notmatch '(?m)^\s*[A-Z.]+\s+h264_mf(?:\s|$)') {
+        Fail-Closed "bundled FFmpeg does not expose required h264_mf encoder"
+    }
+    if ($encoderText -match '(?m)^\s*[A-Z.]+\s+libx264(?:\s|$)') {
+        Fail-Closed "bundled FFmpeg exposes forbidden libx264 encoder"
+    }
+    $ffmpegEvidence = Get-Content -LiteralPath $ffmpegEvidencePath -Raw | ConvertFrom-Json
+    $ffmpegAssessment = $ffmpegEvidence.technical_license_assessment
+    if ($ffmpegAssessment.gpl_components_present -ne $false -or $ffmpegAssessment.libx264_present -ne $false -or $ffmpegAssessment.h264_mf_present -ne $true) {
+        Fail-Closed "bundled FFmpeg evidence does not meet the LGPL/h264_mf product contract"
+    }
+    $ffmpegVersion = @(& $ffmpeg -version 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        Fail-Closed "bundled FFmpeg failed version probe"
+    }
 
     $secretPattern = '(?i)(sk-[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,}|api[_-]?key\s*=\s*["''][^"'']{12,})'
     $textExtensions = @('.py', '.toml', '.json', '.txt', '.md', '.yaml', '.yml', '.ini', '.cfg')
@@ -253,7 +292,12 @@ try {
         installer = if ($installer.Count -eq 1) { $installer[0].Name } else { $null }
         installer_sha256 = if ($installer.Count -eq 1) { (Get-FileHash -LiteralPath $installer[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
         ffmpeg_discovery = 'PASS'
-        ffprobe_discovery = if ($ffprobe.Count -gt 0) { 'PASS' } else { 'NOT_SHIPPED_APPLICATION_DOES_NOT_REQUIRE_FFPROBE' }
+        ffprobe_discovery = 'PASS'
+        ffmpeg_encoder_inventory = 'PASS'
+        configured_h264_encoder = 'h264_mf'
+        ffmpeg_version = $ffmpegVersion[0]
+        ffmpeg_distribution = $ffmpegEvidence.distribution
+        ffmpeg_technical_license_assessment = $ffmpegAssessment
         credentials_bundled = $false
         built_at_utc = [DateTime]::UtcNow.ToString('o')
     }

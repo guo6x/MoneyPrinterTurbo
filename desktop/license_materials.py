@@ -11,12 +11,10 @@ from __future__ import annotations
 
 import importlib.metadata as metadata
 import json
-import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable
 
 from desktop.release import locked_runtime_components
 
@@ -79,47 +77,38 @@ def _copy_distribution_materials(root: Path, package_name: str, destination: Pat
     return meta
 
 
-def _find_ffmpeg() -> Path | None:
-    configured = os.environ.get("IMAGEIO_FFMPEG_EXE")
-    if configured and Path(configured).is_file():
-        return Path(configured).resolve()
-    try:
-        import imageio_ffmpeg
-
-        candidate = Path(imageio_ffmpeg.get_ffmpeg_exe())
-        return candidate.resolve() if candidate.is_file() else None
-    except Exception:
-        return None
-
-
-def _copy_repository_ffmpeg_materials(root: Path, target: Path) -> list[str]:
-    """Copy checked-in upstream FFmpeg texts into the package."""
-
-    source_root = Path(__file__).resolve().parent.parent / "licenses" / "ffmpeg"
-    if not source_root.is_dir():
-        return []
-    copied: list[str] = []
-    for source in sorted(source_root.rglob("*"), key=lambda path: path.as_posix().casefold()):
-        if not source.is_file():
-            continue
-        destination = target / source.relative_to(source_root)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
-        copied.append(destination.relative_to(root).as_posix())
-    return copied
-
-
 def _collect_ffmpeg(root: Path, destination: Path) -> dict[str, object]:
+    """Record the FFmpeg binary that is physically inside this package."""
+
     target = destination / "ffmpeg"
     target.mkdir(parents=True, exist_ok=True)
-    license_files = _copy_repository_ffmpeg_materials(root, target)
-    binary = _find_ffmpeg()
-    if binary is None:
-        (target / "REDISTRIBUTION_REVIEW_REQUIRED.txt").write_text(
-            "No FFmpeg executable was discoverable in the dedicated build environment.\n",
-            encoding="utf-8",
-        )
-        return {"status": "NOT_DISCOVERABLE", "binary": None, "license_files": license_files}
+    bundled = root / "_internal" / "ffmpeg"
+    binary = bundled / "ffmpeg.exe"
+    ffprobe = bundled / "ffprobe.exe"
+    evidence_path = bundled / "distribution-evidence.json"
+    if not binary.is_file() or not ffprobe.is_file() or not evidence_path.is_file():
+        raise RuntimeError("reviewed FFmpeg payload is missing from the physical package tree")
+    license_files: list[str] = []
+    for filename in ("LICENSE.txt", "distribution-evidence.json"):
+        source = bundled / filename
+        if not source.is_file():
+            raise RuntimeError(f"reviewed FFmpeg payload lacks {filename}")
+        copied = target / filename
+        shutil.copyfile(source, copied)
+        license_files.append(copied.relative_to(root).as_posix())
+    try:
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("reviewed FFmpeg evidence is unreadable") from exc
+    technical = evidence.get("technical_license_assessment", {})
+    if not isinstance(technical, dict) or technical.get("legal_approval") != "NOT_A_LEGAL_APPROVAL":
+        raise RuntimeError("reviewed FFmpeg evidence does not preserve the legal-approval boundary")
+    if (
+        technical.get("gpl_components_present") is not False
+        or technical.get("libx264_present") is not False
+        or technical.get("h264_mf_present") is not True
+    ):
+        raise RuntimeError("reviewed FFmpeg evidence fails the LGPL/h264_mf packaging contract")
     def probe(*args: str) -> str:
         completed = subprocess.run(
             [str(binary), *args], capture_output=True, text=True, check=False,
@@ -133,15 +122,18 @@ def _collect_ffmpeg(root: Path, destination: Path) -> dict[str, object]:
     (target / "FFMPEG_BINARY_BUILDCONF.txt").write_text(buildconf_text, encoding="utf-8")
     (target / "FFMPEG_BINARY_LICENSE_OUTPUT.txt").write_text(license_text, encoding="utf-8")
     review = (
-        "The exact binary below is bundled from the build environment.\n"
-        "Its upstream license/source obligations must be approved by the release owner before external redistribution.\n"
-        "This record is evidence, not a legal approval.\n\n"
+        "The exact binary below is bundled from this package's pinned FFmpeg payload.\n"
+        "This is technical redistribution/licensing evidence, not a legal approval.\n"
+        "Release owner review remains required before external redistribution.\n\n"
         + version_text
     )
     (target / "REDISTRIBUTION_REVIEW_REQUIRED.txt").write_text(review, encoding="utf-8")
     return {
-        "status": "EXACT_BINARY_RECORDED_LEGAL_REVIEW_REQUIRED",
-        "binary": str(binary),
+        "status": "PINNED_LGPL_H264_MF_BINARY_RECORDED_LEGAL_REVIEW_REQUIRED",
+        "binary": binary.relative_to(root).as_posix(),
+        "ffprobe": ffprobe.relative_to(root).as_posix(),
+        "distribution_evidence": evidence.get("distribution"),
+        "technical_license_assessment": technical,
         "version_file": (target / "FFMPEG_BINARY_VERSION.txt").relative_to(root).as_posix(),
         "buildconf_file": (target / "FFMPEG_BINARY_BUILDCONF.txt").relative_to(root).as_posix(),
         "license_output_file": (target / "FFMPEG_BINARY_LICENSE_OUTPUT.txt").relative_to(root).as_posix(),
@@ -188,7 +180,7 @@ def collect_license_materials(package_root: Path, *, lock_path: Path) -> Path:
         [
             "",
             f"FFmpeg: {ffmpeg.get('status')}",
-            "FFmpeg redistribution remains subject to exact-binary GPL/source-offer review.",
+            "FFmpeg redistribution remains subject to exact-binary release-owner review.",
         ]
     )
     (root / "THIRD_PARTY_NOTICES.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")

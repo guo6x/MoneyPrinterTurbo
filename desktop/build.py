@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,7 +46,11 @@ def _add_data(source: Path, destination: str) -> list[str]:
     return ["--add-data", f"{source}{os.pathsep}{destination}"]
 
 
-def runtime_data_args(source_root: Path | None = None) -> list[str]:
+def runtime_data_args(
+    source_root: Path | None = None,
+    *,
+    ffmpeg_bundle_dir: Path | None = None,
+) -> list[str]:
     """Data files needed by the Streamlit child at runtime.
 
     ``Main.py`` is intentionally shipped as data because the launcher invokes
@@ -56,6 +61,11 @@ def runtime_data_args(source_root: Path | None = None) -> list[str]:
 
     source = Path(source_root or SOURCE_ROOT).resolve()
     package_root = source / "aidrama_studio"
+    bundle = Path(ffmpeg_bundle_dir).resolve() if ffmpeg_bundle_dir is not None else None
+    if bundle is None or not (bundle / "ffmpeg.exe").is_file():
+        raise RuntimeError(
+            "a validated Windows FFmpeg payload is required; refusing imageio-ffmpeg/PATH fallback"
+        )
     return [
         *_add_data(package_root / "Main.py", "aidrama_studio"),
         *_add_data(package_root / "styles.css", "aidrama_studio"),
@@ -73,6 +83,9 @@ def runtime_data_args(source_root: Path | None = None) -> list[str]:
         # user-installed fallback font.
         *_add_data(source / "resource" / "songs", "resource/songs"),
         *_add_data(source / "resource" / "public", "resource/public"),
+        # This directory is created only by desktop.ffmpeg_distribution after
+        # its pinned archive, LGPL posture, and h264_mf inventory pass.
+        *_add_data(bundle, "ffmpeg"),
     ]
 
 
@@ -82,6 +95,7 @@ def build_command(
     version: str | None = None,
     delivery_head: str | None = None,
     source_root: Path | None = None,
+    ffmpeg_bundle_dir: Path | None = None,
 ) -> list[str]:
     if importlib.util.find_spec("PyInstaller") is None:
         raise RuntimeError("PyInstaller is not installed; install only the optional desktop build tool to package AIDrama")
@@ -136,7 +150,7 @@ def build_command(
         "clr_loader",
         "--collect-all",
         "proxy_tools",
-        "--collect-all",
+        "--collect-submodules",
         "imageio_ffmpeg",
         "--collect-submodules",
         "aidrama_studio",
@@ -170,7 +184,7 @@ def build_command(
         os.environ["AIDRAMA_VERSION"] = str(version)
     if delivery_head:
         os.environ["AIDRAMA_BUILD_SHA"] = str(delivery_head).lower()
-    command.extend(runtime_data_args(source))
+    command.extend(runtime_data_args(source, ffmpeg_bundle_dir=ffmpeg_bundle_dir))
     command.append(str(DESKTOP_ENTRYPOINT))
     return command
 
@@ -183,6 +197,12 @@ def _parse_args(argv: list[str] | None = None):
     parser.add_argument("--version", required=False)
     parser.add_argument("--delivery-head", required=False)
     parser.add_argument("--source-root", type=Path, default=SOURCE_ROOT)
+    parser.add_argument(
+        "--ffmpeg-archive",
+        type=Path,
+        default=(Path(os.environ["AIDRAMA_FFMPEG_ARCHIVE"]) if os.environ.get("AIDRAMA_FFMPEG_ARCHIVE") else None),
+        help="optional local copy of the hash-pinned Windows x64 FFmpeg archive",
+    )
     return parser.parse_args(argv)
 
 
@@ -212,16 +232,32 @@ def main(argv: list[str] | None = None) -> int:
     if args.delivery_head:
         os.environ["AIDRAMA_BUILD_SHA"] = str(args.delivery_head).lower()
     try:
-        command = build_command(
-            output_dir=args.output_dir,
-            version=args.version,
-            delivery_head=args.delivery_head,
-            source_root=args.source_root,
-        )
+        from desktop.ffmpeg_distribution import fetch_pinned_archive, stage_distribution
+
+        archive_parent = Path(args.output_dir).resolve().parent
+        archive_parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="aidrama-packaged-ffmpeg-", dir=archive_parent) as temporary:
+            temporary_root = Path(temporary)
+            archive = (
+                Path(args.ffmpeg_archive).resolve()
+                if args.ffmpeg_archive is not None
+                else fetch_pinned_archive(temporary_root / "ffmpeg.zip")
+            )
+            bundle = stage_distribution(archive, temporary_root / "ffmpeg")
+            command = build_command(
+                output_dir=args.output_dir,
+                version=args.version,
+                delivery_head=args.delivery_head,
+                source_root=args.source_root,
+                ffmpeg_bundle_dir=bundle,
+            )
+            result = subprocess.call(command, cwd=str(PROJECT_ROOT))
     except RuntimeError as exc:
         print(f"AIDrama desktop build unavailable: {exc}", file=sys.stderr)
         return 2
-    result = subprocess.call(command, cwd=str(PROJECT_ROOT))
+    except Exception as exc:
+        print(f"AIDrama pinned FFmpeg unavailable: {exc}", file=sys.stderr)
+        return 2
     if result != 0:
         return result
     try:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -109,6 +110,8 @@ def _make_source_video(
     resolution: str,
     suffix: str,
     metadata_duration_seconds: float | None = None,
+    source_encoder: str = "libx264",
+    with_audio: bool = False,
 ):
     execution, artifact, _qc, _review = _source(
         repository,
@@ -124,23 +127,35 @@ def _make_source_video(
     )
     target = repository.paths.projects / project.id / artifact.path
     target.parent.mkdir(parents=True, exist_ok=True)
-    completed = subprocess.run(
-        [
-            ffmpeg,
-            "-y",
+    command = [
+        ffmpeg,
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=navy:s={resolution}:d={duration_seconds:g}",
+    ]
+    if with_audio:
+        command += [
             "-f",
             "lavfi",
             "-i",
-            f"color=c=navy:s={resolution}:d={duration_seconds:g}",
-            "-an",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            str(target),
-        ],
+            f"sine=frequency=440:sample_rate=48000:duration={duration_seconds:g}",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:a",
+            "aac",
+        ]
+    else:
+        command += ["-an"]
+    command += ["-c:v", source_encoder]
+    if source_encoder in {"libx264", "libx265"}:
+        command += ["-preset", "ultrafast"]
+    command += ["-pix_fmt", "yuv420p", str(target)]
+    completed = subprocess.run(
+        command,
         capture_output=True,
         text=True,
         check=False,
@@ -251,6 +266,65 @@ def test_duration_output_e2e_trims_physical_source_to_creative_target(context):
     assert metadata["source_items"][0]["source_duration_seconds"] == pytest.approx(2.5, abs=0.1)
     assert metadata["source_items"][0]["planned_timeline_duration_seconds"] == 2.0
     assert metadata["source_items"][0]["actual_timeline_duration_seconds"] == pytest.approx(2.0, abs=0.1)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("AIDRAMA_TEST_PACKAGED_FFMPEG"),
+    reason="set AIDRAMA_TEST_PACKAGED_FFMPEG to the reviewed Windows package ffmpeg.exe",
+)
+def test_real_local_h264_mf_final_assembly_uses_reviewed_windows_payload(context, monkeypatch):
+    """Exercise the durable Final Assembly path against the package FFmpeg.
+
+    This is intentionally opt-in because Media Foundation availability is a
+    property of the Windows packaging host. Packaging P1 runs it with the
+    physically packaged binary, not a PATH or imageio-ffmpeg executable.
+    """
+
+    repository, project = context
+    ffmpeg = Path(os.environ["AIDRAMA_TEST_PACKAGED_FFMPEG"])
+    if not ffmpeg.is_file():
+        pytest.fail("AIDRAMA_TEST_PACKAGED_FFMPEG does not name a real executable")
+    monkeypatch.setenv(H264_ENCODER_ENV, "h264_mf")
+    ProjectService(repository).update(
+        project.id,
+        title=project.title,
+        description=project.description,
+        status=project.status,
+        aspect_ratio=AspectRatio.PORTRAIT,
+        target_duration_seconds=1,
+        delivery_resolution_label="1080p",
+        target_fps=30,
+        quality_mode="HIGH",
+    )
+    job, shots = _shots(repository, project, 1)
+    _make_source_video(
+        repository,
+        project,
+        job,
+        shots[0],
+        ffmpeg=str(ffmpeg),
+        duration_seconds=1.0,
+        resolution="320x180",
+        suffix="h264-mf-packaging",
+        source_encoder="mpeg4",
+        with_audio=True,
+    )
+    assembly = FinalAssemblyService(repository).create_assembly(
+        project.id, job.id, freeze=True
+    )
+    attempt = FinalAssemblyRuntimeService(
+        repository,
+        adapter=MPTFinalAssemblyAdapter(
+            project_root=repository.paths.projects / project.id,
+            ffmpeg_binary=str(ffmpeg),
+        ),
+    ).render(project.id, assembly.id)
+
+    assert attempt.status.value == "SUCCEEDED"
+    assert attempt.metadata_json["codec"] == "h264"
+    assert attempt.metadata_json["resolution"] == "1080x1920"
+    assert attempt.metadata_json["duration_seconds"] == pytest.approx(1.0, abs=0.12)
+    assert attempt.metadata_json["audio_stream"] is True
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None and not Path("D:/github/MoneyPrinterTurbo/.venv/Lib/site-packages/imageio_ffmpeg/binaries").exists(), reason="ffmpeg unavailable")

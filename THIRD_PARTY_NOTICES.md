@@ -19,11 +19,14 @@ retained when that dependency is present in the final package.
 
 Important distribution boundaries:
 
-- The current source environment's `imageio-ffmpeg` Windows binary reports an
-  FFmpeg 7.1 build configured with `--enable-gpl --enable-version3` and GPL
-  codecs. It must not be treated as an MIT component. Distribution requires a
-  separately approved GPL compliance decision and the corresponding license /
-  source-offer obligations.
+- The Windows installer does not ship `imageio-ffmpeg`'s FFmpeg executable.
+  It carries a hash-pinned BtbN Windows x64 shared FFmpeg payload instead. The
+  package build fails unless its actual `ffmpeg -L` output is LGPL, its
+  `ffmpeg -buildconf` contains no `--enable-gpl` or `--enable-libx264`,
+  `libx264` is absent from `ffmpeg -encoders`, and `h264_mf` is present. The
+  exact build/version/configuration/license and encoder records live beside
+  the payload and in `licenses/ffmpeg/`; this is technical evidence, not legal
+  approval.
 - `resource/fonts/MicrosoftYaHei*.ttc` and `resource/fonts/STHeiti*.ttc` have
   no release-approved redistribution record in this repository. The AIDrama
   package definition does not add `resource/fonts`, and the release audit
@@ -36,8 +39,6 @@ The detailed, evidence-scoped audit is maintained in
 
 The Windows build also emits `THIRD_PARTY_NOTICES.txt` and a `licenses/`
 directory from the exact dedicated build environment. `desktop/license_materials.py`
-retains upstream wheel license/notice files and the exact bundled FFmpeg
-`-version`/`-L` output; missing materials are marked for release review.
-The checked-in `licenses/ffmpeg/` directory also carries the FFmpeg 7.1
-upstream COPYING texts, GPL-enabled external-library COPYING texts, and an
-exact-payload corresponding-source checklist.
+retains upstream wheel license/notice files plus the exact bundled FFmpeg
+`-version`/`-buildconf`/`-L` output and pinned-payload evidence. Missing
+materials are marked for release review.

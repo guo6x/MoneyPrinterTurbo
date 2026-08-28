@@ -208,6 +208,10 @@ def configure_packaged_runtime_environment() -> Path | None:
     ffmpeg = _find_bundled_executable("ffmpeg.exe")
     if ffmpeg:
         os.environ["IMAGEIO_FFMPEG_EXE"] = str(ffmpeg)
+        # The installer ships one reviewed Media Foundation-capable FFmpeg
+        # payload.  Do not accept a machine-level encoder substitution or a
+        # libx264 fallback in the frozen product.
+        os.environ["AIDRAMA_FFMPEG_H264_ENCODER"] = "h264_mf"
     ffprobe = _find_bundled_executable("ffprobe.exe")
     if ffprobe:
         os.environ["AIDRAMA_FFPROBE_EXE"] = str(ffprobe)
@@ -220,19 +224,14 @@ def _find_bundled_executable(name: str) -> Path | None:
     if not getattr(sys, "frozen", False):
         return None
     target = str(name).casefold()
-    # imageio-ffmpeg's packaged binary is commonly named
-    # ``ffmpeg-win64-v4.x.y.exe`` rather than simply ``ffmpeg.exe``.
-    target_stem = Path(target).stem
-    # Check common onedir locations first; the recursive fallback handles
-    # imageio_ffmpeg's versioned ``binaries`` directory.
+    # The packaging build adds the reviewed payload at ``_internal/ffmpeg``.
+    # There is no imageio-ffmpeg binary fallback in a desktop installation.
     roots = (PROJECT_ROOT, PROJECT_ROOT / "_internal")
     seen: set[Path] = set()
     for root in roots:
         if not root.is_dir():
             continue
-        candidates = [root / name, root / "ffmpeg" / name, root / "imageio_ffmpeg" / name]
-        glob_pattern = f"{target_stem}*.exe" if target.endswith(".exe") else name
-        candidates.extend(path for path in root.rglob(glob_pattern) if path.is_file())
+        candidates = [root / "ffmpeg" / name]
         for candidate in candidates:
             try:
                 resolved = candidate.resolve()
@@ -242,10 +241,7 @@ def _find_bundled_executable(name: str) -> Path | None:
                 continue
             seen.add(resolved)
             candidate_name = resolved.name.casefold()
-            if resolved.is_file() and (
-                candidate_name == target
-                or (candidate_name.endswith(".exe") and candidate_name.startswith(target_stem + "-"))
-            ):
+            if resolved.is_file() and candidate_name == target:
                 return resolved
     return None
 
