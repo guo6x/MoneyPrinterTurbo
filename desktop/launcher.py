@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -37,6 +38,117 @@ class DesktopLaunchError(RuntimeError):
     """Raised when the local Streamlit process cannot become healthy."""
 
 
+class LauncherInstanceLock:
+    """Cross-platform advisory lock held for the lifetime of the launcher.
+
+    The lock file lives in the per-user data directory and is deliberately
+    kept as a normal file so uninstall/upgrade operations never need to touch
+    it.  Windows uses ``msvcrt.locking`` while POSIX smoke runs use
+    ``fcntl.flock``.  Both locks are released automatically if the process
+    exits, including an unhandled crash, so stale lock files are harmless.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path).resolve()
+        self._handle: Any | None = None
+
+    def acquire(self) -> "LauncherInstanceLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+", encoding="utf-8")
+        try:
+            # msvcrt.locking requires at least one byte in the file and a
+            # cursor positioned at the byte being locked.
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write("0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            handle.seek(0)
+            handle.truncate()
+            handle.write(str(os.getpid()))
+            handle.flush()
+        except (ImportError, OSError) as exc:
+            handle.close()
+            raise DesktopLaunchError(
+                "AIDrama Studio is already running (or its launcher lock is unavailable)"
+            ) from exc
+        self._handle = handle
+        return self
+
+    def release(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except (ImportError, OSError):
+            # Closing the descriptor still releases the OS lock.  Shutdown
+            # must remain best-effort even if a filesystem was disconnected.
+            pass
+        finally:
+            handle.close()
+
+    def __enter__(self) -> "LauncherInstanceLock":
+        return self.acquire()
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
+
+
+_SECRET_IN_STARTUP_LOG = re.compile(
+    r"(?i)(api[_-]?key|token|secret|password|authorization)\s*[:=]\s*[^\s,;]+"
+)
+
+
+def _append_startup_log(path: Path | None, message: str) -> None:
+    """Persist concise startup diagnostics without writing credentials."""
+
+    if path is None:
+        return
+    try:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        safe = _SECRET_IN_STARTUP_LOG.sub(r"\1=<redacted>", str(message))
+        safe = " ".join(safe.replace("\r", " ").replace("\n", " ").split())
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {safe}\n")
+    except OSError:
+        # Diagnostics must never prevent the launcher from returning its real
+        # startup status (for example when a profile is read-only).
+        return
+
+
+def _show_startup_error(message: str) -> None:
+    """Show a concise native error for windowed frozen launches."""
+
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return
+    safe = _SECRET_IN_STARTUP_LOG.sub(r"\1=<redacted>", str(message))
+    safe = " ".join(safe.replace("\r", " ").replace("\n", " ").split())
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, safe, "AIDrama Studio", 0x10)
+    except Exception:
+        # A missing user32 (or a non-interactive session) should not mask the
+        # original startup failure, which is already persisted to the log.
+        return
 def validate_loopback_host(host: str) -> str:
     normalized = str(host).strip().lower()
     if normalized not in LOOPBACK_HOSTS:
@@ -64,24 +176,113 @@ def configure_packaged_runtime_environment() -> Path | None:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    explicit_data_root = os.environ.get("AIDRAMA_DATA_DIR", "").strip()
     local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
+    if explicit_data_root:
+        # Test harnesses and managed deployments may provide an explicit
+        # isolated root.  Preserve that contract while still forcing config
+        # and database paths to the same directory.
+        data_root = Path(explicit_data_root).expanduser()
+    elif local_app_data:
         data_root = Path(local_app_data) / "AIDramaStudio"
     else:
         data_root = Path.home() / "AppData" / "Local" / "AIDramaStudio"
     data_root = data_root.resolve()
     data_root.mkdir(parents=True, exist_ok=True)
     os.environ["MPT_CONFIG_DIR"] = str(data_root)
+    os.environ["AIDRAMA_DATA_DIR"] = str(data_root)
     # Streamlit infers development mode from its frozen ``__file__`` path.
     # Explicitly disable that inference so the packaged child may use the
     # launcher-selected loopback port.
     os.environ.setdefault("STREAMLIT_GLOBAL_DEVELOPMENTMODE", "false")
     config_path = data_root / "config.toml"
     if not config_path.exists():
-        bundled_template = Path(getattr(sys, "_MEIPASS")) / "config.example.toml"
+        bundled_template = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT)) / "config.example.toml"
         if bundled_template.is_file():
             shutil.copyfile(bundled_template, config_path)
+    # imageio-ffmpeg normally resolves its own binary from package resources,
+    # but PyInstaller onedir trees can place that resource under a different
+    # internal directory.  Prefer an executable shipped in this bundle and
+    # expose it through the application's existing explicit override.
+    ffmpeg = _find_bundled_executable("ffmpeg.exe")
+    if ffmpeg:
+        os.environ["IMAGEIO_FFMPEG_EXE"] = str(ffmpeg)
+    ffprobe = _find_bundled_executable("ffprobe.exe")
+    if ffprobe:
+        os.environ["AIDRAMA_FFPROBE_EXE"] = str(ffprobe)
     return data_root
+
+
+def _find_bundled_executable(name: str) -> Path | None:
+    """Return a bundled executable without consulting the machine PATH."""
+
+    if not getattr(sys, "frozen", False):
+        return None
+    target = str(name).casefold()
+    # imageio-ffmpeg's packaged binary is commonly named
+    # ``ffmpeg-win64-v4.x.y.exe`` rather than simply ``ffmpeg.exe``.
+    target_stem = Path(target).stem
+    # Check common onedir locations first; the recursive fallback handles
+    # imageio_ffmpeg's versioned ``binaries`` directory.
+    roots = (PROJECT_ROOT, PROJECT_ROOT / "_internal")
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        candidates = [root / name, root / "ffmpeg" / name, root / "imageio_ffmpeg" / name]
+        glob_pattern = f"{target_stem}*.exe" if target.endswith(".exe") else name
+        candidates.extend(path for path in root.rglob(glob_pattern) if path.is_file())
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            candidate_name = resolved.name.casefold()
+            if resolved.is_file() and (
+                candidate_name == target
+                or (candidate_name.endswith(".exe") and candidate_name.startswith(target_stem + "-"))
+            ):
+                return resolved
+    return None
+
+
+def _redirect_legacy_storage_to_appdata(data_root: Path | None) -> None:
+    """Keep legacy ``app.services`` artifacts out of the install directory.
+
+    The AIDrama Studio pages still reuse a few MoneyPrinterTurbo helpers whose
+    historical ``storage_dir`` implementation derives paths from ``__file__``.
+    In a frozen bundle that would point at the immutable install tree.  Patch
+    only that helper at the packaging boundary; read-only ``resource_dir`` and
+    model paths continue to resolve from the bundled application files.
+    """
+
+    if data_root is None:
+        return
+    try:
+        from app.utils import utils as runtime_utils
+    except Exception:
+        return
+
+    storage_root = Path(data_root).resolve() / "storage"
+
+    def storage_dir(sub_dir: str = "", create: bool = False) -> str:
+        target = storage_root / str(sub_dir) if sub_dir else storage_root
+        if create:
+            target.mkdir(parents=True, exist_ok=True)
+        return str(target)
+
+    def task_dir(sub_dir: str = "") -> str:
+        target = storage_root / "tasks"
+        if sub_dir:
+            target /= str(sub_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        return str(target)
+
+    runtime_utils.storage_dir = storage_dir
+    runtime_utils.task_dir = task_dir
 
 
 @dataclass(frozen=True)
@@ -100,6 +301,11 @@ class LauncherConfig:
     startup_timeout: float = 30.0
     health_interval: float = 0.2
     streamlit_module: str = "streamlit"
+    # Installed builds pass these paths from ``main``.  They remain optional
+    # so source-mode callers and unit tests do not create files in a real
+    # user's profile.
+    instance_lock_path: Path | None = None
+    startup_log_path: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "host", validate_loopback_host(self.host))
@@ -209,6 +415,8 @@ class DesktopLauncher:
     runner_host_factory: Callable[[], Any] | None = None
     _process: subprocess.Popen | None = field(default=None, init=False, repr=False)
     _runner_host: Any | None = field(default=None, init=False, repr=False)
+    _instance_lock: LauncherInstanceLock | None = field(default=None, init=False, repr=False)
+    _child_log_handle: Any | None = field(default=None, init=False, repr=False)
     port: int | None = field(default=None, init=False)
     url: str | None = field(default=None, init=False)
 
@@ -219,8 +427,16 @@ class DesktopLauncher:
     def start(self) -> str:
         if self._process is not None and self._process.poll() is None:
             return str(self.url)
+        if self.config.instance_lock_path is not None and self._instance_lock is None:
+            self._instance_lock = LauncherInstanceLock(self.config.instance_lock_path)
+            try:
+                self._instance_lock.acquire()
+            except DesktopLaunchError:
+                self._instance_lock = None
+                raise
         main_path = Path(self.config.main_path).resolve()
         if not main_path.is_file():
+            self.stop()
             raise DesktopLaunchError(f"AIDrama entrypoint not found: {main_path}")
         if self.runner_host_factory is not None and self._runner_host is None:
             try:
@@ -228,18 +444,31 @@ class DesktopLauncher:
                 self._runner_host.start()
             except Exception as exc:
                 self._runner_host = None
+                self.stop()
                 raise DesktopLaunchError(f"无法启动 AIDrama 后台制作服务：{exc}") from exc
         port = select_safe_port(self.config.host, self.config.preferred_port, self.config.port_attempts)
         command = build_streamlit_command(self.config, port)
+        child_stdout: Any = None
+        if self.config.startup_log_path is not None:
+            try:
+                log_path = Path(self.config.startup_log_path)
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                self._child_log_handle = log_path.open("ab")
+                child_stdout = self._child_log_handle
+            except OSError:
+                self._child_log_handle = None
         try:
             self._process = self.process_factory(
                 command,
                 cwd=str(PROJECT_ROOT),
                 stdin=subprocess.DEVNULL,
-                stdout=None,
-                stderr=None,
+                stdout=child_stdout,
+                stderr=subprocess.STDOUT if child_stdout is not None else None,
             )
         except OSError as exc:
+            if self._child_log_handle is not None:
+                self._child_log_handle.close()
+                self._child_log_handle = None
             self._stop_runner_host()
             raise DesktopLaunchError(f"无法启动 AIDrama 本地服务：{exc}") from exc
         self.port = port
@@ -283,19 +512,27 @@ class DesktopLauncher:
             time.sleep(max(0.05, float(self.config.health_interval)))
 
     def stop(self) -> None:
-        self._stop_runner_host()
-        process, self._process = self._process, None
-        if process is None or process.poll() is not None:
-            return
         try:
-            process.terminate()
-            process.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
+            self._stop_runner_host()
+            process, self._process = self._process, None
+            if process is None or process.poll() is not None:
+                return
             try:
-                process.kill()
-                process.wait(timeout=2)
+                process.terminate()
+                process.wait(timeout=5)
             except (OSError, subprocess.TimeoutExpired):
-                pass
+                try:
+                    process.kill()
+                    process.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        finally:
+            if self._child_log_handle is not None:
+                self._child_log_handle.close()
+                self._child_log_handle = None
+            lock, self._instance_lock = self._instance_lock, None
+            if lock is not None:
+                lock.release()
 
     def _stop_runner_host(self) -> None:
         host, self._runner_host = self._runner_host, None
@@ -340,6 +577,8 @@ class DesktopLauncher:
         except KeyboardInterrupt:
             return 0
         except DesktopLaunchError as exc:
+            _append_startup_log(self.config.startup_log_path, f"startup failed: {exc}")
+            _show_startup_error(f"AIDrama Studio 启动失败：{exc}")
             print(f"AIDrama desktop startup failed: {exc}", file=sys.stderr)
             return 1
         finally:
@@ -366,6 +605,8 @@ def _run_streamlit_child(argv: Sequence[str]) -> int:
     point.
     """
 
+    data_root = os.environ.get("AIDRAMA_DATA_DIR", "").strip()
+    _redirect_legacy_storage_to_appdata(Path(data_root) if data_root else None)
     from streamlit.web.cli import main as streamlit_main
 
     previous_argv = sys.argv
@@ -379,14 +620,20 @@ def _run_streamlit_child(argv: Sequence[str]) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    configure_packaged_runtime_environment()
+    data_root = configure_packaged_runtime_environment()
     if raw_argv and raw_argv[0] == "--streamlit-child":
         return _run_streamlit_child(raw_argv[1:])
     args = _parse_args(raw_argv)
     from desktop.background import DesktopBackgroundRunnerHost
 
     launcher = DesktopLauncher(
-        LauncherConfig(host=args.host, preferred_port=args.port, startup_timeout=args.startup_timeout),
+        LauncherConfig(
+            host=args.host,
+            preferred_port=args.port,
+            startup_timeout=args.startup_timeout,
+            instance_lock_path=(data_root / "launcher.lock") if data_root else None,
+            startup_log_path=(data_root / "logs" / "launcher.log") if data_root else None,
+        ),
         runner_host_factory=DesktopBackgroundRunnerHost,
     )
     if args.smoke:
@@ -394,6 +641,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(launcher.start())
             return 0
         except DesktopLaunchError as exc:
+            _append_startup_log(launcher.config.startup_log_path, f"smoke failed: {exc}")
             print(f"AIDrama desktop smoke failed: {exc}", file=sys.stderr)
             return 1
         finally:

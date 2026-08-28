@@ -28,6 +28,11 @@ node_modules
 venv/
 .venv
 
+# Windows delivery artifacts are generated outside source control.
+/dist/
+/build/
+AIDramaStudio.spec
+
 # Debug and test files
 CLAUDE.md
 debug/

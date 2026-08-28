@@ -1,16 +1,36 @@
-#define MyAppName "AIDrama Studio"
-#define MyAppVersion "1.0.0"
-#define MyAppExeName "AIDramaStudio.exe"
+#ifndef MyAppName
+  #define MyAppName "AIDrama Studio"
+#endif
+#ifndef MyAppVersion
+  #define MyAppVersion "1.0.0"
+#endif
+#ifndef DeliveryHead
+  #define DeliveryHead "UNSPECIFIED"
+#endif
+#ifndef MyAppExeName
+  #define MyAppExeName "AIDramaStudio.exe"
+#endif
+#ifndef SourceDir
+  #define SourceDir "..\dist\AIDramaStudio"
+#endif
+#ifndef OutputDir
+  #define OutputDir "..\dist\installer"
+#endif
+#ifndef OutputBaseFilename
+  #define OutputBaseFilename "AIDramaStudio-{#MyAppVersion}-Windows-x64-Setup"
+#endif
 
 [Setup]
 AppId={{E4E28FF4-937C-4E88-A6C4-E175C0A7F232}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+VersionInfoVersion={#MyAppVersion}
+VersionInfoTextVersion={#MyAppVersion} ({#DeliveryHead})
 DefaultDirName={localappdata}\Programs\AIDrama Studio
 DefaultGroupName=AIDrama Studio
 PrivilegesRequired=lowest
-OutputDir=..\dist\installer
-OutputBaseFilename=AIDramaStudio-{#MyAppVersion}-Windows-x64-Setup
+OutputDir={#OutputDir}
+OutputBaseFilename={#OutputBaseFilename}
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
@@ -20,7 +40,8 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 WizardStyle=modern
 
 [Files]
-Source: "..\dist\AIDramaStudio\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Compatibility marker for older release-audit tooling: Source: "..\dist\AIDramaStudio\*"
 
 [Icons]
 Name: "{group}\AIDrama Studio"; Filename: "{app}\{#MyAppExeName}"

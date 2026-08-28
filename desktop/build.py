@@ -9,24 +9,30 @@ from __future__ import annotations
 
 import importlib.metadata
 import importlib.util
+import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # When invoked as ``python desktop/build.py`` Python puts only the desktop
 # directory on sys.path.  Add the repository root before importing the package
 # so the documented direct command works as well as ``python -m desktop.build``.
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PACKAGING_ROOT = Path(__file__).resolve().parent.parent
+SOURCE_ROOT = Path(os.environ.get("AIDRAMA_SOURCE_ROOT", str(PACKAGING_ROOT))).resolve()
+PROJECT_ROOT = PACKAGING_ROOT
+if str(PACKAGING_ROOT) not in sys.path:
+    sys.path.insert(0, str(PACKAGING_ROOT))
 
 
 
 # The executable is a shell around the local Streamlit service.  Freezing the
 # Streamlit page itself would bypass the loopback/health/WebView lifecycle and
 # produce a binary that cannot perform the documented desktop startup flow.
-DESKTOP_ENTRYPOINT = PROJECT_ROOT / "desktop" / "launcher.py"
+DESKTOP_ENTRYPOINT = Path(
+    os.environ.get("AIDRAMA_DESKTOP_ENTRYPOINT", str(PACKAGING_ROOT / "desktop" / "launcher.py"))
+).resolve()
 PYWEBVIEW_VERSION = "6.2.1"
 
 
@@ -39,7 +45,7 @@ def _add_data(source: Path, destination: str) -> list[str]:
     return ["--add-data", f"{source}{os.pathsep}{destination}"]
 
 
-def runtime_data_args() -> list[str]:
+def runtime_data_args(source_root: Path | None = None) -> list[str]:
     """Data files needed by the Streamlit child at runtime.
 
     ``Main.py`` is intentionally shipped as data because the launcher invokes
@@ -48,7 +54,8 @@ def runtime_data_args() -> list[str]:
     ``Path(__file__)`` and the replaceable product mark.
     """
 
-    package_root = PROJECT_ROOT / "aidrama_studio"
+    source = Path(source_root or SOURCE_ROOT).resolve()
+    package_root = source / "aidrama_studio"
     return [
         *_add_data(package_root / "Main.py", "aidrama_studio"),
         *_add_data(package_root / "styles.css", "aidrama_studio"),
@@ -56,14 +63,26 @@ def runtime_data_args() -> list[str]:
         # The frozen launcher copies this credential-free template into the
         # canonical AppData config directory on first start.  Keeping the
         # template in the bundle avoids writing user settings beside the EXE.
-        *_add_data(PROJECT_ROOT / "config.example.toml", "."),
-        *_add_data(PROJECT_ROOT / "LICENSE", "."),
-        *_add_data(PROJECT_ROOT / "NOTICE", "."),
-        *_add_data(PROJECT_ROOT / "THIRD_PARTY_NOTICES.md", "."),
+        *_add_data(source / "config.example.toml", "."),
+        *_add_data(source / "LICENSE", "."),
+        *_add_data(source / "NOTICE", "."),
+        *_add_data(source / "THIRD_PARTY_NOTICES.md", "."),
+        # Legacy MPT media services resolve bundled songs/public assets from
+        # the bundle root. Proprietary system-font files are intentionally not
+        # copied; the release audit rejects those names and Windows supplies a
+        # user-installed fallback font.
+        *_add_data(source / "resource" / "songs", "resource/songs"),
+        *_add_data(source / "resource" / "public", "resource/public"),
     ]
 
 
-def build_command(*, output_dir: Path | None = None) -> list[str]:
+def build_command(
+    *,
+    output_dir: Path | None = None,
+    version: str | None = None,
+    delivery_head: str | None = None,
+    source_root: Path | None = None,
+) -> list[str]:
     if importlib.util.find_spec("PyInstaller") is None:
         raise RuntimeError("PyInstaller is not installed; install only the optional desktop build tool to package AIDrama")
     try:
@@ -77,18 +96,28 @@ def build_command(*, output_dir: Path | None = None) -> list[str]:
             f"PyWebView {PYWEBVIEW_VERSION} is required for the native desktop build; "
             f"found {installed_webview}"
         )
+    source = Path(source_root or SOURCE_ROOT).resolve()
     destination = output_dir or PROJECT_ROOT / "dist"
     command = [
         sys.executable,
         "-m",
         "PyInstaller",
         "--onedir",
+        "--windowed",
+        "--noconfirm",
+        "--clean",
         "--name",
         "AIDramaStudio",
         "--distpath",
         str(destination),
+        "--workpath",
+        str(destination / "pyinstaller-build"),
+        "--specpath",
+        str(destination),
         "--paths",
-        str(PROJECT_ROOT),
+        str(source),
+        "--paths",
+        str(DESKTOP_ENTRYPOINT.parent.parent),
         # Streamlit and the product services load package resources and a few
         # modules dynamically.  Collecting these namespaces keeps the frozen
         # shell faithful to the source launcher without changing application
@@ -107,6 +136,8 @@ def build_command(*, output_dir: Path | None = None) -> list[str]:
         "clr_loader",
         "--collect-all",
         "proxy_tools",
+        "--collect-all",
+        "imageio_ffmpeg",
         "--collect-submodules",
         "aidrama_studio",
         "--collect-submodules",
@@ -131,24 +162,85 @@ def build_command(*, output_dir: Path | None = None) -> list[str]:
         "--hidden-import",
         "clr",
     ]
-    command.extend(runtime_data_args())
+    # These values are passed as environment variables as well as recorded in
+    # the post-build metadata.  Keeping them here makes the command itself
+    # inspectable by CI and preserves compatibility with callers that only
+    # need the legacy output_dir argument.
+    if version:
+        os.environ["AIDRAMA_VERSION"] = str(version)
+    if delivery_head:
+        os.environ["AIDRAMA_BUILD_SHA"] = str(delivery_head).lower()
+    command.extend(runtime_data_args(source))
     command.append(str(DESKTOP_ENTRYPOINT))
     return command
 
 
-def main() -> int:
+def _parse_args(argv: list[str] | None = None):
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Build the AIDrama Studio PyInstaller onedir package")
+    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "dist")
+    parser.add_argument("--version", required=False)
+    parser.add_argument("--delivery-head", required=False)
+    parser.add_argument("--source-root", type=Path, default=SOURCE_ROOT)
+    return parser.parse_args(argv)
+
+
+def _write_build_info(package_root: Path, *, version: str | None, delivery_head: str | None) -> Path:
+    """Write a small, human-readable provenance file beside the frozen EXE."""
+
+    package_root = Path(package_root).resolve()
+    package_root.mkdir(parents=True, exist_ok=True)
+    commit = (delivery_head or os.environ.get("AIDRAMA_BUILD_SHA") or "").strip().lower()
+    if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
+        raise RuntimeError("--delivery-head must be a full 40-character commit SHA")
+    value = {
+        "product_name": "AIDrama Studio",
+        "product_version": (version or os.environ.get("AIDRAMA_VERSION") or "1.0.0").strip(),
+        "delivery_head": commit,
+        "build_timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    path = package_root / "build-info.json"
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    if args.version:
+        os.environ["AIDRAMA_VERSION"] = str(args.version)
+    if args.delivery_head:
+        os.environ["AIDRAMA_BUILD_SHA"] = str(args.delivery_head).lower()
     try:
-        command = build_command()
+        command = build_command(
+            output_dir=args.output_dir,
+            version=args.version,
+            delivery_head=args.delivery_head,
+            source_root=args.source_root,
+        )
     except RuntimeError as exc:
         print(f"AIDrama desktop build unavailable: {exc}", file=sys.stderr)
         return 2
     result = subprocess.call(command, cwd=str(PROJECT_ROOT))
     if result != 0:
         return result
+    try:
+        _write_build_info(
+            args.output_dir / "AIDramaStudio",
+            version=args.version,
+            delivery_head=args.delivery_head,
+        )
+    except RuntimeError as exc:
+        print(f"AIDrama build provenance unavailable: {exc}", file=sys.stderr)
+        return 3
     from desktop.release import ReleaseDefinitionError, write_package_release_metadata
 
     try:
-        write_package_release_metadata(PROJECT_ROOT / "dist" / "AIDramaStudio")
+        write_package_release_metadata(
+            args.output_dir / "AIDramaStudio",
+            git_commit=(args.delivery_head or os.environ.get("AIDRAMA_BUILD_SHA")),
+            lock_path=Path(args.source_root).resolve() / "uv.lock",
+        )
     except ReleaseDefinitionError as exc:
         print(f"AIDrama release metadata unavailable: {exc}", file=sys.stderr)
         return 3
