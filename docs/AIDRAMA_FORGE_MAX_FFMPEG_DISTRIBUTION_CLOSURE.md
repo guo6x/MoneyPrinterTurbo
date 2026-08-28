@@ -20,6 +20,8 @@ The wheel payload and the installed payload both hash to
 reports `--enable-gpl --enable-version3 --enable-static`, plus `libx264`,
 `libx265`, `libxvid`, and `librubberband`. `ffmpeg -L` reports GNU GPL
 version 3 or later. No `--enable-nonfree` option was observed.
+The detected `--enable-libvidstab` component is LGPL-2.1 and is not itself a
+GPL trigger.
 
 The exact option/library evidence is retained in
 `licenses/ffmpeg/GPL_COMPONENT_AUDIT.txt`; upstream FFmpeg COPYING texts and

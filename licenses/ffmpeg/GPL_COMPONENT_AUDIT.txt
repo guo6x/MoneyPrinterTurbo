@@ -23,6 +23,10 @@ observed for this audit are:
   libxvidcore/libxvid — GPL license text: https://raw.githubusercontent.com/Distrotech/xvidcore/master/xvidcore/LICENSE
   librubberband — GPL license text: https://raw.githubusercontent.com/breakfastquay/rubberband/default/COPYING
 
+The configuration also detects `--enable-libvidstab`; its upstream notice
+identifies vid.stab as LGPL-2.1, so it is not a GPL trigger. No
+`--enable-nonfree` option was detected.
+
 The exact upstream license texts and hashes used for this record must be kept
 with the release materials. The FFmpeg source tree also supplies COPYING.GPLv3,
 COPYING.LGPLv3, and LICENSE.md in this directory. This file is evidence and
