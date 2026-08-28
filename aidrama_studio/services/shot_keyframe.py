@@ -32,8 +32,13 @@ from aidrama_studio.domain import (
     ProductionShotSourceDecisionType,
     ProductionShotSourceSelectionKind,
     ReferenceAssetType,
+    ReferenceBindingType,
+    ProviderTask,
+    ScriptRevisionStatus,
     Shot,
+    ShotKeyframePlanningSnapshot,
     ShotRevisionStatus,
+    StoryRevisionStatus,
 )
 from aidrama_studio.domain.shot_keyframe import (
     DuplicateFirstFrameGroup,
@@ -70,6 +75,7 @@ from .production_artifact_storage import (
     ProductionArtifactStorageError,
     ProductionArtifactStorageService,
 )
+from .reference_assets import ReferenceAssetService
 from .security import sanitize_error, sanitize_persistent_metadata
 
 
@@ -139,6 +145,14 @@ class ShotKeyframeReadinessError(ShotKeyframeError):
         self.report = report
         detail = "; ".join(report.blocking_reasons)
         super().__init__(f"PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: {detail}")
+
+
+class ShotKeyframeCreateUncertainError(ShotKeyframeError):
+    """The provider may have accepted a paid create; never resubmit it."""
+
+
+class ShotKeyframeProviderResultError(ShotKeyframeError):
+    """A definitive provider response could not produce one valid image."""
 
 
 class UniversalImageRuntime(Protocol):
@@ -275,7 +289,7 @@ class ShotKeyframeBriefCompiler:
 
     def compile(
         self,
-        snapshot: ProductionInputSnapshot,
+        snapshot: ProductionInputSnapshot | ShotKeyframePlanningSnapshot,
         shot_id: str,
         generation_brief: GenerationBrief,
         *,
@@ -286,6 +300,13 @@ class ShotKeyframeBriefCompiler:
             raise ShotKeyframeError("GenerationBrief does not belong to the snapshot project")
         if generation_brief.shot_id != shot_id:
             raise ShotKeyframeError("GenerationBrief does not belong to the requested shot")
+        if (
+            isinstance(snapshot, ShotKeyframePlanningSnapshot)
+            and generation_brief.production_job_id != snapshot.production_job_id
+        ):
+            raise ShotKeyframeError(
+                "GenerationBrief does not belong to the keyframe planning job"
+            )
         revision = self.repository.get_shot_revision(snapshot.shot_plan_revision_id)
         if (
             revision is None
@@ -293,6 +314,30 @@ class ShotKeyframeBriefCompiler:
             or revision["status"] is not ShotRevisionStatus.APPROVED
         ):
             raise ShotKeyframeError("ShotKeyframeBrief requires the exact approved Shot Plan")
+        script = self.repository.get_script_revision(
+            str(revision["source_script_revision_id"])
+        )
+        story = (
+            self.repository.get_story_revision(
+                str(script["source_story_revision_id"])
+            )
+            if script is not None
+            else None
+        )
+        if (
+            script is None
+            or script["project_id"] != snapshot.project_id
+            or script["status"] is not ScriptRevisionStatus.APPROVED
+            or story is None
+            or story["project_id"] != snapshot.project_id
+            or story["status"] is not StoryRevisionStatus.APPROVED
+            or snapshot.script_revision_id != script["id"]
+            or snapshot.story_revision_id != story["id"]
+            or revision["content"].source_script_revision_id != script["id"]
+        ):
+            raise ShotKeyframeError(
+                "ShotKeyframeBrief approved Story/Script/Shot Plan provenance changed"
+            )
         shot = next(
             (item for item in revision["content"].shots if item.id == shot_id), None
         )
@@ -396,7 +441,7 @@ class ShotKeyframeBriefCompiler:
 
     def _reference_provenance(
         self,
-        snapshot: ProductionInputSnapshot,
+        snapshot: ProductionInputSnapshot | ShotKeyframePlanningSnapshot,
         shot: Shot,
         generation_brief: GenerationBrief,
     ) -> tuple[ReferenceProvenance, ...]:
@@ -466,6 +511,8 @@ class UniversalShotKeyframeImageService:
         *,
         provider_parameters: Mapping[str, object] | None = None,
         create_authorized: bool = False,
+        request_id: str | None = None,
+        execution_id: str | None = None,
     ) -> GeneratedKeyframeImage:
         if create_authorized is not True:
             raise ShotKeyframeError(
@@ -507,8 +554,9 @@ class UniversalShotKeyframeImageService:
             f"SHOT_KEYFRAME_BRIEF_JSON={json.dumps(prompt_payload, ensure_ascii=False, sort_keys=True)}"
         )
         request = CapabilityRequest(
-            request_id=uuid4().hex,
+            request_id=request_id or uuid4().hex,
             project_id=brief.project_id,
+            execution_id=execution_id,
             capability=CapabilityKind.IMAGE,
             protocol_family=getattr(manifest, "protocol"),
             provider_id=str(getattr(manifest, "provider_id")),
@@ -546,7 +594,7 @@ class UniversalShotKeyframeImageService:
                 authorization={"approved": True, "create_authorized": True},
             )
         except Exception as exc:
-            raise ShotKeyframeError(
+            raise ShotKeyframeCreateUncertainError(
                 "Universal IMAGE keyframe generation failed after one explicit create; "
                 "no automatic retry was attempted"
             ) from exc
@@ -555,31 +603,43 @@ class UniversalShotKeyframeImageService:
             or raw.outcome is not RuntimeOutcome.SUCCEEDED
             or len(raw.outputs) != 1
         ):
-            raise ShotKeyframeError("Universal IMAGE returned no single completed artifact")
+            raise ShotKeyframeProviderResultError(
+                "Universal IMAGE returned no single completed artifact"
+            )
         output = raw.outputs[0]
         if not output.mime_type.startswith("image/") or not output.sha256:
-            raise ShotKeyframeError("Universal IMAGE output identity is invalid")
+            raise ShotKeyframeProviderResultError(
+                "Universal IMAGE output identity is invalid"
+            )
         try:
             content = bytes(binding.read_output(output))
         except Exception as exc:
-            raise ShotKeyframeError("Universal IMAGE output bytes are unavailable") from exc
+            raise ShotKeyframeProviderResultError(
+                "Universal IMAGE output bytes are unavailable"
+            ) from exc
         suffix = {
             "image/png": ".png",
             "image/jpeg": ".jpg",
             "image/webp": ".webp",
         }.get(output.mime_type)
         if suffix is None:
-            raise ShotKeyframeError("Universal IMAGE output MIME is unsupported")
+            raise ShotKeyframeProviderResultError(
+                "Universal IMAGE output MIME is unsupported"
+            )
         filename = f"shot-keyframe-{brief.shot_id}{suffix}"
         try:
             validate_image_input(content, filename, output.mime_type)
         except ValueError as exc:
-            raise ShotKeyframeError("Universal IMAGE output failed physical validation") from exc
+            raise ShotKeyframeProviderResultError(
+                "Universal IMAGE output failed physical validation"
+            ) from exc
         digest = _sha256_bytes(content)
         if digest != output.sha256 or (
             output.size_bytes is not None and output.size_bytes != len(content)
         ):
-            raise ShotKeyframeError("Universal IMAGE output SHA/size changed")
+            raise ShotKeyframeProviderResultError(
+                "Universal IMAGE output SHA/size changed"
+            )
         return GeneratedKeyframeImage(
             content=content,
             mime_type=output.mime_type,
@@ -712,6 +772,287 @@ class ShotKeyframeService:
         self.briefs = ShotKeyframeBriefCompiler(repository)
         self.image_runtime = UniversalShotKeyframeImageService()
 
+    def build_planning_snapshot(
+        self,
+        project_id: str,
+        production_job_id: str,
+        *,
+        shot_ids: Sequence[str] | None = None,
+    ) -> ShotKeyframePlanningSnapshot:
+        """Freeze approved creative truth without weakening VIDEO readiness.
+
+        Locked References are included when they actually exist.  A text-only
+        IMAGE keyframe smoke may therefore preserve an honestly empty
+        Reference provenance, while the stricter Production snapshot remains
+        the sole input accepted by VIDEO execution.
+        """
+
+        job = self.repository.get_production_job(production_job_id)
+        revision = (
+            self.repository.get_shot_revision(job.shot_plan_revision_id)
+            if job is not None
+            else None
+        )
+        script = (
+            self.repository.get_script_revision(
+                str(revision["source_script_revision_id"])
+            )
+            if revision is not None
+            else None
+        )
+        story = (
+            self.repository.get_story_revision(
+                str(script["source_story_revision_id"])
+            )
+            if script is not None
+            else None
+        )
+        if (
+            job is None
+            or job.project_id != project_id
+            or revision is None
+            or revision["project_id"] != project_id
+            or revision["status"] is not ShotRevisionStatus.APPROVED
+            or revision["content"].source_script_revision_id
+            != revision["source_script_revision_id"]
+            or script is None
+            or script["project_id"] != project_id
+            or script["status"] is not ScriptRevisionStatus.APPROVED
+            or story is None
+            or story["project_id"] != project_id
+            or story["status"] is not StoryRevisionStatus.APPROVED
+            or script["source_story_revision_id"] != story["id"]
+        ):
+            raise ShotKeyframeError(
+                "Shot keyframe planning requires one exact approved Story/Script/Shot Plan chain"
+            )
+
+        ordered = tuple(sorted(revision["content"].shots, key=lambda item: item.order))
+        requested = tuple(str(value) for value in shot_ids) if shot_ids is not None else tuple(
+            shot.id for shot in ordered
+        )
+        if not requested or len(requested) != len(set(requested)):
+            raise ShotKeyframeError("Shot keyframe planning shot IDs must be unique")
+        by_id = {shot.id: shot for shot in ordered}
+        if any(shot_id not in by_id for shot_id in requested):
+            raise ShotKeyframeError("Shot keyframe planning requested an unknown shot")
+
+        reference_service = ReferenceAssetService(self.repository)
+        reference_versions: dict[str, str] = {}
+        selected = tuple(by_id[shot_id] for shot_id in requested)
+        scene_by_id = {scene.id: scene for scene in script["content"].scenes}
+        targets: set[tuple[ReferenceBindingType, str]] = set()
+        for shot in selected:
+            targets.update(
+                (ReferenceBindingType.CHARACTER, subject_id)
+                for subject_id in shot.subject
+            )
+            scene = scene_by_id.get(shot.scene_id)
+            if scene is None:
+                raise ShotKeyframeError(
+                    "Shot keyframe planning found a shot outside its approved Script"
+                )
+            targets.add((ReferenceBindingType.LOCATION, scene.location_id))
+            targets.add((ReferenceBindingType.SHOT, shot.id))
+        for binding_type, binding_id in sorted(
+            targets, key=lambda item: (item[0].value, item[1])
+        ):
+            version_id = self._current_locked_reference_version(
+                reference_service,
+                project_id,
+                binding_type,
+                binding_id,
+                story["id"],
+            )
+            if version_id is not None:
+                reference_versions[f"{binding_type.value}:{binding_id}"] = version_id
+
+        return ShotKeyframePlanningSnapshot(
+            project_id=project_id,
+            production_job_id=job.id,
+            story_revision_id=story["id"],
+            script_revision_id=script["id"],
+            shot_plan_revision_id=revision["id"],
+            reference_asset_versions=reference_versions,
+            shot_parameters={
+                shot.id: shot.model_dump(mode="json") for shot in selected
+            },
+        )
+
+    def paid_create_intent(
+        self,
+        brief: ShotKeyframeBrief,
+        binding: UniversalImageBinding,
+        *,
+        provider_parameters: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Return the safe exact intent that a paid grant must freeze."""
+
+        manifest = binding.manifest
+        try:
+            capability = CapabilityKind.coerce(getattr(manifest, "capability"))
+        except Exception as exc:
+            raise ShotKeyframeError("Universal IMAGE manifest is invalid") from exc
+        if capability is not CapabilityKind.IMAGE:
+            raise ShotKeyframeError("Shot keyframes require an IMAGE manifest")
+        manifest_id = str(getattr(manifest, "id", ""))
+        manifest_hash = str(getattr(manifest, "manifest_hash", ""))
+        provider_id = str(getattr(manifest, "provider_id", ""))
+        model_id = str(getattr(manifest, "model_id", ""))
+        if not all((manifest_id, manifest_hash, provider_id, model_id)):
+            raise ShotKeyframeError("Universal IMAGE manifest identity is incomplete")
+        parameters = dict(provider_parameters or {})
+        safe_parameters = sanitize_persistent_metadata(parameters)
+        if not isinstance(safe_parameters, dict) or safe_parameters != parameters:
+            raise ShotKeyframeError(
+                "Universal IMAGE provider parameters contain unsafe values"
+            )
+        create_once_identity = {
+            "contract": "SHOT_KEYFRAME_CREATE_ONCE_V1",
+            "project_id": brief.project_id,
+            "shot_id": brief.shot_id,
+            "shot_plan_revision_id": brief.shot_plan_revision_id,
+            "generation_brief_id": brief.generation_brief_id,
+            "shot_keyframe_brief_sha256": brief.sha256,
+            "manifest_id": manifest_id,
+            "manifest_hash": manifest_hash,
+        }
+        payload = {
+            **create_once_identity,
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "provider_parameters_sha256": _canonical_sha256(parameters),
+        }
+        return {
+            **payload,
+            "create_once_identity_sha256": _canonical_sha256(
+                create_once_identity
+            ),
+            "authorization_intent_id": _canonical_sha256(payload),
+        }
+
+    def authorize_paid_creates(
+        self,
+        project_id: str,
+        production_job_id: str,
+        *,
+        authorization_fingerprint: str,
+        planned_creates: int,
+        authorized_max: int,
+        authorized_intents: Sequence[Mapping[str, object]],
+    ) -> ProviderTask:
+        """Freeze one bounded keyframe authorization window.
+
+        Production's existing job ledger remains the authority for VIDEO
+        creates.  Keyframes use append-only authorization windows so a later
+        explicit grant for remaining frames never mutates or silently expands
+        an earlier two-image smoke authorization.
+        """
+
+        job = self.repository.get_production_job(production_job_id)
+        if job is None or job.project_id != project_id:
+            raise ShotKeyframeError("Keyframe authorization job provenance is invalid")
+        fingerprint = str(authorization_fingerprint).strip().lower()
+        try:
+            int(fingerprint, 16)
+            planned = int(planned_creates)
+            maximum = int(authorized_max)
+        except (TypeError, ValueError) as exc:
+            raise ShotKeyframeError("Keyframe paid authorization is invalid") from exc
+        intents = tuple(dict(item) for item in authorized_intents)
+        safe_intents = sanitize_persistent_metadata(list(intents))
+        if (
+            len(fingerprint) != 64
+            or planned <= 0
+            or planned != maximum
+            or maximum != len(intents)
+            or maximum > 10000
+            or not isinstance(safe_intents, list)
+            or safe_intents != list(intents)
+            or any(
+                item.get("contract") != "SHOT_KEYFRAME_CREATE_ONCE_V1"
+                or set(item)
+                != {
+                    "contract",
+                    "project_id",
+                    "shot_id",
+                    "shot_plan_revision_id",
+                    "generation_brief_id",
+                    "shot_keyframe_brief_sha256",
+                    "manifest_id",
+                    "manifest_hash",
+                    "provider_id",
+                    "model_id",
+                    "provider_parameters_sha256",
+                    "create_once_identity_sha256",
+                    "authorization_intent_id",
+                }
+                or item.get("project_id") != project_id
+                for item in intents
+            )
+            or len({str(item["shot_id"]) for item in intents}) != len(intents)
+            or len(
+                {str(item["authorization_intent_id"]) for item in intents}
+            )
+            != len(intents)
+        ):
+            raise ShotKeyframeError("Keyframe paid authorization is invalid")
+        now = _now()
+        idempotency_key = self._authorization_idempotency_key(
+            production_job_id, fingerprint
+        )
+        task, _ = self.repository.get_or_create_provider_task(
+            ProviderTask(
+                id=f"skfa-{_sha256_bytes(idempotency_key.encode())[:32]}",
+                project_id=project_id,
+                capability=CapabilityKind.IMAGE.value,
+                provider_id="AIDRAMA_AUTHORIZATION",
+                model_id="SHOT_KEYFRAME_IMAGE_CREATE_V1",
+                idempotency_key=idempotency_key,
+                state="AUTHORIZED",
+                request_summary={
+                    "contract": "SHOT_KEYFRAME_PAID_AUTHORIZATION_V1",
+                    "production_job_id": production_job_id,
+                    "planned_creates": planned,
+                    "authorized_max": maximum,
+                    "per_item_max": 1,
+                    "automatic_paid_retry": 0,
+                    "authorized_intents": list(intents),
+                },
+                metadata={"authorization_fingerprint": fingerprint},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        if (
+            task.state != "AUTHORIZED"
+            or task.execution_id is not None
+            or task.request_summary
+            != {
+                "contract": "SHOT_KEYFRAME_PAID_AUTHORIZATION_V1",
+                "production_job_id": production_job_id,
+                "planned_creates": planned,
+                "authorized_max": maximum,
+                "per_item_max": 1,
+                "automatic_paid_retry": 0,
+                "authorized_intents": list(intents),
+            }
+            or task.metadata.get("authorization_fingerprint") != fingerprint
+        ):
+            raise ShotKeyframeError(
+                "Keyframe paid authorization is frozen with different bounds"
+            )
+        return task
+
+    @staticmethod
+    def _authorization_idempotency_key(
+        production_job_id: str, authorization_fingerprint: str
+    ) -> str:
+        return (
+            "shot-keyframe-authorization:"
+            f"{production_job_id}:{authorization_fingerprint}"
+        )
+
     def generate_and_record(
         self,
         project_id: str,
@@ -722,33 +1063,340 @@ class ShotKeyframeService:
         *,
         provider_parameters: Mapping[str, object] | None = None,
         create_authorized: bool = False,
+        authorization_fingerprint: str | None = None,
     ) -> ShotFirstFrame:
         if selection.source_type is not ShotFirstFrameSourceType.GENERATED_KEYFRAME:
             raise ShotKeyframeError("Generated keyframe path requires GENERATED_KEYFRAME")
-        generated = self.image_runtime.generate(
+        if create_authorized is not True:
+            raise ShotKeyframeError(
+                "Universal IMAGE create requires explicit authorization; no call was made"
+            )
+        fingerprint = str(authorization_fingerprint or "").strip().lower()
+        authorization = self.repository.get_provider_task_by_idempotency(
+            project_id,
+            self._authorization_idempotency_key(
+                production_job_id, fingerprint
+            ),
+        )
+        if authorization is None or authorization.state != "AUTHORIZED":
+            raise ShotKeyframeError(
+                "PAID_BUDGET_MISSING: exact keyframe authorization was not frozen"
+            )
+        parameters = dict(provider_parameters or {})
+        intent = self.paid_create_intent(
             brief,
             binding,
-            provider_parameters=provider_parameters,
-            create_authorized=create_authorized,
+            provider_parameters=parameters,
         )
-        return self._record(
+        authorized_intents = authorization.request_summary.get(
+            "authorized_intents"
+        )
+        if not isinstance(authorized_intents, list) or intent not in authorized_intents:
+            raise ShotKeyframeError(
+                "PAID_AUTHORIZATION_MISMATCH: exact keyframe intent was not authorized"
+            )
+        manifest_id = str(intent["manifest_id"])
+        manifest_hash = str(intent["manifest_hash"])
+        provider_id = str(intent["provider_id"])
+        model_id = str(intent["model_id"])
+
+        job, _ = self._validate_record_scope(
+            project_id, production_job_id, brief, selection
+        )
+        intent_digest = str(intent["create_once_identity_sha256"])
+        idempotency_key = f"shot-keyframe:{intent_digest}"
+        request_id = f"skfr-{intent_digest[:32]}"
+        execution_id = f"skfx-{intent_digest[:32]}"
+        now = _now()
+        execution = self.repository.get_production_execution(execution_id)
+        if execution is None:
+            execution = self.repository.create_production_execution(
+                ProductionExecution(
+                    id=execution_id,
+                    production_job_id=job.id,
+                    status=ProductionExecutionStatus.QUEUED,
+                    worker_type="UNIVERSAL_IMAGE_SHOT_KEYFRAME",
+                    created_at=now,
+                    generation_brief_id=brief.generation_brief_id,
+                )
+            )
+        elif (
+            execution.production_job_id != job.id
+            or execution.worker_type != "UNIVERSAL_IMAGE_SHOT_KEYFRAME"
+            or execution.generation_brief_id != brief.generation_brief_id
+        ):
+            raise ShotKeyframeError("Keyframe execution intent identity conflicts")
+
+        request_summary = {
+            "contract": "SHOT_KEYFRAME_CREATE_ONCE_V1",
+            "request_id": request_id,
+            "shot_id": brief.shot_id,
+            "shot_plan_revision_id": brief.shot_plan_revision_id,
+            "generation_brief_id": brief.generation_brief_id,
+            "shot_keyframe_brief_sha256": brief.sha256,
+            "manifest_id": manifest_id,
+            "manifest_hash": manifest_hash,
+            "provider_parameters_sha256": intent[
+                "provider_parameters_sha256"
+            ],
+            "authorization_intent_id": intent["authorization_intent_id"],
+        }
+        task, _ = self.repository.get_or_create_provider_task(
+            ProviderTask(
+                id=f"skft-{intent_digest[:32]}",
+                project_id=project_id,
+                execution_id=execution.id,
+                capability=CapabilityKind.IMAGE.value,
+                provider_id=provider_id,
+                model_id=model_id,
+                idempotency_key=idempotency_key,
+                state="PENDING_SUBMISSION",
+                request_summary=request_summary,
+                metadata={
+                    "automatic_paid_retry": 0,
+                    "authorization_task_id": authorization.id,
+                    "authorization_fingerprint": fingerprint,
+                    "authorization_intent_id": intent[
+                        "authorization_intent_id"
+                    ],
+                },
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        if task.request_summary != request_summary:
+            raise ShotKeyframeError(
+                "Keyframe create intent provider parameters are already frozen"
+            )
+        recorded = self._recorded_frame_for_execution(
+            project_id, execution, brief
+        )
+        if recorded is not None:
+            if task.state != "SUCCEEDED":
+                task = self.repository.update_provider_submission_outcome(
+                    task.id,
+                    state="SUCCEEDED",
+                    updated_at=_now(),
+                    metadata=dict(task.metadata),
+                )
+            return recorded
+        if task.state != "PENDING_SUBMISSION":
+            raise ShotKeyframeError(
+                f"{task.state}: keyframe create intent is closed; never resubmit"
+            )
+        try:
+            task, claimed = self.repository.claim_bounded_provider_submission(
+                task.id,
+                authorization_task_id=authorization.id,
+            )
+        except ValueError as exc:
+            raise ShotKeyframeError(str(exc)) from exc
+        if not claimed:
+            raise ShotKeyframeError(
+                f"{task.state}: keyframe create intent is already claimed"
+            )
+        execution = self.repository.update_production_execution(
+            execution.id,
+            status=ProductionExecutionStatus.RUNNING,
+            started_at=_now(),
+        )
+        try:
+            generated = self.image_runtime.generate(
+                brief,
+                binding,
+                provider_parameters=parameters,
+                create_authorized=True,
+                request_id=request_id,
+                execution_id=execution.id,
+            )
+        except ShotKeyframeCreateUncertainError as exc:
+            self.repository.update_provider_submission_outcome(
+                task.id,
+                state="UNCERTAIN_CREATE",
+                updated_at=_now(),
+                error_message=sanitize_error(exc, max_length=1000),
+            )
+            raise ShotKeyframeError(
+                "UNCERTAIN_CREATE: reconcile the original keyframe intent; never resubmit"
+            ) from exc
+        except Exception as exc:
+            self.repository.update_provider_submission_outcome(
+                task.id,
+                state="FAILED",
+                updated_at=_now(),
+                error_message=sanitize_error(exc, max_length=1000),
+            )
+            self.repository.update_production_execution(
+                execution.id,
+                status=ProductionExecutionStatus.FAILED,
+                finished_at=_now(),
+            )
+            raise
+
+        received_metadata = {
+            "automatic_paid_retry": 0,
+            "authorization_task_id": authorization.id,
+            "authorization_fingerprint": fingerprint,
+            "request_id": generated.request_id,
+            "request_sha256": generated.request_sha256,
+            "manifest_id": generated.manifest_id,
+            "manifest_hash": generated.manifest_hash,
+            "provider_id": generated.provider_id,
+            "model_id": generated.model_id,
+            "result_sha256": generated.sha256,
+            "result_size_bytes": generated.size_bytes,
+        }
+        task = self.repository.update_provider_submission_outcome(
+            task.id,
+            state="RESULT_RECEIVED",
+            updated_at=_now(),
+            metadata=received_metadata,
+            submitted_at=_now(),
+        )
+        try:
+            frame = self._record(
+                project_id,
+                production_job_id,
+                brief,
+                selection,
+                generated.content,
+                filename=generated.filename,
+                mime_type=generated.mime_type,
+                execution=execution,
+                provider_provenance={
+                    **received_metadata,
+                    "provider_task_record_id": task.id,
+                    "idempotency_key": idempotency_key,
+                    "reference_conditioning_mode": generated.reference_conditioning_mode,
+                },
+            )
+        except Exception as exc:
+            self.repository.update_provider_submission_outcome(
+                task.id,
+                state="RESULT_PERSISTENCE_FAILED",
+                updated_at=_now(),
+                metadata=received_metadata,
+                error_message=sanitize_error(exc, max_length=1000),
+            )
+            raise
+        self.repository.update_provider_submission_outcome(
+            task.id,
+            state="SUCCEEDED",
+            updated_at=_now(),
+            metadata=received_metadata,
+        )
+        return frame
+
+    @staticmethod
+    def _current_locked_reference_version(
+        reference_service: ReferenceAssetService,
+        project_id: str,
+        binding_type: ReferenceBindingType,
+        binding_id: str,
+        story_revision_id: str,
+    ) -> str | None:
+        if not reference_service.is_binding_ready(
             project_id,
-            production_job_id,
-            brief,
-            selection,
-            generated.content,
-            filename=generated.filename,
-            mime_type=generated.mime_type,
-            provider_provenance={
-                "request_id": generated.request_id,
-                "request_sha256": generated.request_sha256,
-                "manifest_id": generated.manifest_id,
-                "manifest_hash": generated.manifest_hash,
-                "provider_id": generated.provider_id,
-                "model_id": generated.model_id,
-                "reference_conditioning_mode": generated.reference_conditioning_mode,
-            },
+            binding_type,
+            binding_id,
+            story_revision_id,
+        ):
+            return None
+        for asset in reference_service.list_assets(project_id):
+            if asset.current_version_id is None:
+                continue
+            version = reference_service.repository.get_reference_asset_version(
+                asset.current_version_id
+            )
+            if version is None:
+                continue
+            if any(
+                binding.binding_type is binding_type
+                and binding.binding_id == binding_id
+                and binding.asset_version_id == version.id
+                for binding in reference_service.list_bindings(
+                    project_id, version.id
+                )
+            ):
+                return version.id
+        return None
+
+    def _validate_record_scope(
+        self,
+        project_id: str,
+        production_job_id: str,
+        brief: ShotKeyframeBrief,
+        selection: ShotKeyframeSelection,
+    ):
+        job = self.repository.get_production_job(production_job_id)
+        generation_brief = self.repository.get_generation_brief(
+            brief.generation_brief_id
         )
+        if (
+            job is None
+            or job.project_id != project_id
+            or job.shot_plan_revision_id != brief.shot_plan_revision_id
+            or brief.project_id != project_id
+            or selection.project_id != project_id
+            or selection.shot_id != brief.shot_id
+            or generation_brief is None
+            or generation_brief.project_id != project_id
+            or generation_brief.production_job_id != job.id
+            or generation_brief.shot_id != brief.shot_id
+            or generation_brief.sha256 != brief.generation_brief_sha256
+        ):
+            raise ShotKeyframeError(
+                "Shot First Frame provenance does not match frozen job truth"
+            )
+        return job, generation_brief
+
+    def _recorded_frame_for_execution(
+        self,
+        project_id: str,
+        execution: ProductionExecution,
+        brief: ShotKeyframeBrief,
+    ) -> ShotFirstFrame | None:
+        artifacts = [
+            artifact
+            for artifact in self.repository.list_production_artifacts(execution.id)
+            if artifact.artifact_type == SHOT_FIRST_FRAME_ARTIFACT_TYPE
+        ]
+        if not artifacts:
+            return None
+        if len(artifacts) != 1:
+            raise ShotKeyframeError(
+                "Keyframe execution has ambiguous persisted artifacts"
+            )
+        raw = artifacts[0].metadata_json.get("shot_first_frame")
+        try:
+            frame = ShotFirstFrame.model_validate(raw)
+        except Exception as exc:
+            raise ShotKeyframeError(
+                "Keyframe execution persisted an invalid Shot First Frame"
+            ) from exc
+        if (
+            frame.execution_id != execution.id
+            or frame.artifact_id != artifacts[0].id
+            or frame.shot_id != brief.shot_id
+            or frame.shot_plan_revision_id != brief.shot_plan_revision_id
+            or frame.generation_brief_id != brief.generation_brief_id
+            or frame.shot_keyframe_brief_sha256 != brief.sha256
+        ):
+            raise ShotKeyframeError(
+                "Keyframe execution persisted different frozen provenance"
+            )
+        if execution.status is not ProductionExecutionStatus.SUCCEEDED:
+            execution = self.repository.update_production_execution(
+                execution.id,
+                status=ProductionExecutionStatus.SUCCEEDED,
+                finished_at=_now(),
+            )
+        self.resolver.resolve_frame(
+            project_id,
+            frame,
+            expected_production_job_id=execution.production_job_id,
+        )
+        return frame
 
     def record_user_provided(
         self,
@@ -1159,25 +1807,11 @@ class ShotKeyframeService:
         user_provided_provenance: UserProvidedSourceProvenance | None = None,
         literal_reference_override_version_id: str | None = None,
         provider_provenance: Mapping[str, object] | None = None,
+        execution: ProductionExecution | None = None,
     ) -> ShotFirstFrame:
-        job = self.repository.get_production_job(production_job_id)
-        generation_brief = self.repository.get_generation_brief(
-            brief.generation_brief_id
+        job, _ = self._validate_record_scope(
+            project_id, production_job_id, brief, selection
         )
-        if (
-            job is None
-            or job.project_id != project_id
-            or job.shot_plan_revision_id != brief.shot_plan_revision_id
-            or brief.project_id != project_id
-            or selection.project_id != project_id
-            or selection.shot_id != brief.shot_id
-            or generation_brief is None
-            or generation_brief.project_id != project_id
-            or generation_brief.production_job_id != job.id
-            or generation_brief.shot_id != brief.shot_id
-            or generation_brief.sha256 != brief.generation_brief_sha256
-        ):
-            raise ShotKeyframeError("Shot First Frame provenance does not match frozen job truth")
         payload = bytes(content)
         if len(payload) > MAX_FIRST_FRAME_BYTES:
             raise ShotKeyframeError("Shot First Frame exceeds the image size limit")
@@ -1189,21 +1823,36 @@ class ShotKeyframeService:
             raise ShotKeyframeError("Shot First Frame image is invalid") from exc
         digest = _sha256_bytes(payload)
         now = _now()
-        execution = ProductionExecution(
-            id=uuid4().hex,
-            production_job_id=job.id,
-            status=ProductionExecutionStatus.SUCCEEDED,
-            worker_type=(
-                "UNIVERSAL_IMAGE_SHOT_KEYFRAME"
-                if selection.source_type is ShotFirstFrameSourceType.GENERATED_KEYFRAME
-                else "SHOT_FIRST_FRAME_INGEST"
-            ),
-            started_at=now,
-            finished_at=now,
-            created_at=now,
-            generation_brief_id=brief.generation_brief_id,
-        )
-        self.repository.create_production_execution(execution)
+        if execution is None:
+            execution = ProductionExecution(
+                id=uuid4().hex,
+                production_job_id=job.id,
+                status=ProductionExecutionStatus.SUCCEEDED,
+                worker_type=(
+                    "UNIVERSAL_IMAGE_SHOT_KEYFRAME"
+                    if selection.source_type
+                    is ShotFirstFrameSourceType.GENERATED_KEYFRAME
+                    else "SHOT_FIRST_FRAME_INGEST"
+                ),
+                started_at=now,
+                finished_at=now,
+                created_at=now,
+                generation_brief_id=brief.generation_brief_id,
+            )
+            execution = self.repository.create_production_execution(execution)
+        elif (
+            execution.production_job_id != job.id
+            or execution.worker_type != "UNIVERSAL_IMAGE_SHOT_KEYFRAME"
+            or execution.generation_brief_id != brief.generation_brief_id
+            or execution.status
+            not in {
+                ProductionExecutionStatus.QUEUED,
+                ProductionExecutionStatus.RUNNING,
+            }
+        ):
+            raise ShotKeyframeError(
+                "Precreated keyframe execution provenance is invalid"
+            )
         try:
             relative_path, stored_metadata = self.artifact_storage.store(
                 project_id,
@@ -1290,6 +1939,12 @@ class ShotKeyframeService:
             raise ShotKeyframeError("Shot First Frame artifact record failed") from exc
         if stored.id != artifact_id:
             raise ShotKeyframeError("Shot First Frame artifact identity was not immutable")
+        if execution.status is not ProductionExecutionStatus.SUCCEEDED:
+            self.repository.update_production_execution(
+                execution.id,
+                status=ProductionExecutionStatus.SUCCEEDED,
+                finished_at=_now(),
+            )
         return frame
 
     def _reference_path(self, project_id: str, storage_path: str) -> Path:

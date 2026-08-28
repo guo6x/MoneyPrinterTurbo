@@ -442,9 +442,22 @@ def _generate_frames(
     context: _Context, outputs: Sequence[bytes]
 ) -> tuple[ShotKeyframeService, _FakeImageRuntime, tuple[ShotFirstFrame, ...]]:
     service = ShotKeyframeService(context.repository)
+    authorization_fingerprint = hashlib.sha256(
+        b"offline-shot-keyframe-test-authorization"
+    ).hexdigest()
     runtime = _FakeImageRuntime(outputs)
     binding = _image_binding(runtime)
     briefs = _compile_keyframe_briefs(context, service)
+    service.authorize_paid_creates(
+        context.project.id,
+        context.job.id,
+        authorization_fingerprint=authorization_fingerprint,
+        planned_creates=len(outputs),
+        authorized_max=len(outputs),
+        authorized_intents=[
+            service.paid_create_intent(brief, binding) for brief in briefs
+        ],
+    )
     frames: list[ShotFirstFrame] = []
     previous: Shot | None = None
     for shot, brief in zip(context.shots, briefs, strict=True):
@@ -463,6 +476,7 @@ def _generate_frames(
                 selection,
                 binding,
                 create_authorized=True,
+                authorization_fingerprint=authorization_fingerprint,
             )
         )
         previous = shot

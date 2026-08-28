@@ -120,6 +120,9 @@ class _FakeKeyframeImageRuntime:
 
 def _record_generated_first_frame(queue, project_id, job):
     service = ShotKeyframeService(queue.repository)
+    authorization_fingerprint = hashlib.sha256(
+        b"offline-production-queue-keyframe"
+    ).hexdigest()
     snapshot = queue.execution_service.create_input_snapshot(project_id, job.id)
     generation_brief = queue.generation_briefs.current(
         project_id, job.id, "shot_001"
@@ -142,17 +145,29 @@ def _record_generated_first_frame(queue, project_id, job):
         )
         if item.capability is ModelCapabilityKind.IMAGE
     )
+    binding = UniversalImageBinding(
+        runtime=runtime,
+        manifest=image_manifest,
+        read_output=runtime.read_output,
+    )
+    service.authorize_paid_creates(
+        project_id,
+        job.id,
+        authorization_fingerprint=authorization_fingerprint,
+        planned_creates=1,
+        authorized_max=1,
+        authorized_intents=[
+            service.paid_create_intent(keyframe_brief, binding)
+        ],
+    )
     frame = service.generate_and_record(
         project_id,
         job.id,
         keyframe_brief,
         selection,
-        UniversalImageBinding(
-            runtime=runtime,
-            manifest=image_manifest,
-            read_output=runtime.read_output,
-        ),
+        binding,
         create_authorized=True,
+        authorization_fingerprint=authorization_fingerprint,
     )
     assert len(runtime.requests) == 1
     assert runtime.real_provider_calls == runtime.paid_calls == 0

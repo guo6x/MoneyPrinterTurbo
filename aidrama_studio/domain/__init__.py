@@ -40,7 +40,11 @@ from .production_qc import (
     ProductionShotSourceDecisionType,
     ProductionShotSourceSelectionKind,
 )
-from .production_snapshot import FrozenDict, ProductionInputSnapshot
+from .production_snapshot import (
+    FrozenDict,
+    ProductionInputSnapshot,
+    ShotKeyframePlanningSnapshot,
+)
 from .shot_keyframe import (
     DuplicateFirstFrameGroup,
     PreLiveFirstFrameGate,
@@ -165,7 +169,7 @@ __all__ = [
     "ProductionQCResult", "ProductionQCStatus", "ProductionQCMetric", "ProductionQCMetricStatus", "ProductionReview", "ProductionReviewDecision",
     "ProductionShotSourceDecision", "ProductionShotSourceDecisionType",
     "ProductionShotSourceSelectionKind",
-    "FrozenDict", "ProductionInputSnapshot",
+    "FrozenDict", "ProductionInputSnapshot", "ShotKeyframePlanningSnapshot",
     "DuplicateFirstFrameGroup", "PreLiveFirstFrameGate", "PreLiveFirstFrameReport",
     "PreviousApprovedArtifactProvenance", "PreviousApprovedShotContext", "ReferenceProvenance",
     "ShotFirstFrame", "ShotFirstFrameSourceType", "ShotKeyframeBrief", "ShotKeyframeLighting",

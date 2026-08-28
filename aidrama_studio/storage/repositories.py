@@ -3950,6 +3950,138 @@ class ProjectRepository:
             raise RuntimeError("ProviderTask outcome 更新后不可读取")
         return result
 
+    def claim_bounded_provider_submission(
+        self,
+        task_id: str,
+        *,
+        authorization_task_id: str,
+    ) -> tuple[ProviderTask, bool]:
+        """Atomically claim one create from an append-only authorization window.
+
+        This is used for paid request/response capabilities whose explicit
+        authorization is intentionally separate from the Production VIDEO job
+        ledger.  Any uncertain earlier create in the same window blocks later
+        creates until reconciliation.
+        """
+
+        claimed = False
+        with self.transaction() as connection:
+            task_row = connection.execute(
+                "SELECT * FROM provider_tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            authorization_row = connection.execute(
+                "SELECT * FROM provider_tasks WHERE id=?",
+                (authorization_task_id,),
+            ).fetchone()
+            if task_row is None:
+                raise KeyError(f"ProviderTask 不存在: {task_id}")
+            if authorization_row is None:
+                raise ValueError(
+                    "PAID_BUDGET_MISSING: provider create blocked before transport"
+                )
+            authorization_summary = json.loads(
+                authorization_row["request_summary_json"] or "{}"
+            )
+            task_summary = json.loads(task_row["request_summary_json"] or "{}")
+            task_metadata = json.loads(task_row["metadata_json"] or "{}")
+            execution_row = connection.execute(
+                "SELECT pe.production_job_id,pj.project_id "
+                "FROM production_executions pe "
+                "JOIN production_jobs pj ON pj.id=pe.production_job_id "
+                "WHERE pe.id=?",
+                (task_row["execution_id"],),
+            ).fetchone()
+            try:
+                authorized_max = int(authorization_summary["authorized_max"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("Keyframe authorization bound is invalid") from exc
+            if (
+                authorization_row["state"] != "AUTHORIZED"
+                or authorization_row["project_id"] != task_row["project_id"]
+                or authorization_row["execution_id"] is not None
+                or execution_row is None
+                or execution_row["project_id"] != task_row["project_id"]
+                or execution_row["production_job_id"]
+                != authorization_summary.get("production_job_id")
+                or authorization_summary.get("contract")
+                != "SHOT_KEYFRAME_PAID_AUTHORIZATION_V1"
+                or authorization_summary.get("per_item_max") != 1
+                or authorization_summary.get("automatic_paid_retry") != 0
+                or task_metadata.get("authorization_task_id")
+                != authorization_task_id
+                or task_metadata.get("authorization_intent_id")
+                != task_summary.get("authorization_intent_id")
+                or not isinstance(
+                    authorization_summary.get("authorized_intents"), list
+                )
+                or not any(
+                    item.get("authorization_intent_id")
+                    == task_summary.get("authorization_intent_id")
+                    for item in authorization_summary["authorized_intents"]
+                    if isinstance(item, dict)
+                )
+                or authorized_max <= 0
+            ):
+                raise ValueError("Keyframe authorization provenance is invalid")
+            rows = connection.execute(
+                "SELECT id,state,metadata_json FROM provider_tasks "
+                "WHERE project_id=? AND capability=?",
+                (task_row["project_id"], task_row["capability"]),
+            ).fetchall()
+            matching = []
+            for row in rows:
+                metadata = json.loads(row["metadata_json"] or "{}")
+                if metadata.get("authorization_task_id") == authorization_task_id:
+                    matching.append(row)
+            if any(
+                row["id"] != task_id
+                and row["state"]
+                in {
+                    "SUBMITTING",
+                    "UNCERTAIN_CREATE",
+                    "RECONCILIATION_REQUIRED",
+                    "RESULT_RECEIVED",
+                    "RESULT_PERSISTENCE_FAILED",
+                    "FAILED",
+                }
+                for row in matching
+            ):
+                raise ValueError(
+                    "UNCERTAIN_CREATE: reconcile the earlier keyframe intent before another create"
+                )
+            if any(
+                row["id"] != task_id
+                and row["state"] != "PENDING_SUBMISSION"
+                and json.loads(row["metadata_json"] or "{}").get(
+                    "authorization_intent_id"
+                )
+                == task_metadata.get("authorization_intent_id")
+                for row in matching
+            ):
+                raise ValueError(
+                    "PAID_BUDGET_EXHAUSTED: keyframe intent already consumed its one create"
+                )
+            used = sum(
+                row["state"] != "PENDING_SUBMISSION" for row in matching
+            )
+            if task_row["state"] == "PENDING_SUBMISSION":
+                if used >= authorized_max:
+                    raise ValueError(
+                        "PAID_BUDGET_EXHAUSTED: provider create blocked before transport"
+                    )
+                cursor = connection.execute(
+                    "UPDATE provider_tasks SET state='SUBMITTING',"
+                    "error_message=NULL,updated_at=? "
+                    "WHERE id=? AND state='PENDING_SUBMISSION' "
+                    "AND provider_task_id IS NULL",
+                    (task_row["updated_at"], task_id),
+                )
+                claimed = cursor.rowcount == 1
+        task = self.get_provider_task(task_id)
+        if task is None:
+            raise RuntimeError("ProviderTask claim 后不可读取")
+        return task, claimed
+
     def mark_inflight_provider_creates_uncertain(
         self, *, project_id: str | None = None, updated_at: str
     ) -> list[ProviderTask]:

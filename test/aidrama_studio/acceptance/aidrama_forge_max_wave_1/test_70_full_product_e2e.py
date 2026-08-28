@@ -150,6 +150,7 @@ def test_current_eight_feature_offline_product_path_cold_reloads_and_plays(
     # it through the Universal IMAGE seam, and persist the result as a real
     # ProductionExecution + ProductionArtifact before VIDEO authorization.
     keyframes = ShotKeyframeService(repository)
+    keyframe_authorization_fingerprint = "a" * 64
     input_snapshot = auto_services.execution.create_input_snapshot(
         project.id, job.id
     )
@@ -166,14 +167,31 @@ def test_current_eight_feature_offline_product_path_cold_reloads_and_plays(
         )
     )
     keyframe_binding = _keyframe_image_binding(keyframe_runtime)
+    keyframe_briefs_by_shot = {
+        shot.id: keyframes.briefs.compile(
+            input_snapshot,
+            shot.id,
+            generation_briefs_by_shot[shot.id],
+        )
+        for shot in approved_plan["content"].shots
+    }
+    keyframes.authorize_paid_creates(
+        project.id,
+        job.id,
+        authorization_fingerprint=keyframe_authorization_fingerprint,
+        planned_creates=len(approved_plan["content"].shots),
+        authorized_max=len(approved_plan["content"].shots),
+        authorized_intents=[
+            keyframes.paid_create_intent(
+                keyframe_briefs_by_shot[shot.id], keyframe_binding
+            )
+            for shot in approved_plan["content"].shots
+        ],
+    )
     previous_shot = None
     for shot in approved_plan["content"].shots:
         generation_brief = generation_briefs_by_shot[shot.id]
-        keyframe_brief = keyframes.briefs.compile(
-            input_snapshot,
-            shot.id,
-            generation_brief,
-        )
+        keyframe_brief = keyframe_briefs_by_shot[shot.id]
         selection = ShotKeyframePolicy.select(
             shot,
             project_id=project.id,
@@ -188,6 +206,7 @@ def test_current_eight_feature_offline_product_path_cold_reloads_and_plays(
             selection,
             keyframe_binding,
             create_authorized=True,
+            authorization_fingerprint=keyframe_authorization_fingerprint,
         )
         assert frozen.shot_id == shot.id
         assert frozen.generation_brief_id == generation_brief.id

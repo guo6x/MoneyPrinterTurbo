@@ -1012,6 +1012,25 @@ class ProductionQueueService:
                     "PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: "
                     f"镜头 {frame.shot_id} 的 Shot First Frame 与当前 GenerationBrief 不匹配"
                 )
+            expected_references = self._shot_references(
+                snapshot.reference_asset_versions,
+                brief,
+            )
+            frozen_references = {
+                item.binding_id: item.asset_version_id
+                for item in (
+                    frame.identity_reference_provenance
+                    + frame.location_reference_provenance
+                    + frame.prop_reference_provenance
+                    + frame.style_reference_provenance
+                )
+            }
+            if frozen_references != expected_references:
+                raise ProductionQueueError(
+                    "PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: "
+                    f"镜头 {frame.shot_id} 的 Shot First Frame Reference provenance "
+                    "与当前正式 Production snapshot 不匹配"
+                )
         frozen = self.shot_keyframes.freeze_snapshot(
             snapshot,
             ordered_frames,

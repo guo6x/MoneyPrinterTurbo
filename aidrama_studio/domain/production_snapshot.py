@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -148,6 +148,46 @@ class ProductionInputSnapshot(BaseModel):
                 self.first_frame_required_shot_ids
             ),
         }
+
+    @field_serializer("reference_asset_versions", "shot_parameters")
+    def _serialize_frozen(self, value: FrozenDict) -> dict[str, object]:
+        return _thaw(value)
+
+
+class ShotKeyframePlanningSnapshot(BaseModel):
+    """Frozen approved creative truth used only to plan Shot First Frames.
+
+    This deliberately is not a :class:`ProductionInputSnapshot`: text-only
+    IMAGE planning may truthfully proceed before all production References are
+    locked, while VIDEO submission must continue to require the stricter
+    production-readiness snapshot.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, arbitrary_types_allowed=True
+    )
+
+    purpose: Literal["SHOT_KEYFRAME_PLANNING"] = "SHOT_KEYFRAME_PLANNING"
+    project_id: str = Field(min_length=1, max_length=64)
+    production_job_id: str = Field(min_length=1, max_length=64)
+    story_revision_id: str = Field(min_length=1, max_length=64)
+    script_revision_id: str = Field(min_length=1, max_length=64)
+    shot_plan_revision_id: str = Field(min_length=1, max_length=64)
+    reference_asset_versions: FrozenDict = Field(default_factory=FrozenDict)
+    shot_parameters: FrozenDict = Field(default_factory=FrozenDict)
+
+    @field_validator("reference_asset_versions", "shot_parameters", mode="before")
+    @classmethod
+    def _freeze_mapping(cls, value: Any) -> FrozenDict:
+        if isinstance(value, FrozenDict):
+            return value
+        if isinstance(value, Mapping):
+            return FrozenDict(value)
+        if isinstance(value, (list, tuple)):
+            return FrozenDict(
+                {str(index): item for index, item in enumerate(value)}
+            )
+        raise TypeError("snapshot values must be mappings or sequences")
 
     @field_serializer("reference_asset_versions", "shot_parameters")
     def _serialize_frozen(self, value: FrozenDict) -> dict[str, object]:
