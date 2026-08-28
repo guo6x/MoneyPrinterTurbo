@@ -15,7 +15,8 @@ The exact executable is the imageio-ffmpeg 0.6.0 Windows AMD64 wheel payload:
   payload: imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe
   payload SHA-256: 2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3
 
-The build configuration is recorded in FFMPEG_BINARY_VERSION.txt and must be
+The build configuration is recorded in FFMPEG_BINARY_VERSION.txt and
+FFMPEG_BINARY_BUILDCONF.txt and must be
 matched by any corresponding-source archive offered for redistribution. The
 release owner must publish the complete corresponding source (including the
 enabled external libraries) or an applicable written source offer before

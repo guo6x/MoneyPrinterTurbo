@@ -45,7 +45,7 @@ are not an equivalent clean-machine replacement.
 
 The build emits `THIRD_PARTY_NOTICES.txt`, dependency license materials under
 `licenses/python` and `licenses/build-tools`, exact FFmpeg `-version`/`-L`
-records, FFmpeg `COPYING.GPLv3`/`COPYING.LGPLv3`/`LICENSE.md`, and the
+`-buildconf` records, FFmpeg `COPYING.GPLv3`/`COPYING.LGPLv3`/`LICENSE.md`, and the
 `CORRESPONDING_SOURCE_OFFER.txt` checklist. The release owner must still
 approve the exact GPL binary, publish complete corresponding source (including
 enabled external libraries), or provide an applicable written source offer.

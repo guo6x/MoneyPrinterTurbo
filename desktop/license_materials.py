@@ -127,8 +127,10 @@ def _collect_ffmpeg(root: Path, destination: Path) -> dict[str, object]:
         )
         return (completed.stdout + completed.stderr).strip() + "\n"
     version_text = probe("-version")
+    buildconf_text = probe("-buildconf")
     license_text = probe("-L")
     (target / "FFMPEG_BINARY_VERSION.txt").write_text(version_text, encoding="utf-8")
+    (target / "FFMPEG_BINARY_BUILDCONF.txt").write_text(buildconf_text, encoding="utf-8")
     (target / "FFMPEG_BINARY_LICENSE_OUTPUT.txt").write_text(license_text, encoding="utf-8")
     review = (
         "The exact binary below is bundled from the build environment.\n"
@@ -141,6 +143,7 @@ def _collect_ffmpeg(root: Path, destination: Path) -> dict[str, object]:
         "status": "EXACT_BINARY_RECORDED_LEGAL_REVIEW_REQUIRED",
         "binary": str(binary),
         "version_file": (target / "FFMPEG_BINARY_VERSION.txt").relative_to(root).as_posix(),
+        "buildconf_file": (target / "FFMPEG_BINARY_BUILDCONF.txt").relative_to(root).as_posix(),
         "license_output_file": (target / "FFMPEG_BINARY_LICENSE_OUTPUT.txt").relative_to(root).as_posix(),
         "license_files": license_files,
     }
