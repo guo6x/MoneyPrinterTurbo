@@ -6,18 +6,24 @@ import pytest
 from pydantic import ValidationError
 
 from aidrama_studio.domain.script import (
+    ScriptBeatType,
     ScriptRevisionStatus,
     StructuredScript,
     TimeOfDay,
 )
 from aidrama_studio.services.project import ProjectService
+from aidrama_studio.services.script_prompt import build_script_prompt
 from aidrama_studio.services.story import StoryService
 from aidrama_studio.storage.database import DatabasePaths
 from aidrama_studio.storage.repositories import ProjectRepository
 from test.aidrama_studio.test_story_bible import valid_bible
 
 
-def _payload(time_of_day: str) -> dict[str, object]:
+def _payload(
+    time_of_day: str,
+    *,
+    beat_type: str = "ACTION",
+) -> dict[str, object]:
     return {
         "title": "Alias normalization",
         "summary": "Canonical enum persistence",
@@ -35,7 +41,8 @@ def _payload(time_of_day: str) -> dict[str, object]:
                     {
                         "id": "script_beat_001",
                         "order": 1,
-                        "type": "ACTION",
+                        "type": beat_type,
+                        "character_id": "char_001",
                         "text": "站务员抬头看向末班车。",
                         "estimated_duration_seconds": 8,
                     }
@@ -96,3 +103,35 @@ def test_exact_chinese_time_of_day_aliases_persist_as_canonical_enum(tmp_path):
     assert cold is not None
     assert cold["content"].scenes[0].time_of_day is TimeOfDay.NIGHT
     assert cold["content"].model_dump(mode="json")["scenes"][0]["time_of_day"] == "NIGHT"
+
+
+def test_script_generation_contract_separates_story_and_script_beat_types(tmp_path):
+    paths = DatabasePaths(
+        database=tmp_path / "aidrama" / "aidrama.db",
+        projects=tmp_path / "aidrama" / "projects",
+        archived_projects=tmp_path / "aidrama" / "archived",
+    )
+    project = ProjectService(ProjectRepository(paths)).create(title="Script contract")
+    story = valid_bible()
+
+    prompt = build_script_prompt(project, story)
+    assert (
+        'Every scenes[*].beats[*].type MUST be exactly one of '
+        '["ACTION", "DIALOGUE", "NARRATION", "INNER_MONOLOGUE", "TRANSITION"]'
+        in prompt
+    )
+    assert "StoryBeat.type is a narrative-role input" in prompt
+    assert "NEVER copy those values into a ScriptBeat.type" in prompt
+
+    for invalid_story_beat_type in ("OPENING", "DEVELOPMENT"):
+        with pytest.raises(ValidationError):
+            StructuredScript.model_validate(
+                _payload("NIGHT", beat_type=invalid_story_beat_type)
+            )
+
+    for valid_script_beat_type in ScriptBeatType:
+        script = StructuredScript.model_validate(
+            _payload("NIGHT", beat_type=valid_script_beat_type.value)
+        )
+        script.validate_against(story)
+        assert script.scenes[0].beats[0].type is valid_script_beat_type
