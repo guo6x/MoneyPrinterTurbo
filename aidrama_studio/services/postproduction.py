@@ -31,6 +31,10 @@ from aidrama_studio.domain import (
     VoiceTrack,
 )
 from aidrama_studio.storage.repositories import ProjectRepository
+from aidrama_studio.services.ffmpeg_runtime import (
+    FFmpegEncoderConfigurationError,
+    VideoEncoderSelection,
+)
 
 
 def _now() -> str:
@@ -69,9 +73,16 @@ class FFmpegPostProductionAdapter(PostProductionMediaAdapter):
 
     name = "ffmpeg-post-production"
 
-    def __init__(self, *, ffmpeg_binary: str | None = None, timeout_seconds: int = 900) -> None:
+    def __init__(
+        self,
+        *,
+        ffmpeg_binary: str | None = None,
+        timeout_seconds: int = 900,
+        video_encoder: VideoEncoderSelection | None = None,
+    ) -> None:
         self.ffmpeg_binary = ffmpeg_binary
         self.timeout_seconds = timeout_seconds
+        self.video_encoder = video_encoder
 
     def render(self, request: PostRenderRequest) -> dict[str, object]:
         if not request.source_path.is_file() or request.source_path.stat().st_size <= 0:
@@ -81,7 +92,8 @@ class FFmpegPostProductionAdapter(PostProductionMediaAdapter):
         if source_duration <= 0:
             raise PostProductionServiceError("FinalAssembly source 缺少有效时长")
         request.output_path.parent.mkdir(parents=True, exist_ok=True)
-        command = [self.ffmpeg_binary or self._resolve_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(request.source_path)]
+        binary = self.ffmpeg_binary or self._resolve_ffmpeg()
+        command = [binary, "-hide_banner", "-loglevel", "error", "-y", "-i", str(request.source_path)]
         extra_inputs: list[Path] = []
         has_source_audio = self._has_audio_stream(request.source_path) if (request.voice_path is not None or request.music_path is not None) else False
         audio_source_index = 0
@@ -130,9 +142,18 @@ class FFmpegPostProductionAdapter(PostProductionMediaAdapter):
             filters.extend(labels)
             audio_map = "[mix]"
         if filters:
+            try:
+                encoder = self.video_encoder or VideoEncoderSelection.resolve("h264")
+                if encoder.codec != "h264":
+                    raise FFmpegEncoderConfigurationError(
+                        "postproduction delivery requires an H.264 encoder"
+                    )
+                encoder.require_available(binary)
+            except FFmpegEncoderConfigurationError as exc:
+                raise PostProductionServiceError(str(exc)) from exc
             command += ["-filter_complex", ";".join(filters)]
             command += ["-map", video_map, "-map", audio_map]
-            command += ["-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-movflags", "+faststart", "-t", f"{source_duration:.6f}"]
+            command += [*encoder.output_args(), "-c:a", "aac", "-movflags", "+faststart", "-t", f"{source_duration:.6f}"]
         else:
             command += ["-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy"]
         command.append(str(request.output_path))

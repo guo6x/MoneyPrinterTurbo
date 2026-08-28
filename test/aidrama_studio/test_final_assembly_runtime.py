@@ -22,6 +22,11 @@ from aidrama_studio.services import (
     ShotService,
 )
 from aidrama_studio.services.adapters import MPTFinalAssemblyAdapter
+from aidrama_studio.services.ffmpeg_runtime import (
+    FFmpegEncoderConfigurationError,
+    H264_ENCODER_ENV,
+    VideoEncoderSelection,
+)
 from aidrama_studio.storage.repositories import ProjectRepository
 from aidrama_studio.storage.database import connect
 from test.aidrama_studio.test_final_assembly import _shots, _source
@@ -29,6 +34,34 @@ from test.aidrama_studio.test_production_execution import (
     _ready_job,
     context as _execution_context,
 )
+
+
+def test_h264_output_codec_uses_configured_non_gpl_encoder(monkeypatch):
+    monkeypatch.setenv(H264_ENCODER_ENV, "h264_mf")
+    encoder = VideoEncoderSelection.resolve("H264")
+
+    assert encoder.codec == "h264"
+    assert encoder.implementation == "h264_mf"
+    assert encoder.output_args() == ["-c:v", "h264_mf", "-pix_fmt", "yuv420p"]
+    assert "libx264" not in encoder.output_args()
+
+
+def test_configured_h264_encoder_unavailable_fails_without_fallback(monkeypatch):
+    monkeypatch.setenv(H264_ENCODER_ENV, "h264_mf")
+    encoder = VideoEncoderSelection.resolve("h264")
+    completed = subprocess.CompletedProcess(
+        args=["ffmpeg", "-encoders"],
+        returncode=0,
+        stdout=" V..... libx264             H.264 / AVC\n",
+        stderr="",
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed)
+
+    with pytest.raises(
+        FFmpegEncoderConfigurationError,
+        match="automatic fallback is disabled",
+    ):
+        encoder.require_available("ffmpeg")
 
 
 @pytest.fixture
