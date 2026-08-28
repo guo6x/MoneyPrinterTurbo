@@ -66,11 +66,13 @@ from aidrama_studio.services.model_runtime import (
     CapabilityRequest,
     CapabilityResult,
     ContentRef,
+    InMemoryManifestRegistry,
     RuntimeOutcome,
 )
 from aidrama_studio.services.model_runtime.mainland_manifests import (
     build_mainland_manifests,
 )
+from aidrama_studio.services.model_settings import SettingsModelService
 from aidrama_studio.services.shot_keyframe import (
     ShotFirstFrameArtifactResolver,
     ShotKeyframeError,
@@ -438,6 +440,43 @@ def _compile_keyframe_briefs(
     )
 
 
+def _freeze_runtime_plans(
+    context: _Context,
+    service: ShotKeyframeService,
+    binding: UniversalImageBinding,
+    briefs: Sequence[object],
+    *,
+    provider_parameters: dict[str, object] | None = None,
+):
+    parameters = dict(provider_parameters or {"resolution": "1024*1024"})
+    settings = SettingsModelService(
+        context.repository,
+        manifest_registry=InMemoryManifestRegistry((binding.manifest,)),
+    )
+    settings.save_selections(
+        project_id=context.project.id,
+        selections={CapabilityKind.IMAGE: binding.manifest.id},
+    )
+    return tuple(
+        service.freeze_runtime_plan(
+            context.project.id,
+            context.job.id,
+            brief,
+            binding,
+            provider_parameters=parameters,
+            authorization={
+                "contract": "OFFLINE_SHOT_KEYFRAME_RUNTIMEPLAN_V1",
+                "create_authorized": True,
+                "shot_id": brief.shot_id,
+                "per_item_max": 1,
+                "automatic_paid_retry": 0,
+            },
+            selection_service=settings,
+        )
+        for brief in briefs
+    )
+
+
 def _generate_frames(
     context: _Context, outputs: Sequence[bytes]
 ) -> tuple[ShotKeyframeService, _FakeImageRuntime, tuple[ShotFirstFrame, ...]]:
@@ -448,6 +487,14 @@ def _generate_frames(
     runtime = _FakeImageRuntime(outputs)
     binding = _image_binding(runtime)
     briefs = _compile_keyframe_briefs(context, service)
+    parameters = {"resolution": "1024*1024"}
+    runtime_plans = _freeze_runtime_plans(
+        context,
+        service,
+        binding,
+        briefs,
+        provider_parameters=parameters,
+    )
     service.authorize_paid_creates(
         context.project.id,
         context.job.id,
@@ -455,12 +502,20 @@ def _generate_frames(
         planned_creates=len(outputs),
         authorized_max=len(outputs),
         authorized_intents=[
-            service.paid_create_intent(brief, binding) for brief in briefs
+            service.paid_create_intent(
+                brief,
+                binding,
+                runtime_plan=runtime_plan,
+                provider_parameters=parameters,
+            )
+            for brief, runtime_plan in zip(briefs, runtime_plans, strict=True)
         ],
     )
     frames: list[ShotFirstFrame] = []
     previous: Shot | None = None
-    for shot, brief in zip(context.shots, briefs, strict=True):
+    for shot, brief, runtime_plan in zip(
+        context.shots, briefs, runtime_plans, strict=True
+    ):
         selection = ShotKeyframePolicy.select(
             shot,
             project_id=context.project.id,
@@ -475,6 +530,8 @@ def _generate_frames(
                 brief,
                 selection,
                 binding,
+                runtime_plan=runtime_plan,
+                provider_parameters=parameters,
                 create_authorized=True,
                 authorization_fingerprint=authorization_fingerprint,
             )

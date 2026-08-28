@@ -34,6 +34,7 @@ from aidrama_studio.domain import (
     ReferenceAssetType,
     ReferenceBindingType,
     ProviderTask,
+    RuntimePlan,
     ScriptRevisionStatus,
     Shot,
     ShotKeyframePlanningSnapshot,
@@ -76,6 +77,7 @@ from .production_artifact_storage import (
     ProductionArtifactStorageService,
 )
 from .reference_assets import ReferenceAssetService
+from .runtime_foundation import RuntimePlanService
 from .security import sanitize_error, sanitize_persistent_metadata
 
 
@@ -171,6 +173,60 @@ class UniversalImageBinding:
     runtime: UniversalImageRuntime = field(repr=False)
     manifest: object
     read_output: Callable[[ContentRef], bytes] = field(repr=False)
+
+
+_RESERVED_IMAGE_PROVIDER_PARAMETERS = frozenset(
+    {
+        "codec_id",
+        "credential_reference",
+        "endpoint_profile_id",
+        "manifest_hash",
+        "manifest_id",
+        "model_id",
+        "provider_id",
+        "runtime_plan_hash",
+        "runtime_plan_id",
+    }
+)
+
+
+def _validated_image_provider_parameters(
+    binding: UniversalImageBinding,
+    raw: Mapping[str, object] | None,
+) -> dict[str, object]:
+    parameters = dict(raw or {})
+    safe = sanitize_persistent_metadata(parameters)
+    if not isinstance(safe, dict) or safe != parameters:
+        raise ShotKeyframeError(
+            "Universal IMAGE provider parameters contain unsafe values"
+        )
+    reserved = sorted(_RESERVED_IMAGE_PROVIDER_PARAMETERS.intersection(parameters))
+    if reserved:
+        raise ShotKeyframeError(
+            "Universal IMAGE provider parameters cannot override frozen identity: "
+            + ", ".join(reserved)
+        )
+    resolution = parameters.get("resolution")
+    if not isinstance(resolution, str):
+        raise ShotKeyframeError(
+            "Keyframe RuntimePlan requires an exact IMAGE resolution"
+        )
+    dimensions = resolution.split("*")
+    if len(dimensions) != 2 or not all(item.isdecimal() for item in dimensions):
+        raise ShotKeyframeError(
+            "Keyframe RuntimePlan requires WIDTH*HEIGHT provider dimensions"
+        )
+    supported = tuple(
+        str(item)
+        for item in getattr(
+            getattr(binding.manifest, "resolution", None), "supported", ()
+        )
+    )
+    if supported and resolution not in supported:
+        raise ShotKeyframeError(
+            "Keyframe RuntimePlan IMAGE resolution is not supported by the exact manifest"
+        )
+    return parameters
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,10 +569,24 @@ class UniversalShotKeyframeImageService:
         create_authorized: bool = False,
         request_id: str | None = None,
         execution_id: str | None = None,
+        runtime_plan_id: str | None = None,
+        runtime_plan_hash: str | None = None,
     ) -> GeneratedKeyframeImage:
         if create_authorized is not True:
             raise ShotKeyframeError(
                 "Universal IMAGE create requires explicit authorization; no call was made"
+            )
+        plan_id = str(runtime_plan_id or "").strip()
+        plan_hash = str(runtime_plan_hash or "").strip().lower()
+        try:
+            int(plan_hash, 16)
+        except (TypeError, ValueError) as exc:
+            raise ShotKeyframeError(
+                "Universal IMAGE create requires an exact frozen RuntimePlan; no call was made"
+            ) from exc
+        if not plan_id or len(plan_hash) != 64:
+            raise ShotKeyframeError(
+                "Universal IMAGE create requires an exact frozen RuntimePlan; no call was made"
             )
         manifest = binding.manifest
         try:
@@ -527,6 +597,9 @@ class UniversalShotKeyframeImageService:
             raise ShotKeyframeError("Shot keyframes require an IMAGE manifest")
         if getattr(manifest, "protocol", None) is None:
             raise ShotKeyframeError("Universal IMAGE manifest protocol is missing")
+        parameters = _validated_image_provider_parameters(
+            binding, provider_parameters
+        )
 
         references = (
             brief.identity_reference_provenance
@@ -564,6 +637,8 @@ class UniversalShotKeyframeImageService:
             manifest_id=str(getattr(manifest, "id")),
             manifest_hash=str(getattr(manifest, "manifest_hash")),
             codec_id=str(getattr(manifest, "codec_id")),
+            runtime_plan_id=plan_id,
+            runtime_plan_hash=plan_hash,
             inputs=(),
             prompt_or_text=prompt,
             structured_input={
@@ -581,7 +656,7 @@ class UniversalShotKeyframeImageService:
                     for item in references
                 ],
             },
-            provider_parameters=dict(provider_parameters or {}),
+            provider_parameters=parameters,
             create_authorized=True,
             authorization_required=bool(
                 getattr(manifest, "authorization_required", True)
@@ -879,11 +954,261 @@ class ShotKeyframeService:
             },
         )
 
+    def freeze_runtime_plan(
+        self,
+        project_id: str,
+        production_job_id: str,
+        brief: ShotKeyframeBrief,
+        binding: UniversalImageBinding,
+        *,
+        provider_parameters: Mapping[str, object],
+        authorization: Mapping[str, object],
+        selection_service: object | None = None,
+    ) -> RuntimePlan:
+        """Persist the canonical immutable plan before a paid IMAGE intent.
+
+        RuntimePlan already has a durable repository seam.  Keyframes use that
+        existing model directly and then copy its non-secret identity into the
+        paid intent/ProviderTask audit records.  Credentials never enter either
+        record.
+        """
+
+        parameters = _validated_image_provider_parameters(
+            binding, provider_parameters
+        )
+        safe_authorization = sanitize_persistent_metadata(dict(authorization))
+        if (
+            not isinstance(safe_authorization, dict)
+            or safe_authorization != dict(authorization)
+            or safe_authorization.get("create_authorized") is not True
+            or safe_authorization.get("per_item_max") != 1
+            or safe_authorization.get("automatic_paid_retry") != 0
+            or safe_authorization.get("shot_id") != brief.shot_id
+        ):
+            raise ShotKeyframeError(
+                "Keyframe RuntimePlan requires one exact non-retrying paid authorization"
+            )
+        raw_resolution = str(parameters["resolution"])
+        dimensions = raw_resolution.split("*")
+        native_resolution = "x".join(dimensions)
+
+        if selection_service is None:
+            from .model_settings import SettingsModelService
+
+            selection_service = SettingsModelService(self.repository)
+        resolve_identity = getattr(selection_service, "runtime_plan_identity", None)
+        if not callable(resolve_identity):
+            raise ShotKeyframeError("Keyframe model selection service is invalid")
+        try:
+            selected_identity = dict(
+                resolve_identity(project_id, CapabilityKind.IMAGE)
+            )
+        except Exception as exc:
+            raise ShotKeyframeError(
+                "Saved IMAGE selection cannot resolve into a RuntimePlan"
+            ) from exc
+        manifest = binding.manifest
+        selected_manifest = dict(
+            selected_identity.get("provider_parameters", {})
+        )
+        endpoint_profile_id = (
+            str(getattr(manifest, "endpoint_profile_id", "") or "") or None
+        )
+        credential_reference = (
+            str(getattr(manifest, "credential_reference", "") or "") or None
+        )
+        expected_selection = {
+            "provider_capability": CapabilityKind.IMAGE.value,
+            "provider_id": str(getattr(manifest, "provider_id", "")),
+            "model_id": str(getattr(manifest, "model_id", "")),
+            "endpoint_profile_id": endpoint_profile_id,
+            "deployment_region": str(getattr(manifest, "deployment_region", "")),
+            "endpoint_class": str(getattr(manifest, "endpoint_class", "")),
+            "credential_reference": credential_reference,
+        }
+        if any(
+            selected_identity.get(key) != value
+            for key, value in expected_selection.items()
+        ) or selected_manifest != {
+            "manifest_id": str(getattr(manifest, "id", "")),
+            "manifest_hash": str(getattr(manifest, "manifest_hash", "")),
+            "codec_id": str(getattr(manifest, "codec_id", "")),
+        }:
+            raise ShotKeyframeError(
+                "Saved IMAGE selection differs from the exact runtime binding"
+            )
+
+        references = (
+            brief.identity_reference_provenance
+            + brief.location_reference_provenance
+            + brief.prop_reference_provenance
+            + brief.style_reference_provenance
+        )
+        generation_brief = self.repository.get_generation_brief(
+            brief.generation_brief_id
+        )
+        if (
+            generation_brief is None
+            or generation_brief.project_id != project_id
+            or generation_brief.production_job_id != production_job_id
+            or generation_brief.shot_id != brief.shot_id
+            or generation_brief.sha256 != brief.generation_brief_sha256
+        ):
+            raise ShotKeyframeError(
+                "Keyframe RuntimePlan GenerationBrief provenance is invalid"
+            )
+        try:
+            plan = RuntimePlanService(self.repository).create_from_selection(
+                project_id,
+                brief=generation_brief,
+                capability=CapabilityKind.IMAGE,
+                selection_service=selection_service,
+                production_job_id=production_job_id,
+                transmitted_content_types=("text",),
+                estimated_request_count=1,
+                generation_mode="text_to_image",
+                resolution=native_resolution,
+                native_generation_fps=1.0,
+                provider_generation_duration=float(
+                    generation_brief.target_duration_seconds
+                ),
+                target_creative_duration=float(
+                    generation_brief.target_duration_seconds
+                ),
+                duration_strategy="EXACT",
+                audio_strategy="none",
+                provider_parameters=parameters,
+                reference_version_ids=tuple(
+                    item.asset_version_id for item in references
+                ),
+                reference_roles={
+                    item.asset_version_id: item.role.value for item in references
+                },
+                continuity_strategy="PRE_GENERATION_CONTINUITY",
+                authorization=safe_authorization,
+                prompt_template_version=SHOT_KEYFRAME_PROMPT_TEMPLATE_VERSION,
+            )
+        except Exception as exc:
+            raise ShotKeyframeError(
+                "Canonical keyframe RuntimePlan could not be frozen"
+            ) from exc
+        self._runtime_plan_evidence(
+            brief,
+            binding,
+            plan,
+            provider_parameters=parameters,
+        )
+        return plan
+
+    def _runtime_plan_evidence(
+        self,
+        brief: ShotKeyframeBrief,
+        binding: UniversalImageBinding,
+        runtime_plan: RuntimePlan,
+        *,
+        provider_parameters: Mapping[str, object],
+    ) -> dict[str, object]:
+        if not isinstance(runtime_plan, RuntimePlan):
+            raise ShotKeyframeError(
+                "Keyframe RuntimePlan must be the canonical immutable domain object"
+            )
+        manifest = binding.manifest
+        parameters = _validated_image_provider_parameters(
+            binding, provider_parameters
+        )
+        generation_brief = self.repository.get_generation_brief(
+            brief.generation_brief_id
+        )
+        if generation_brief is None:
+            raise ShotKeyframeError("Keyframe RuntimePlan GenerationBrief is missing")
+        expected_parameters = {
+            **parameters,
+            "manifest_id": str(getattr(manifest, "id", "")),
+            "manifest_hash": str(getattr(manifest, "manifest_hash", "")),
+            "codec_id": str(getattr(manifest, "codec_id", "")),
+        }
+        endpoint_profile_id = (
+            str(getattr(manifest, "endpoint_profile_id", "") or "") or None
+        )
+        credential_reference = (
+            str(getattr(manifest, "credential_reference", "") or "") or None
+        )
+        persisted = self.repository.get_runtime_plan(runtime_plan.id)
+        if persisted is None or persisted != runtime_plan:
+            raise ShotKeyframeError(
+                "Keyframe RuntimePlan was not durably frozen before create"
+            )
+        try:
+            canonical_plan_hash = RuntimePlanService.canonical_plan_hash(runtime_plan)
+        except Exception as exc:
+            raise ShotKeyframeError("Keyframe RuntimePlan hash is invalid") from exc
+        if canonical_plan_hash != runtime_plan.plan_hash:
+            raise ShotKeyframeError("Keyframe RuntimePlan hash is invalid")
+        if (
+            runtime_plan.project_id != brief.project_id
+            or runtime_plan.production_job_id
+            != generation_brief.production_job_id
+            or runtime_plan.generation_brief_id != brief.generation_brief_id
+            or runtime_plan.generation_brief_hash
+            != brief.generation_brief_sha256
+            or runtime_plan.provider_capability != CapabilityKind.IMAGE.value
+            or runtime_plan.provider_id != str(getattr(manifest, "provider_id", ""))
+            or runtime_plan.model_id != str(getattr(manifest, "model_id", ""))
+            or runtime_plan.endpoint_profile_id
+            != endpoint_profile_id
+            or runtime_plan.deployment_region
+            != str(getattr(manifest, "deployment_region", ""))
+            or runtime_plan.endpoint_class
+            != str(getattr(manifest, "endpoint_class", ""))
+            or runtime_plan.credential_reference
+            != credential_reference
+            or runtime_plan.selection_source
+            not in {"PROJECT_SELECTION", "GLOBAL_SELECTION"}
+            or runtime_plan.provider_parameters != expected_parameters
+            or runtime_plan.prompt_template_version
+            != SHOT_KEYFRAME_PROMPT_TEMPLATE_VERSION
+            or runtime_plan.authorization.get("create_authorized") is not True
+            or runtime_plan.authorization.get("per_item_max") != 1
+            or runtime_plan.authorization.get("automatic_paid_retry") != 0
+            or runtime_plan.authorization.get("shot_id") != brief.shot_id
+        ):
+            raise ShotKeyframeError(
+                "Keyframe RuntimePlan differs from the exact paid IMAGE intent"
+            )
+        evidence = {
+            "runtime_plan_id": runtime_plan.id,
+            "runtime_plan_hash": runtime_plan.plan_hash,
+            "provider_capability": runtime_plan.provider_capability,
+            "provider_id": runtime_plan.provider_id,
+            "model_id": runtime_plan.model_id,
+            "endpoint_profile_id": runtime_plan.endpoint_profile_id,
+            "deployment_region": runtime_plan.deployment_region,
+            "endpoint_class": runtime_plan.endpoint_class,
+            "credential_reference": runtime_plan.credential_reference,
+            "selection_source": runtime_plan.selection_source,
+            "generation_brief_id": runtime_plan.generation_brief_id,
+            "generation_brief_hash": runtime_plan.generation_brief_hash,
+            "provider_parameters": dict(runtime_plan.provider_parameters),
+            # ``authorization`` is intentionally a globally-sensitive metadata
+            # key.  This value is the already-validated, non-secret paid-create
+            # policy, so give the durable public evidence an explicit name that
+            # cannot be confused with an HTTP Authorization header.
+            "paid_create_authorization": dict(runtime_plan.authorization),
+            "prompt_template_version": runtime_plan.prompt_template_version,
+            "manifest_id": str(getattr(manifest, "id", "")),
+            "manifest_hash": str(getattr(manifest, "manifest_hash", "")),
+        }
+        safe_evidence = sanitize_persistent_metadata(evidence)
+        if not isinstance(safe_evidence, dict) or safe_evidence != evidence:
+            raise ShotKeyframeError("Keyframe RuntimePlan evidence is unsafe")
+        return evidence
+
     def paid_create_intent(
         self,
         brief: ShotKeyframeBrief,
         binding: UniversalImageBinding,
         *,
+        runtime_plan: RuntimePlan,
         provider_parameters: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Return the safe exact intent that a paid grant must freeze."""
@@ -901,12 +1226,15 @@ class ShotKeyframeService:
         model_id = str(getattr(manifest, "model_id", ""))
         if not all((manifest_id, manifest_hash, provider_id, model_id)):
             raise ShotKeyframeError("Universal IMAGE manifest identity is incomplete")
-        parameters = dict(provider_parameters or {})
-        safe_parameters = sanitize_persistent_metadata(parameters)
-        if not isinstance(safe_parameters, dict) or safe_parameters != parameters:
-            raise ShotKeyframeError(
-                "Universal IMAGE provider parameters contain unsafe values"
-            )
+        parameters = _validated_image_provider_parameters(
+            binding, provider_parameters
+        )
+        runtime_plan_evidence = self._runtime_plan_evidence(
+            brief,
+            binding,
+            runtime_plan,
+            provider_parameters=parameters,
+        )
         create_once_identity = {
             "contract": "SHOT_KEYFRAME_CREATE_ONCE_V1",
             "project_id": brief.project_id,
@@ -916,12 +1244,15 @@ class ShotKeyframeService:
             "shot_keyframe_brief_sha256": brief.sha256,
             "manifest_id": manifest_id,
             "manifest_hash": manifest_hash,
+            "runtime_plan_id": runtime_plan.id,
+            "runtime_plan_hash": runtime_plan.plan_hash,
         }
         payload = {
             **create_once_identity,
             "provider_id": provider_id,
             "model_id": model_id,
             "provider_parameters_sha256": _canonical_sha256(parameters),
+            "runtime_plan_evidence": runtime_plan_evidence,
         }
         return {
             **payload,
@@ -981,9 +1312,12 @@ class ShotKeyframeService:
                     "shot_keyframe_brief_sha256",
                     "manifest_id",
                     "manifest_hash",
+                    "runtime_plan_id",
+                    "runtime_plan_hash",
                     "provider_id",
                     "model_id",
                     "provider_parameters_sha256",
+                    "runtime_plan_evidence",
                     "create_once_identity_sha256",
                     "authorization_intent_id",
                 }
@@ -1061,6 +1395,7 @@ class ShotKeyframeService:
         selection: ShotKeyframeSelection,
         binding: UniversalImageBinding,
         *,
+        runtime_plan: RuntimePlan | None = None,
         provider_parameters: Mapping[str, object] | None = None,
         create_authorized: bool = False,
         authorization_fingerprint: str | None = None,
@@ -1070,6 +1405,10 @@ class ShotKeyframeService:
         if create_authorized is not True:
             raise ShotKeyframeError(
                 "Universal IMAGE create requires explicit authorization; no call was made"
+            )
+        if runtime_plan is None:
+            raise ShotKeyframeError(
+                "Canonical keyframe RuntimePlan must be frozen before create; no call was made"
             )
         fingerprint = str(authorization_fingerprint or "").strip().lower()
         authorization = self.repository.get_provider_task_by_idempotency(
@@ -1081,13 +1420,19 @@ class ShotKeyframeService:
         if authorization is None or authorization.state != "AUTHORIZED":
             raise ShotKeyframeError(
                 "PAID_BUDGET_MISSING: exact keyframe authorization was not frozen"
-            )
-        parameters = dict(provider_parameters or {})
-        intent = self.paid_create_intent(
-            brief,
-            binding,
-            provider_parameters=parameters,
         )
+        parameters = dict(provider_parameters or {})
+        try:
+            intent = self.paid_create_intent(
+                brief,
+                binding,
+                runtime_plan=runtime_plan,
+                provider_parameters=parameters,
+            )
+        except ShotKeyframeError as exc:
+            raise ShotKeyframeError(
+                "PAID_AUTHORIZATION_MISMATCH: keyframe RuntimePlan or intent changed"
+            ) from exc
         authorized_intents = authorization.request_summary.get(
             "authorized_intents"
         )
@@ -1117,12 +1462,14 @@ class ShotKeyframeService:
                     status=ProductionExecutionStatus.QUEUED,
                     worker_type="UNIVERSAL_IMAGE_SHOT_KEYFRAME",
                     created_at=now,
+                    runtime_plan_id=runtime_plan.id,
                     generation_brief_id=brief.generation_brief_id,
                 )
             )
         elif (
             execution.production_job_id != job.id
             or execution.worker_type != "UNIVERSAL_IMAGE_SHOT_KEYFRAME"
+            or execution.runtime_plan_id != runtime_plan.id
             or execution.generation_brief_id != brief.generation_brief_id
         ):
             raise ShotKeyframeError("Keyframe execution intent identity conflicts")
@@ -1136,6 +1483,9 @@ class ShotKeyframeService:
             "shot_keyframe_brief_sha256": brief.sha256,
             "manifest_id": manifest_id,
             "manifest_hash": manifest_hash,
+            "runtime_plan_id": runtime_plan.id,
+            "runtime_plan_hash": runtime_plan.plan_hash,
+            "runtime_plan_evidence": intent["runtime_plan_evidence"],
             "provider_parameters_sha256": intent[
                 "provider_parameters_sha256"
             ],
@@ -1159,6 +1509,8 @@ class ShotKeyframeService:
                     "authorization_intent_id": intent[
                         "authorization_intent_id"
                     ],
+                    "runtime_plan_id": runtime_plan.id,
+                    "runtime_plan_hash": runtime_plan.plan_hash,
                 },
                 created_at=now,
                 updated_at=now,
@@ -1169,7 +1521,7 @@ class ShotKeyframeService:
                 "Keyframe create intent provider parameters are already frozen"
             )
         recorded = self._recorded_frame_for_execution(
-            project_id, execution, brief
+            project_id, execution, brief, runtime_plan
         )
         if recorded is not None:
             if task.state != "SUCCEEDED":
@@ -1208,6 +1560,8 @@ class ShotKeyframeService:
                 create_authorized=True,
                 request_id=request_id,
                 execution_id=execution.id,
+                runtime_plan_id=runtime_plan.id,
+                runtime_plan_hash=runtime_plan.plan_hash,
             )
         except ShotKeyframeCreateUncertainError as exc:
             self.repository.update_provider_submission_outcome(
@@ -1237,12 +1591,15 @@ class ShotKeyframeService:
             "automatic_paid_retry": 0,
             "authorization_task_id": authorization.id,
             "authorization_fingerprint": fingerprint,
+            "authorization_intent_id": intent["authorization_intent_id"],
             "request_id": generated.request_id,
             "request_sha256": generated.request_sha256,
             "manifest_id": generated.manifest_id,
             "manifest_hash": generated.manifest_hash,
             "provider_id": generated.provider_id,
             "model_id": generated.model_id,
+            "runtime_plan_id": runtime_plan.id,
+            "runtime_plan_hash": runtime_plan.plan_hash,
             "result_sha256": generated.sha256,
             "result_size_bytes": generated.size_bytes,
         }
@@ -1355,6 +1712,7 @@ class ShotKeyframeService:
         project_id: str,
         execution: ProductionExecution,
         brief: ShotKeyframeBrief,
+        runtime_plan: RuntimePlan,
     ) -> ShotFirstFrame | None:
         artifacts = [
             artifact
@@ -1381,6 +1739,7 @@ class ShotKeyframeService:
             or frame.shot_plan_revision_id != brief.shot_plan_revision_id
             or frame.generation_brief_id != brief.generation_brief_id
             or frame.shot_keyframe_brief_sha256 != brief.sha256
+            or execution.runtime_plan_id != runtime_plan.id
         ):
             raise ShotKeyframeError(
                 "Keyframe execution persisted different frozen provenance"

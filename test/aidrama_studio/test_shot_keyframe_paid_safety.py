@@ -47,6 +47,7 @@ from aidrama_studio.services.shot_keyframe import (
     ShotKeyframePolicy,
     ShotKeyframeService,
     UniversalImageBinding,
+    UniversalShotKeyframeImageService,
 )
 from aidrama_studio.storage.database import DatabasePaths
 from aidrama_studio.storage.repositories import ProjectRepository
@@ -55,6 +56,7 @@ from test.aidrama_studio.test_shot_keyframe_continuity import (
     _FakeImageRuntime,
     _build_context,
     _compile_keyframe_briefs,
+    _freeze_runtime_plans,
     _image_binding,
 )
 
@@ -143,6 +145,43 @@ class _InterruptedThenForbiddenRuntime:
 
     def read_output(self, _output):
         raise AssertionError("interrupted create has no output bytes")
+
+
+class _RuntimePlanProbeRuntime:
+    """Assert durable plan/task/execution identity at the transport boundary."""
+
+    def __init__(self, repository: ProjectRepository, content: bytes) -> None:
+        self.repository = repository
+        self.delegate = _FakeImageRuntime((content,))
+        self.observed: dict[str, object] | None = None
+
+    @property
+    def requests(self):
+        return self.delegate.requests
+
+    def submit(self, request, *, authorization=None):
+        plan = self.repository.get_runtime_plan(str(request.runtime_plan_id))
+        execution = self.repository.get_production_execution(str(request.execution_id))
+        tasks = [
+            task
+            for task in self.repository.list_provider_tasks(request.project_id)
+            if task.execution_id == request.execution_id
+        ]
+        assert plan is not None
+        assert execution is not None
+        assert execution.runtime_plan_id == plan.id
+        assert len(tasks) == 1
+        assert tasks[0].state == "SUBMITTING"
+        self.observed = {
+            "plan": plan,
+            "execution": execution,
+            "task": tasks[0],
+            "request": request,
+        }
+        return self.delegate.submit(request, authorization=authorization)
+
+    def read_output(self, output):
+        return self.delegate.read_output(output)
 
 
 class _PreLiveKeyframeSeam:
@@ -323,8 +362,26 @@ def _authorize(
     fingerprint: str,
     binding,
     briefs,
+    *,
+    provider_parameters: Mapping[str, object] | None = None,
 ):
-    intents = [service.paid_create_intent(brief, binding) for brief in briefs]
+    parameters = dict(provider_parameters or {"resolution": "1024*1024"})
+    runtime_plans = _freeze_runtime_plans(
+        context,
+        service,
+        binding,
+        briefs,
+        provider_parameters=parameters,
+    )
+    intents = [
+        service.paid_create_intent(
+            brief,
+            binding,
+            runtime_plan=runtime_plan,
+            provider_parameters=parameters,
+        )
+        for brief, runtime_plan in zip(briefs, runtime_plans, strict=True)
+    ]
     count = len(intents)
     authorization = service.authorize_paid_creates(
         context.project.id,
@@ -364,13 +421,31 @@ def _generate(
     *,
     provider_parameters: Mapping[str, object] | None = None,
 ):
+    parameters = dict(provider_parameters or {"resolution": "1024*1024"})
+    plans = [
+        plan
+        for plan in context.repository.list_runtime_plans(context.project.id)
+        if plan.generation_brief_id == brief.generation_brief_id
+    ]
+    if not plans:
+        plans = list(
+            _freeze_runtime_plans(
+                context,
+                service,
+                binding,
+                (brief,),
+                provider_parameters=parameters,
+            )
+        )
+    assert len(plans) == 1
     return service.generate_and_record(
         context.project.id,
         context.job.id,
         brief,
         selection,
         binding,
-        provider_parameters=provider_parameters,
+        runtime_plan=plans[0],
+        provider_parameters=parameters,
         create_authorized=True,
         authorization_fingerprint=fingerprint,
     )
@@ -408,6 +483,149 @@ def test_planning_snapshot_freezes_exact_approved_chain_with_zero_references(
     assert isinstance(frozen_shot, Mapping)
     with pytest.raises(TypeError):
         frozen_shot["action"] = "mutated"  # type: ignore[index]
+
+
+def test_keyframe_runtime_plan_is_durable_and_identical_at_transport(
+    tmp_path: Path,
+) -> None:
+    context, service, briefs, selections = _prepared_paid_case(tmp_path)
+    fingerprint = "9" * 64
+    runtime = _RuntimePlanProbeRuntime(
+        context.repository, png_bytes(color="navy")
+    )
+    binding = _image_binding(runtime)
+    parameters = {"resolution": "1024*1024"}
+    plans = _freeze_runtime_plans(
+        context,
+        service,
+        binding,
+        briefs[:1],
+        provider_parameters=parameters,
+    )
+    plan = plans[0]
+    intent = service.paid_create_intent(
+        briefs[0],
+        binding,
+        runtime_plan=plan,
+        provider_parameters=parameters,
+    )
+    authorization = service.authorize_paid_creates(
+        context.project.id,
+        context.job.id,
+        authorization_fingerprint=fingerprint,
+        planned_creates=1,
+        authorized_max=1,
+        authorized_intents=[intent],
+    )
+
+    frame = service.generate_and_record(
+        context.project.id,
+        context.job.id,
+        briefs[0],
+        selections[0],
+        binding,
+        runtime_plan=plan,
+        provider_parameters=parameters,
+        create_authorized=True,
+        authorization_fingerprint=fingerprint,
+    )
+
+    assert runtime.observed is not None
+    observed_plan = runtime.observed["plan"]
+    observed_task = runtime.observed["task"]
+    request = runtime.observed["request"]
+    assert observed_plan == plan == context.repository.get_runtime_plan(plan.id)
+    assert request.runtime_plan_id == plan.id
+    assert request.runtime_plan_hash == plan.plan_hash
+    assert request.provider_id == plan.provider_id
+    assert request.model_id == plan.model_id
+    assert request.manifest_id == plan.provider_parameters["manifest_id"]
+    assert request.manifest_hash == plan.provider_parameters["manifest_hash"]
+    assert observed_task.request_summary["runtime_plan_id"] == plan.id
+    assert observed_task.request_summary["runtime_plan_hash"] == plan.plan_hash
+    assert observed_task.request_summary["runtime_plan_evidence"] == intent[
+        "runtime_plan_evidence"
+    ]
+    assert authorization.request_summary["authorized_intents"] == [intent]
+    final_task = context.repository.get_provider_task(observed_task.id)
+    assert final_task.state == "SUCCEEDED"
+    assert final_task.metadata["authorization_intent_id"] == intent[
+        "authorization_intent_id"
+    ]
+    assert final_task.request_summary["runtime_plan_evidence"] == intent[
+        "runtime_plan_evidence"
+    ]
+    assert frame.execution_id == request.execution_id
+
+
+def test_planless_or_noncanonical_image_runtime_fails_before_transport(
+    tmp_path: Path,
+) -> None:
+    context, service, briefs, _selections = _prepared_paid_case(tmp_path)
+    runtime = _FakeImageRuntime((png_bytes(color="navy"),))
+    binding = _image_binding(runtime)
+
+    with pytest.raises(ShotKeyframeError, match="exact frozen RuntimePlan"):
+        UniversalShotKeyframeImageService.generate(
+            briefs[0],
+            binding,
+            provider_parameters={"resolution": "1024*1024"},
+            create_authorized=True,
+        )
+    with pytest.raises(ShotKeyframeError, match="canonical immutable domain object"):
+        service.paid_create_intent(
+            briefs[0],
+            binding,
+            runtime_plan={"id": "not-a-runtime-plan"},  # type: ignore[arg-type]
+            provider_parameters={"resolution": "1024*1024"},
+        )
+    assert runtime.requests == []
+
+
+def test_forged_plan_hash_reserved_identity_and_unsupported_resolution_fail_closed(
+    tmp_path: Path,
+) -> None:
+    context, service, briefs, _selections = _prepared_paid_case(tmp_path)
+    runtime = _FakeImageRuntime((png_bytes(color="navy"),))
+    binding = _image_binding(runtime)
+    plan = _freeze_runtime_plans(
+        context,
+        service,
+        binding,
+        briefs[:1],
+        provider_parameters={"resolution": "1024*1024"},
+    )[0]
+    forged = plan.model_copy(
+        update={"id": "forged-runtime-plan", "plan_hash": "f" * 64}
+    )
+    context.repository.create_runtime_plan(forged)
+
+    with pytest.raises(ShotKeyframeError, match="RuntimePlan hash is invalid"):
+        service.paid_create_intent(
+            briefs[0],
+            binding,
+            runtime_plan=forged,
+            provider_parameters={"resolution": "1024*1024"},
+        )
+    with pytest.raises(ShotKeyframeError, match="cannot override frozen identity"):
+        service.paid_create_intent(
+            briefs[0],
+            binding,
+            runtime_plan=plan,
+            provider_parameters={
+                "resolution": "1024*1024",
+                "manifest_id": binding.manifest.id,
+            },
+        )
+    with pytest.raises(ShotKeyframeError, match="not supported by the exact manifest"):
+        service.paid_create_intent(
+            briefs[0],
+            binding,
+            runtime_plan=plan,
+            provider_parameters={"resolution": "2048*2048"},
+        )
+    assert runtime.requests == []
+    assert context.repository.list_production_executions(context.job.id) == []
 
 
 def test_budget_two_allows_two_distinct_shots_once_and_deduplicates_double_calls(

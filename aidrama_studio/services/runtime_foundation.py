@@ -349,6 +349,27 @@ class RuntimePlanService:
         self.repository = repository or ProjectRepository()
         self.profiles = OutputProfileService(self.repository)
 
+    @staticmethod
+    def canonical_plan_hash(plan: RuntimePlan) -> str:
+        """Recompute the immutable request payload hash without record identity."""
+
+        if not isinstance(plan, RuntimePlan):
+            raise RuntimeFoundationError("RuntimePlan domain object is required")
+        payload = plan.model_dump(
+            mode="json",
+            exclude={
+                "id",
+                "project_id",
+                "production_job_id",
+                "execution_id",
+                "output_profile_id",
+                "generation_brief_id",
+                "plan_hash",
+                "created_at",
+            },
+        )
+        return _hash(payload)
+
     def create_from_selection(
         self,
         project_id: str,

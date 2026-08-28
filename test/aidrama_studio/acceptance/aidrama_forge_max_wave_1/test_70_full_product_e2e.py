@@ -25,6 +25,8 @@ from aidrama_studio.services import (
 from aidrama_studio.services.adapters import MPTFinalAssemblyAdapter
 from aidrama_studio.services.ai_capabilities import CapabilityRegistry
 from aidrama_studio.services.llm_runtime import LLMInvocationGateway
+from aidrama_studio.services.model_runtime import CapabilityKind, InMemoryManifestRegistry
+from aidrama_studio.services.model_settings import SettingsModelService
 from aidrama_studio.storage.repositories import ProjectRepository
 from test.aidrama_studio.test_continuity_engine import (
     _candidate,
@@ -167,11 +169,40 @@ def test_current_eight_feature_offline_product_path_cold_reloads_and_plays(
         )
     )
     keyframe_binding = _keyframe_image_binding(keyframe_runtime)
+    keyframe_parameters = {"resolution": "1024*1024"}
+    keyframe_settings = SettingsModelService(
+        repository,
+        manifest_registry=InMemoryManifestRegistry(
+            (keyframe_binding.manifest,)
+        ),
+    )
+    keyframe_settings.save_selections(
+        project_id=project.id,
+        selections={CapabilityKind.IMAGE: keyframe_binding.manifest.id},
+    )
     keyframe_briefs_by_shot = {
         shot.id: keyframes.briefs.compile(
             input_snapshot,
             shot.id,
             generation_briefs_by_shot[shot.id],
+        )
+        for shot in approved_plan["content"].shots
+    }
+    keyframe_runtime_plans = {
+        shot.id: keyframes.freeze_runtime_plan(
+            project.id,
+            job.id,
+            keyframe_briefs_by_shot[shot.id],
+            keyframe_binding,
+            provider_parameters=keyframe_parameters,
+            authorization={
+                "contract": "OFFLINE_SHOT_KEYFRAME_RUNTIMEPLAN_V1",
+                "create_authorized": True,
+                "shot_id": shot.id,
+                "per_item_max": 1,
+                "automatic_paid_retry": 0,
+            },
+            selection_service=keyframe_settings,
         )
         for shot in approved_plan["content"].shots
     }
@@ -183,7 +214,10 @@ def test_current_eight_feature_offline_product_path_cold_reloads_and_plays(
         authorized_max=len(approved_plan["content"].shots),
         authorized_intents=[
             keyframes.paid_create_intent(
-                keyframe_briefs_by_shot[shot.id], keyframe_binding
+                keyframe_briefs_by_shot[shot.id],
+                keyframe_binding,
+                runtime_plan=keyframe_runtime_plans[shot.id],
+                provider_parameters=keyframe_parameters,
             )
             for shot in approved_plan["content"].shots
         ],
@@ -205,6 +239,8 @@ def test_current_eight_feature_offline_product_path_cold_reloads_and_plays(
             keyframe_brief,
             selection,
             keyframe_binding,
+            runtime_plan=keyframe_runtime_plans[shot.id],
+            provider_parameters=keyframe_parameters,
             create_authorized=True,
             authorization_fingerprint=keyframe_authorization_fingerprint,
         )

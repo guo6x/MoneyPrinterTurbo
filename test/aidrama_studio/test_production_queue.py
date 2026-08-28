@@ -150,6 +150,30 @@ def _record_generated_first_frame(queue, project_id, job):
         manifest=image_manifest,
         read_output=runtime.read_output,
     )
+    parameters = {"resolution": "1024*1024"}
+    settings = queue.settings
+    existing = settings.selection_service.get_settings(project_id)
+    exact_selections = dict(existing.selections) if existing is not None else {}
+    exact_selections[ModelCapabilityKind.IMAGE] = image_manifest.id
+    settings.save_selections(
+        project_id=project_id,
+        selections=exact_selections,
+    )
+    runtime_plan = service.freeze_runtime_plan(
+        project_id,
+        job.id,
+        keyframe_brief,
+        binding,
+        provider_parameters=parameters,
+        authorization={
+            "contract": "OFFLINE_SHOT_KEYFRAME_RUNTIMEPLAN_V1",
+            "create_authorized": True,
+            "shot_id": shot.id,
+            "per_item_max": 1,
+            "automatic_paid_retry": 0,
+        },
+        selection_service=settings,
+    )
     service.authorize_paid_creates(
         project_id,
         job.id,
@@ -157,7 +181,12 @@ def _record_generated_first_frame(queue, project_id, job):
         planned_creates=1,
         authorized_max=1,
         authorized_intents=[
-            service.paid_create_intent(keyframe_brief, binding)
+            service.paid_create_intent(
+                keyframe_brief,
+                binding,
+                runtime_plan=runtime_plan,
+                provider_parameters=parameters,
+            )
         ],
     )
     frame = service.generate_and_record(
@@ -166,6 +195,8 @@ def _record_generated_first_frame(queue, project_id, job):
         keyframe_brief,
         selection,
         binding,
+        runtime_plan=runtime_plan,
+        provider_parameters=parameters,
         create_authorized=True,
         authorization_fingerprint=authorization_fingerprint,
     )
