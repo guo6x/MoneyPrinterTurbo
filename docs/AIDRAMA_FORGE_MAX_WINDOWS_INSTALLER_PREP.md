@@ -52,6 +52,8 @@ The installer compiler receives `/DMyAppVersion`, `/DDeliveryHead`,
 `/DSourceDir`, and `/DOutputDir`; the installer filename contains the version
 and a 12-character SHA prefix while `build-info.json` and
 `release/build-provenance.json` retain the full SHA.
+The installed executable also supports `AIDramaStudio.exe --version` for a
+human-readable version/SHA check without starting the application server.
 
 ## Runtime/data boundary
 
@@ -83,3 +85,12 @@ itself; if a separately supplied `ffprobe.exe` is present, the launcher also
 exports its discovered path. The exact GPL-enabled FFmpeg binary still
 requires release-owner legal approval before external redistribution. A final
 noon installer is therefore not built by this preparation branch.
+
+During each build, `desktop/license_materials.py` copies license and notice
+files from the exact installed runtime/build-tool distributions into the
+package's `licenses/python` and `licenses/build-tools` directories, emits
+`THIRD_PARTY_NOTICES.txt`, and records the exact FFmpeg `-version` and `-L`
+output under `licenses/ffmpeg`. Missing upstream license files are marked for
+review rather than replaced with guessed text. The current application does
+not ship a separate ffprobe binary; `FFPROBE_DISCOVERY=NOT_SHIPPED` is the
+honest result for this package.
