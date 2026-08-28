@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Mapping
 
 from aidrama_studio.domain import FinalAssemblyItem, FinalAssemblyManifest
+from aidrama_studio.services.ffmpeg_runtime import (
+    FFmpegEncoderConfigurationError,
+    VideoEncoderSelection,
+)
 
 
 class FinalAssemblyRuntimeError(RuntimeError):
@@ -82,10 +86,18 @@ class MPTFinalAssemblyAdapter(FinalAssemblyRuntimeAdapter):
         re.IGNORECASE,
     )
 
-    def __init__(self, *, project_root: Path | None = None, ffmpeg_binary: str | None = None, threads: int = 2):
+    def __init__(
+        self,
+        *,
+        project_root: Path | None = None,
+        ffmpeg_binary: str | None = None,
+        threads: int = 2,
+        video_encoder: VideoEncoderSelection | None = None,
+    ):
         self.project_root = Path(project_root).resolve() if project_root is not None else None
         self.ffmpeg_binary = ffmpeg_binary
         self.threads = max(1, int(threads or 2))
+        self.video_encoder = video_encoder
 
     def validate_sources(self, request: FinalAssemblyRenderRequest) -> list[dict[str, object]]:
         if not request.project_id or not request.assembly_id:
@@ -163,7 +175,16 @@ class MPTFinalAssemblyAdapter(FinalAssemblyRuntimeAdapter):
                 or profile.get("video_codec_target")
                 or "h264"
             ).lower()
-            video_codec = "libx265" if "265" in codec or "hevc" in codec else "libx264"
+            try:
+                encoder = self.video_encoder or VideoEncoderSelection.resolve(codec)
+                expected_codec = VideoEncoderSelection.resolve(codec).codec
+                if encoder.codec != expected_codec:
+                    raise FFmpegEncoderConfigurationError(
+                        "configured FFmpeg encoder codec does not match OutputProfile"
+                    )
+                encoder.require_available(binary)
+            except FFmpegEncoderConfigurationError as exc:
+                raise FinalAssemblyRuntimeError(str(exc)) from exc
             sample_rate = int(
                 profile.get("target_audio_sample_rate")
                 or profile.get("audio_sample_rate")
@@ -241,12 +262,7 @@ class MPTFinalAssemblyAdapter(FinalAssemblyRuntimeAdapter):
                     audio_filter,
                     "-t",
                     f"{target_duration:.6f}",
-                    "-c:v",
-                    video_codec,
-                    "-preset",
-                    "veryfast",
-                    "-pix_fmt",
-                    "yuv420p",
+                    *encoder.output_args(),
                     "-c:a",
                     "aac",
                     "-ar",
@@ -335,12 +351,7 @@ class MPTFinalAssemblyAdapter(FinalAssemblyRuntimeAdapter):
                 f"apad,atrim=duration={timeline_duration:.6f},asetpts=PTS-STARTPTS",
                 "-t",
                 f"{timeline_duration:.6f}",
-                "-c:v",
-                video_codec,
-                "-preset",
-                "veryfast",
-                "-pix_fmt",
-                "yuv420p",
+                *encoder.output_args(),
                 "-c:a",
                 "aac",
                 "-ar",
