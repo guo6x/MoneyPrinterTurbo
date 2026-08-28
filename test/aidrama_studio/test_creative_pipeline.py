@@ -135,14 +135,16 @@ def _script() -> dict[str, object]:
 
 
 def _plan() -> dict[str, object]:
-    return ShotPlan(
+    payload = ShotPlan(
         title="末班车分镜",
-        source_script_revision_id="model-must-not-control-provenance",
+        source_script_revision_id="product-injects-this-provenance",
         shots=[
             Shot(id="shot_001", order=1, scene_id="scene_001", source_script_beat_ids=["script_beat_001"], duration_seconds=30, subject=["char_001"], action="发动公交", visual_intent="建立夜班车厢"),
             Shot(id="shot_002", order=2, scene_id="scene_001", source_script_beat_ids=["script_beat_002"], duration_seconds=30, subject=["char_001"], action="停在终点站", visual_intent="收束选择时刻"),
         ],
     ).model_dump(mode="json")
+    payload.pop("source_script_revision_id")
+    return payload
 
 
 def _pipeline(tmp_path, provider: _FakeLLMProvider):

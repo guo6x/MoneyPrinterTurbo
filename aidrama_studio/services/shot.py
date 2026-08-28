@@ -42,6 +42,8 @@ class ShotService:
     def get_approved_revision(self,pid): return next((x for x in self.list_revisions(pid) if x["status"] is ShotRevisionStatus.APPROVED),None)
     def _next(self,pid): x=self.get_latest_revision(pid); return x["version"]+1 if x else 1
     def _create(self,pid,source,content,generation_input=None):
+        if content.source_script_revision_id != source:
+            raise ShotServiceError("Shot Plan source Script provenance 不一致")
         n=_now(); return self.repository.create_shot_revision(revision_id=uuid4().hex,project_id=pid,version=self._next(pid),status=ShotRevisionStatus.DRAFT,source_script_revision_id=source,content=content,generation_input=generation_input,created_at=n,updated_at=n)
     def _story_script(self,pid):
         stories=self.repository.list_story_revisions(pid); scripts=self.repository.list_script_revisions(pid); return next((x for x in scripts if x["status"] is ScriptRevisionStatus.APPROVED),None),next((x for x in stories if x["status"] is StoryRevisionStatus.APPROVED),None)
@@ -226,18 +228,23 @@ class ShotService:
         except DurationPlanningError:
             duration_plan = None
         prompt = build_shot_prompt(
-            project, script["content"], story["content"], duration_plan
+            project,
+            script["content"],
+            story["content"],
+            duration_plan,
+            source_script_revision_id=script["id"],
         )
         input_source_ids = (script["id"], story["id"])
         def validate(raw):
-            plan=parse_shot_plan(raw)
-            # Revision provenance belongs to the product action, never to a
-            # model-supplied identifier that could drift from the approved
-            # Script selected above.
-            plan.source_script_revision_id=script["id"]
+            plan=parse_shot_plan(
+                raw,
+                expected_source_script_revision_id=script["id"],
+            )
+            if plan.source_script_revision_id != script["id"]:
+                raise ValueError("Shot Plan source Script provenance 不一致")
             plan.validate_against(script["content"],story["content"]); self.recalculate_risk_if_needed(plan); return plan
         try:
-            plan=self._llm_gateway.generate_validated_json(project.id,prompt,operation="SHOT_PLAN_GENERATION",validator=validate,repair_prompt_builder=lambda raw,exc: build_shot_repair_prompt(raw,str(exc)),input_source_ids=input_source_ids,provenance=generation_provenance)
+            plan=self._llm_gateway.generate_validated_json(project.id,prompt,operation="SHOT_PLAN_GENERATION",validator=validate,repair_prompt_builder=lambda raw,exc: build_shot_repair_prompt(raw,str(exc),source_script_revision_id=script["id"]),input_source_ids=input_source_ids,provenance=generation_provenance)
         except LLMInvocationError as e: raise ShotServiceError(str(e)) from e
         except Exception as e: raise ShotServiceError("Shot Plan 生成失败，请稍后重试。") from e
         latest=self.get_latest_revision(project.id)
