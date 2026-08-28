@@ -28,6 +28,7 @@ from aidrama_studio.services.ai_capabilities import (
     CapabilityStatus,
     MainlandUniversalLLMProvider,
     MPTLLMProvider,
+    default_capability_registry,
 )
 from aidrama_studio.services.llm_runtime import (
     LLM_LIVE_SMOKE_PROMPT,
@@ -224,6 +225,45 @@ def test_qwen_legacy_secret_alias_keeps_one_canonical_public_identity():
     assert provider.status.configured is True
     assert provider.status.metadata["credential_reference"] == "DASHSCOPE_API_KEY"
     assert "legacy-in-memory-only" not in repr(provider.status.public_dict())
+
+
+def test_default_qwen_registry_reads_workspace_url_from_canonical_store(
+    monkeypatch,
+):
+    workspace_url = "https://workspace.example.invalid/api/v1"
+
+    class _CredentialStore:
+        def __init__(self, _root):
+            self.values = {
+                "DASHSCOPE_API_KEY": "credential-key-placeholder",
+                "DASHSCOPE_WORKSPACE_BASE_URL": workspace_url,
+            }
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def configured(self, key):
+            return bool(self.get(key))
+
+        def configured_providers(self):
+            return tuple(sorted(self.values))
+
+    monkeypatch.setattr(
+        "aidrama_studio.services.credentials.WindowsCredentialStore",
+        _CredentialStore,
+    )
+
+    registry = default_capability_registry()
+    provider = next(
+        item
+        for item in registry.list(CapabilityKind.LLM)
+        if item.provider_name == "alibaba_model_studio"
+    )
+
+    assert provider._workspace_base_url == workspace_url
+    public_status = repr(provider.status.public_dict())
+    assert workspace_url not in public_status
+    assert "credential-key-placeholder" not in public_status
 
 
 def test_gateway_records_append_only_started_and_succeeded_without_prompt(tmp_path):

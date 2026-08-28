@@ -1319,7 +1319,13 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
             from aidrama_studio.storage.database import get_default_paths
             store = WindowsCredentialStore(get_default_paths().root)
             credential_store = store
-            for key in ("OPENAI_API_KEY", "DASHSCOPE_API_KEY", "ARK_API_KEY", "GEMINI_API_KEY"):
+            for key in (
+                "OPENAI_API_KEY",
+                "DASHSCOPE_API_KEY",
+                "DASHSCOPE_WORKSPACE_BASE_URL",
+                "ARK_API_KEY",
+                "GEMINI_API_KEY",
+            ):
                 secret = store.get(key)
                 if secret:
                     values[key] = secret
