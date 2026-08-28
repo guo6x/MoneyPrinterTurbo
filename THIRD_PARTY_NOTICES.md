@@ -38,3 +38,6 @@ The Windows build also emits `THIRD_PARTY_NOTICES.txt` and a `licenses/`
 directory from the exact dedicated build environment. `desktop/license_materials.py`
 retains upstream wheel license/notice files and the exact bundled FFmpeg
 `-version`/`-L` output; missing materials are marked for release review.
+The checked-in `licenses/ffmpeg/` directory also carries the FFmpeg 7.1
+upstream COPYING texts, GPL-enabled external-library COPYING texts, and an
+exact-payload corresponding-source checklist.

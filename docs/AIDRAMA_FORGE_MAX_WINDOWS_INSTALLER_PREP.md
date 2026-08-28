@@ -94,3 +94,6 @@ output under `licenses/ffmpeg`. Missing upstream license files are marked for
 review rather than replaced with guessed text. The current application does
 not ship a separate ffprobe binary; `FFPROBE_DISCOVERY=NOT_SHIPPED` is the
 honest result for this package.
+Checked-in `licenses/ffmpeg/COPYING.GPLv3`, `COPYING.LGPLv3`, and `LICENSE.md`
+are copied into each package, alongside `CORRESPONDING_SOURCE_OFFER.txt`
+which records the exact PyPI wheel/payload hashes and source-offer checklist.

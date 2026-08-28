@@ -92,16 +92,34 @@ def _find_ffmpeg() -> Path | None:
         return None
 
 
+def _copy_repository_ffmpeg_materials(root: Path, target: Path) -> list[str]:
+    """Copy checked-in upstream FFmpeg texts into the package."""
+
+    source_root = Path(__file__).resolve().parent.parent / "licenses" / "ffmpeg"
+    if not source_root.is_dir():
+        return []
+    copied: list[str] = []
+    for source in sorted(source_root.rglob("*"), key=lambda path: path.as_posix().casefold()):
+        if not source.is_file():
+            continue
+        destination = target / source.relative_to(source_root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        copied.append(destination.relative_to(root).as_posix())
+    return copied
+
+
 def _collect_ffmpeg(root: Path, destination: Path) -> dict[str, object]:
     target = destination / "ffmpeg"
     target.mkdir(parents=True, exist_ok=True)
+    license_files = _copy_repository_ffmpeg_materials(root, target)
     binary = _find_ffmpeg()
     if binary is None:
         (target / "REDISTRIBUTION_REVIEW_REQUIRED.txt").write_text(
             "No FFmpeg executable was discoverable in the dedicated build environment.\n",
             encoding="utf-8",
         )
-        return {"status": "NOT_DISCOVERABLE", "binary": None}
+        return {"status": "NOT_DISCOVERABLE", "binary": None, "license_files": license_files}
     def probe(*args: str) -> str:
         completed = subprocess.run(
             [str(binary), *args], capture_output=True, text=True, check=False,
@@ -124,6 +142,7 @@ def _collect_ffmpeg(root: Path, destination: Path) -> dict[str, object]:
         "binary": str(binary),
         "version_file": (target / "FFMPEG_BINARY_VERSION.txt").relative_to(root).as_posix(),
         "license_output_file": (target / "FFMPEG_BINARY_LICENSE_OUTPUT.txt").relative_to(root).as_posix(),
+        "license_files": license_files,
     }
 
 
