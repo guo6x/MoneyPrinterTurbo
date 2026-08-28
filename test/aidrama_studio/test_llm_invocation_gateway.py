@@ -26,6 +26,7 @@ from aidrama_studio.services.ai_capabilities import (
     CapabilityKind,
     CapabilityRegistry,
     CapabilityStatus,
+    MainlandUniversalLLMProvider,
     MPTLLMProvider,
 )
 from aidrama_studio.services.llm_runtime import (
@@ -34,6 +35,12 @@ from aidrama_studio.services.llm_runtime import (
     LLMInvocationGateway,
 )
 from aidrama_studio.services.provider_profiles import ProviderProfileService
+from aidrama_studio.services.model_runtime import (
+    DASHSCOPE_CN_ENDPOINT_PROFILE,
+    MAINLAND_PRIMARY_MANIFEST_IDS,
+    CapabilityKind as RuntimeCapabilityKind,
+    default_manifest_registry,
+)
 from aidrama_studio.services.runtime_foundation import AIInvocationService
 from aidrama_studio.storage.database import DatabasePaths
 from aidrama_studio.storage.repositories import ProjectRepository
@@ -97,6 +104,126 @@ def _context(tmp_path):
     repository = ProjectRepository(paths)
     project = ProjectService(repository).create(title="LLM Ledger")
     return repository, project
+
+
+class _FakeQwenResponse:
+    status_code = 200
+    headers = {"Content-Type": "application/json"}
+    content = b""
+
+    def __init__(self, text: str):
+        self.text = text
+
+    def json(self):
+        return {
+            "output": {
+                "choices": [
+                    {
+                        "message": {"content": self.text},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+        }
+
+
+class _FakeQwenSession:
+    def __init__(self, responses: list[str]):
+        self.responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append({"method": method, "url": url, **kwargs})
+        return _FakeQwenResponse(self.responses.pop(0))
+
+
+def _native_qwen_gateway(repository, project, session, *, secret="fake-dashscope"):
+    provider = MainlandUniversalLLMProvider(
+        credentials={"DASHSCOPE_API_KEY": secret},
+        env={},
+        sessions={DASHSCOPE_CN_ENDPOINT_PROFILE: session},
+    )
+    registry = CapabilityRegistry([provider])
+    profiles = ProviderProfileService(
+        repository,
+        registry=registry,
+        manifest_registry=default_manifest_registry(include_placeholders=False),
+    )
+    profiles.save_settings(
+        project_id=project.id,
+        preset=ProviderPreset.CUSTOM,
+        selections={
+            CapabilityKind.LLM: MAINLAND_PRIMARY_MANIFEST_IDS[
+                RuntimeCapabilityKind.LLM
+            ]
+        },
+    )
+    return LLMInvocationGateway(
+        repository,
+        registry=registry,
+        provider_profiles=profiles,
+    )
+
+
+def test_explicit_qwen_selection_uses_exact_native_manifest_codec_and_driver(
+    tmp_path, monkeypatch
+):
+    repository, project = _context(tmp_path)
+    session = _FakeQwenSession(['{"ok": true}'])
+    gateway = _native_qwen_gateway(repository, project, session)
+    monkeypatch.setattr(
+        "app.services.llm._generate_response",
+        lambda **_: (_ for _ in ()).throw(AssertionError("legacy LLM called")),
+    )
+
+    result = gateway.generate_json_text(
+        project.id,
+        "canonical qwen prompt",
+        operation="NATIVE_QWEN_TEST",
+    )
+
+    assert json.loads(result) == {"ok": True}
+    assert len(session.calls) == 1
+    call = session.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"].endswith(
+        "/api/v1/services/aigc/text-generation/generation"
+    )
+    assert call["json"]["model"] == "qwen-max"
+    assert call["json"]["input"]["messages"] == [
+        {"role": "user", "content": "canonical qwen prompt"}
+    ]
+    assert call["headers"]["Authorization"] == "Bearer fake-dashscope"
+    invocations = repository.list_ai_invocations(project.id)
+    assert [item.status for item in invocations] == ["STARTED", "SUCCEEDED"]
+    assert {item.provider_id for item in invocations} == {
+        "alibaba_model_studio"
+    }
+    assert {item.model_id for item in invocations} == {"qwen-max"}
+    for item in invocations:
+        summary = item.request_summary
+        assert summary["llm_runtime"] == "UNIVERSAL"
+        assert summary["model_manifest_id"] == MAINLAND_PRIMARY_MANIFEST_IDS[
+            RuntimeCapabilityKind.LLM
+        ]
+        assert summary["protocol"] == "REQUEST_RESPONSE"
+        assert summary["credential_reference"] == "DASHSCOPE_API_KEY"
+    durable = repr(invocations)
+    assert "fake-dashscope" not in durable
+    assert "QWEN_API_KEY" not in durable
+    assert "moonshot" not in durable.casefold()
+
+
+def test_qwen_legacy_secret_alias_keeps_one_canonical_public_identity():
+    provider = MainlandUniversalLLMProvider(
+        credentials={"QWEN_API_KEY": "legacy-in-memory-only"},
+        env={},
+    )
+
+    assert provider.status.configured is True
+    assert provider.status.metadata["credential_reference"] == "DASHSCOPE_API_KEY"
+    assert "legacy-in-memory-only" not in repr(provider.status.public_dict())
 
 
 def test_gateway_records_append_only_started_and_succeeded_without_prompt(tmp_path):

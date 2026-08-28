@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -18,11 +19,26 @@ from aidrama_studio.services import (
     ProductionRuntimeAdapter,
     RuntimeSubmission,
     RuntimeVideoProvider,
+    ShotKeyframePolicy,
+    ShotKeyframeService,
+    UniversalImageBinding,
 )
 from aidrama_studio.services.ai_capabilities import CapabilityKind
 from aidrama_studio.services.adapters import MockProductionAdapter
+from aidrama_studio.services.model_runtime import (
+    CapabilityResult,
+    CapabilityKind as ModelCapabilityKind,
+    ContentRef,
+    DASHSCOPE_CN_ENDPOINT_PROFILE,
+    RuntimeOutcome,
+)
+from aidrama_studio.services.model_runtime.mainland_manifests import (
+    build_mainland_manifests,
+)
+from aidrama_studio.services.model_settings import SettingsModelService
 from aidrama_studio.services.streaming_artifact import StreamingArtifactSource
 from test.aidrama_studio.test_production_execution import _ready_job, context as _execution_context
+from test.aidrama_studio.image_fixtures import png_bytes
 
 
 def _queue(repository):
@@ -48,7 +64,102 @@ def _authorization(queue, project_id, job_id):
     }
 
 
-def test_seedance_queue_accepts_only_the_official_4_to_30_duration_profile():
+class _FakeCredentialStore:
+    def configured(self, reference):
+        return reference == "DASHSCOPE_API_KEY"
+
+    def get(self, reference):
+        return "fake-offline-value" if self.configured(reference) else None
+
+
+class _FakeWanAdapter(MockProductionAdapter):
+    model_id = "wan2.7-i2v-2026-04-25"
+    runtime_profile_metadata = {
+        **MockProductionAdapter.runtime_profile_metadata,
+        "deployment_region": "MAINLAND_CHINA",
+        "endpoint_class": "DASHSCOPE_CN",
+        "endpoint_profile_id": DASHSCOPE_CN_ENDPOINT_PROFILE,
+        "credential_reference": "DASHSCOPE_API_KEY",
+        "credential_present": True,
+    }
+
+
+class _FakeKeyframeImageRuntime:
+    """One-call fake Universal IMAGE runtime; it never crosses a provider boundary."""
+
+    def __init__(self, content: bytes) -> None:
+        self.content = bytes(content)
+        self.requests = []
+        self.real_provider_calls = 0
+        self.paid_calls = 0
+
+    def submit(self, request, *, authorization=None):
+        assert request.capability is ModelCapabilityKind.IMAGE
+        assert request.create_authorized is True
+        assert authorization == {"approved": True, "create_authorized": True}
+        self.requests.append(request)
+        return CapabilityResult(
+            request_id=request.request_id,
+            outcome=RuntimeOutcome.SUCCEEDED,
+            outputs=(
+                ContentRef(
+                    source_kind="FAKE_IMAGE_TRANSPORT",
+                    source_id="fake-image-queue-001",
+                    role="SHOT_FIRST_FRAME",
+                    mime_type="image/png",
+                    sha256=hashlib.sha256(self.content).hexdigest(),
+                    size_bytes=len(self.content),
+                ),
+            ),
+            safe_metadata={"fixture": "offline"},
+        )
+
+    def read_output(self, _output):
+        return self.content
+
+
+def _record_generated_first_frame(queue, project_id, job):
+    service = ShotKeyframeService(queue.repository)
+    snapshot = queue.execution_service.create_input_snapshot(project_id, job.id)
+    generation_brief = queue.generation_briefs.current(
+        project_id, job.id, "shot_001"
+    )
+    shot_revision = queue.repository.get_shot_revision(job.shot_plan_revision_id)
+    shot = next(item for item in shot_revision["content"].shots if item.id == "shot_001")
+    keyframe_brief = service.briefs.compile(
+        snapshot,
+        shot.id,
+        generation_brief,
+    )
+    selection = ShotKeyframePolicy.select(shot, project_id=project_id)
+    runtime = _FakeKeyframeImageRuntime(png_bytes(color="navy"))
+    image_manifest = next(
+        item
+        for item in build_mainland_manifests(
+            credential_presence={},
+            create_authorized=False,
+            artifact_sink_available=True,
+        )
+        if item.capability is ModelCapabilityKind.IMAGE
+    )
+    frame = service.generate_and_record(
+        project_id,
+        job.id,
+        keyframe_brief,
+        selection,
+        UniversalImageBinding(
+            runtime=runtime,
+            manifest=image_manifest,
+            read_output=runtime.read_output,
+        ),
+        create_authorized=True,
+    )
+    assert len(runtime.requests) == 1
+    assert runtime.real_provider_calls == runtime.paid_calls == 0
+    return frame
+
+
+def test_queue_uses_the_selected_manifest_duration_contract_without_provider_aliases():
     profile = {
         "requires_explicit_selection": True,
         "minimum_duration_seconds": 4,
@@ -56,36 +167,28 @@ def test_seedance_queue_accepts_only_the_official_4_to_30_duration_profile():
         "supported_durations": list(range(4, 31)),
     }
 
-    assert ProductionQueueService._duration_limits(
-        profile, provider_id="SEEDANCE"
-    ) == (4.0, 30.0)
-    assert ProductionQueueService._allowed_durations(
-        profile, provider_id="SEEDANCE"
-    ) == tuple(float(value) for value in range(4, 31))
+    assert ProductionQueueService._duration_limits(profile) == (4.0, 30.0)
+    assert ProductionQueueService._allowed_durations(profile) == tuple(
+        float(value) for value in range(4, 31)
+    )
 
 
 @pytest.mark.parametrize(
-    "tampered",
+    "invalid",
     [
-        {"requires_explicit_selection": False},
+        {},
         {"minimum_duration_seconds": 2},
         {"maximum_duration_seconds": 15},
-        {"supported_durations": list(range(2, 16))},
+        {"minimum_duration_seconds": 30, "maximum_duration_seconds": 4},
+        {"supported_durations": [0, 4]},
     ],
 )
-def test_seedance_queue_rejects_missing_or_tampered_duration_metadata(tampered):
-    profile = {
-        "requires_explicit_selection": True,
-        "minimum_duration_seconds": 4,
-        "maximum_duration_seconds": 30,
-        "supported_durations": list(range(4, 31)),
-    }
-    profile.update(tampered)
-
-    with pytest.raises(ProductionQueueError, match="Seedance"):
-        ProductionQueueService._duration_limits(profile, provider_id="SEEDANCE")
-    with pytest.raises(ProductionQueueError, match="Seedance"):
-        ProductionQueueService._allowed_durations(profile, provider_id="SEEDANCE")
+def test_queue_rejects_missing_or_invalid_manifest_duration_contract(invalid):
+    with pytest.raises(ProductionQueueError, match="duration"):
+        ProductionQueueService._duration_limits(invalid)
+    if "supported_durations" in invalid:
+        with pytest.raises(ProductionQueueError, match="supported_durations"):
+            ProductionQueueService._allowed_durations(invalid)
 
 
 def test_ui_queue_is_durable_idempotent_and_nonblocking(tmp_path):
@@ -112,6 +215,71 @@ def test_ui_queue_is_durable_idempotent_and_nonblocking(tmp_path):
     assert budget.authorized_max == 1
     assert budget.remaining_creates == 1
     assert repository.get_production_job(job.id).status.value == "QUEUED"
+
+
+def test_product_queue_creates_runtime_plan_from_exact_settings_manifest(tmp_path):
+    repository, project = _execution_context.__wrapped__(tmp_path)
+    job = _ready_job(repository, project)
+    settings = SettingsModelService(
+        repository,
+        credential_store=_FakeCredentialStore(),
+    )
+    wan_manifest_id = next(
+        option.manifest_id
+        for option in settings.inventory(ModelCapabilityKind.VIDEO)
+        if option.model_id == "wan2.7-i2v-2026-04-25"
+    )
+    settings.save_selections(
+        project_id=project.id,
+        selections={ModelCapabilityKind.VIDEO: wan_manifest_id},
+    )
+    registry = CapabilityRegistry(
+        [RuntimeVideoProvider(_FakeWanAdapter(), provider_name="WAN_VIDEO")]
+    )
+    from aidrama_studio.services.provider_profiles import ProviderProfileService
+
+    profiles = ProviderProfileService(
+        repository,
+        registry=registry,
+        manifest_registry=settings.manifest_registry,
+    )
+    queue = ProductionQueueService(
+        repository,
+        registry=registry,
+        provider_profiles=profiles,
+        settings_service=settings,
+    )
+
+    with pytest.raises(
+        ProductionQueueError, match="PRE_LIVE_FIRST_FRAME_GATE=BLOCKED"
+    ):
+        queue.preview_authorization(project.id, job.id)
+    assert repository.list_provider_tasks(project.id) == []
+
+    first_frame = _record_generated_first_frame(queue, project.id, job)
+    preview = queue.preview_authorization(project.id, job.id)
+    assert preview.first_frame_fingerprints["shot_001"] == {
+        "first_frame_id": first_frame.id,
+        "artifact_id": first_frame.artifact_id,
+        "sha256": first_frame.sha256,
+        "source_type": first_frame.source_type.value,
+    }
+    assert preview.provider_profile_id == wan_manifest_id
+    assert preview.manifest_id == wan_manifest_id
+    assert preview.manifest_hash
+    assert preview.codec_id == "dashscope.wan.i2v.v1"
+    task = queue.enqueue_job(
+        project.id,
+        job.id,
+        authorization=_authorization(queue, project.id, job.id),
+    )
+    plan_id = task.request_summary["runtime_plan_ids_by_shot"]["shot_001"]
+    plan = repository.get_runtime_plan(plan_id)
+    assert plan.provider_id == "WAN_VIDEO"
+    assert plan.model_id == "wan2.7-i2v-2026-04-25"
+    assert plan.provider_parameters["manifest_id"] == wan_manifest_id
+    assert plan.provider_parameters["manifest_hash"] == preview.manifest_hash
+    assert plan.provider_parameters["codec_id"] == preview.codec_id
 
 
 def test_cancelled_queued_job_never_reaches_runner(tmp_path):

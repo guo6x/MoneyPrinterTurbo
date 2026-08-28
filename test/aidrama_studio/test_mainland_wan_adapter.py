@@ -1,16 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from aidrama_studio.domain import ProviderTask, ProductionInputSnapshot, RuntimePlan
+from aidrama_studio.domain import (
+    ProviderTask,
+    ProductionInputSnapshot,
+    ReferenceAssetType,
+    ReferenceProvenance,
+    RuntimePlan,
+    ShotFirstFrame,
+    ShotFirstFrameSourceType,
+    ShotKeyframeReferenceRole,
+    ShotKeyframeSelection,
+    ShotKeyframeSelectionPolicy,
+)
 from aidrama_studio.services.adapters.mainland_wan import (
     MainlandWanAdapterError,
     MainlandWanProductionAdapter,
 )
-from aidrama_studio.services.adapters.wan_video import WanReferenceSelection
+from aidrama_studio.services.adapters.wan_video import WanFirstFrameSelection
 from aidrama_studio.services.model_runtime import (
     CapabilityKind,
     CapabilityResult,
@@ -50,18 +62,24 @@ class _CredentialStore:
         return self.values.get(key)
 
 
-class _ReferenceResolver:
+class _FirstFrameResolver:
     def __init__(self, path: Path) -> None:
-        self.selection = WanReferenceSelection(
-            role="character",
-            binding_key="CHARACTER:hero",
-            version_id="version-1",
+        frame = _first_frame()
+        self.selection = WanFirstFrameSelection(
+            first_frame_id=frame.id,
+            artifact_id=frame.artifact_id,
+            source_type=frame.source_type.value,
             path=path,
             mime_type="image/png",
+            sha256=frame.sha256,
+            size_bytes=frame.artifact_size_bytes,
+            shot_id=frame.shot_id,
+            identity_reference_version_ids=("version-1",),
         )
 
     def resolve(self, snapshot):
         assert snapshot.reference_asset_versions["CHARACTER:hero"] == "version-1"
+        self.selection.validate_snapshot(snapshot)
         return self.selection
 
 
@@ -168,9 +186,9 @@ def _plan(*, approved: bool = True) -> RuntimePlan:
         endpoint_class="DASHSCOPE_CN",
         credential_reference="DASHSCOPE_API_KEY",
         selection_source="PROJECT_PROFILE",
-        transmitted_content_types=("PROMPT", "REFERENCE_IMAGE"),
+        transmitted_content_types=("PROMPT", "SHOT_FIRST_FRAME"),
         estimated_request_count=1,
-        generation_mode="REFERENCE_I2V",
+        generation_mode="SHOT_FIRST_FRAME_I2V",
         native_generation_resolution="720P",
         native_generation_fps=24.0,
         delivery_width=720,
@@ -184,8 +202,8 @@ def _plan(*, approved: bool = True) -> RuntimePlan:
         audio_strategy="EXTERNAL_TTS",
         provider_parameters={"provider_resolution": "720P"},
         reference_version_ids=("version-1",),
-        reference_roles={"version-1": "first_frame"},
-        continuity_strategy="REFERENCE_ONLY",
+        reference_roles={"version-1": "identity_constraint"},
+        continuity_strategy="SHOT_FIRST_FRAME",
         generation_brief_hash="1" * 64,
         output_profile_hash="2" * 64,
         authorization={
@@ -199,13 +217,54 @@ def _plan(*, approved: bool = True) -> RuntimePlan:
     )
 
 
+def _first_frame() -> ShotFirstFrame:
+    identity = ReferenceProvenance(
+        role=ShotKeyframeReferenceRole.IDENTITY,
+        asset_id="character-asset-1",
+        asset_version_id="version-1",
+        asset_type=ReferenceAssetType.CHARACTER_REFERENCE,
+        sha256="1" * 64,
+        binding_id="CHARACTER:hero",
+        subject_id="hero",
+        stable_description="Hero identity constraint",
+    )
+    selection = ShotKeyframeSelection(
+        project_id="project-1",
+        shot_id="shot-1",
+        policy=ShotKeyframeSelectionPolicy.NEW_SCENE,
+        source_type=ShotFirstFrameSourceType.GENERATED_KEYFRAME,
+        reason="A shot-specific first frame is required.",
+    )
+    content = png_bytes()
+    return ShotFirstFrame(
+        id="first-frame-1",
+        project_id="project-1",
+        shot_id="shot-1",
+        shot_plan_revision_id="shot-plan-1",
+        generation_brief_id="brief-1",
+        shot_keyframe_brief_id="keyframe-brief-1",
+        shot_keyframe_brief_sha256="2" * 64,
+        artifact_id="first-frame-artifact-1",
+        execution_id="keyframe-execution-1",
+        artifact_size_bytes=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+        mime_type="image/png",
+        source_type=ShotFirstFrameSourceType.GENERATED_KEYFRAME,
+        selection=selection,
+        identity_reference_provenance=(identity,),
+        created_at="2026-08-28T00:00:00+00:00",
+    )
+
+
 def _snapshot() -> ProductionInputSnapshot:
+    frame = _first_frame()
     return ProductionInputSnapshot(
         project_id="project-1",
         story_revision_id="story-1",
         script_revision_id="script-1",
         shot_plan_revision_id="shot-plan-1",
         runtime_plan_id="runtime-plan-1",
+        generation_brief_id="brief-1",
         runtime_plan_hash="3" * 64,
         reference_asset_versions={"CHARACTER:hero": "version-1"},
         shot_parameters={
@@ -219,6 +278,8 @@ def _snapshot() -> ProductionInputSnapshot:
                 "lighting": {"quality": "restrained", "tone": "moody"},
             }
         },
+        shot_first_frames=(frame,),
+        first_frame_required_shot_ids=("shot-1",),
     )
 
 
@@ -230,9 +291,10 @@ def _adapter(
     repository=None,
     credential_store=None,
 ):
-    image = tmp_path / "reference.png"
+    image = tmp_path / "shot-first-frame.png"
     image.write_bytes(png_bytes())
     store = credential_store or _CredentialStore()
+    first_frame_resolver = _FirstFrameResolver(image)
     adapter = MainlandWanProductionAdapter(
         repository=repository or object(),
         paths=_paths(tmp_path),
@@ -241,8 +303,9 @@ def _adapter(
         runtime_plan=plan or _plan(),
         provider_task=provider_task,
         env={"AIDRAMA_ALLOW_PAID_LIVE_TESTS": "1"},
+        first_frame_resolver=first_frame_resolver,
     )
-    adapter.reference_resolver = _ReferenceResolver(image)
+    assert adapter.first_frame_resolver is first_frame_resolver
     return adapter, store
 
 
@@ -256,7 +319,7 @@ def test_status_and_validation_do_not_read_credential_value(tmp_path):
     assert store.read_count == 0
 
 
-def test_submit_uses_exact_mainland_manifest_one_reference_and_one_create(tmp_path):
+def test_submit_uses_exact_mainland_manifest_one_first_frame_and_one_create(tmp_path):
     _OfflineMainlandWanRuntime.instances.clear()
     _OfflineMainlandWanRuntime.submit_count = 0
     adapter, store = _adapter(tmp_path)
@@ -277,7 +340,35 @@ def test_submit_uses_exact_mainland_manifest_one_reference_and_one_create(tmp_pa
     assert request.model_id == "wan2.7-i2v-2026-04-25"
     assert len(request.inputs) == 1
     assert request.inputs[0].role == "first_frame"
-    assert request.inputs[0].source_id == "version-1"
+    assert request.inputs[0].source_kind == "SHOT_FIRST_FRAME_ARTIFACT"
+    assert request.inputs[0].source_id == "first-frame-artifact-1"
+    assert request.inputs[0].sha256 == _first_frame().sha256
+    assert request.inputs[0].size_bytes == _first_frame().artifact_size_bytes
+    assert dict(request.inputs[0].metadata) == {
+        "first_frame_id": "first-frame-1",
+        "first_frame_artifact_id": "first-frame-artifact-1",
+        "first_frame_sha256": _first_frame().sha256,
+        "first_frame_source_type": "GENERATED_KEYFRAME",
+        "first_frame_mime_type": "image/png",
+        "first_frame_size_bytes": _first_frame().artifact_size_bytes,
+        "identity_reference_version_ids": ("version-1",),
+        "location_reference_version_ids": (),
+        "prop_reference_version_ids": (),
+        "style_reference_version_ids": (),
+    }
+    assert submission.metadata["first_frame_artifact_id"] == (
+        "first-frame-artifact-1"
+    )
+    assert submission.metadata["first_frame_sha256"] == _first_frame().sha256
+    assert submission.metadata["first_frame_source_type"] == "GENERATED_KEYFRAME"
+    assert adapter.runtime_plan.transmitted_content_types == (
+        "PROMPT",
+        "SHOT_FIRST_FRAME",
+    )
+    assert adapter.runtime_plan.reference_roles == {
+        "version-1": "identity_constraint"
+    }
+    assert adapter.runtime_plan.continuity_strategy == "SHOT_FIRST_FRAME"
     assert dict(request.provider_parameters) == {
         "duration_seconds": 5,
         "resolution": "720P",

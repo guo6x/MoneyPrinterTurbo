@@ -6,7 +6,16 @@ from collections.abc import Iterator, Mapping
 from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
+
+from .shot_keyframe import ShotFirstFrame
 
 
 def _freeze(value: Any) -> Any:
@@ -73,6 +82,8 @@ class ProductionInputSnapshot(BaseModel):
     runtime_plan_hash: str | None = Field(default=None, max_length=64)
     reference_asset_versions: FrozenDict = Field(default_factory=FrozenDict)
     shot_parameters: FrozenDict = Field(default_factory=FrozenDict)
+    shot_first_frames: tuple[ShotFirstFrame, ...] = ()
+    first_frame_required_shot_ids: tuple[str, ...] = ()
 
     @field_validator("reference_asset_versions", "shot_parameters", mode="before")
     @classmethod
@@ -85,6 +96,40 @@ class ProductionInputSnapshot(BaseModel):
             return FrozenDict({str(index): item for index, item in enumerate(value)})
         raise TypeError("snapshot values must be mappings or sequences")
 
+    @model_validator(mode="after")
+    def _validate_first_frame_scope(self) -> "ProductionInputSnapshot":
+        shot_ids = tuple(str(value) for value in self.shot_parameters)
+        frame_ids = tuple(frame.shot_id for frame in self.shot_first_frames)
+        required_ids = tuple(str(value) for value in self.first_frame_required_shot_ids)
+        if len(frame_ids) != len(set(frame_ids)):
+            raise ValueError("snapshot shot first frame IDs must be unique")
+        if len(required_ids) != len(set(required_ids)):
+            raise ValueError("snapshot required first frame shot IDs must be unique")
+        if not set(frame_ids).issubset(shot_ids):
+            raise ValueError("snapshot first frame does not belong to its shot parameters")
+        if not set(required_ids).issubset(shot_ids):
+            raise ValueError("snapshot required first frame does not belong to its shot parameters")
+        for frame in self.shot_first_frames:
+            if (
+                frame.project_id != self.project_id
+                or frame.shot_plan_revision_id != self.shot_plan_revision_id
+            ):
+                raise ValueError("snapshot first frame revision provenance mismatch")
+            if (
+                self.generation_brief_id is not None
+                and frame.generation_brief_id != self.generation_brief_id
+            ):
+                raise ValueError("snapshot first frame GenerationBrief provenance mismatch")
+        return self
+
+    def first_frame_for_shot(self, shot_id: str) -> ShotFirstFrame | None:
+        """Return the exact frozen first frame for ``shot_id``, never a reference."""
+
+        return next(
+            (frame for frame in self.shot_first_frames if frame.shot_id == shot_id),
+            None,
+        )
+
     def to_json_dict(self) -> dict[str, object]:
         return {
             "project_id": self.project_id,
@@ -96,6 +141,12 @@ class ProductionInputSnapshot(BaseModel):
             "runtime_plan_hash": self.runtime_plan_hash,
             "reference_asset_versions": _thaw(self.reference_asset_versions),
             "shot_parameters": _thaw(self.shot_parameters),
+            "shot_first_frames": [
+                frame.model_dump(mode="json") for frame in self.shot_first_frames
+            ],
+            "first_frame_required_shot_ids": list(
+                self.first_frame_required_shot_ids
+            ),
         }
 
     @field_serializer("reference_asset_versions", "shot_parameters")

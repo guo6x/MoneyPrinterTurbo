@@ -485,6 +485,17 @@ class MPTLLMProvider(LLMProvider):
         self._config_snapshot = dict(
             snapshot_llm_config() if config_snapshot is None else config_snapshot
         )
+        runtime_env = dict(os.environ if env is None else env)
+        # Alibaba Model Studio has one canonical credential identity.  The
+        # legacy MPT qwen client still names its transient config field
+        # ``qwen_api_key``; hydrate that in memory from DASHSCOPE_API_KEY (or
+        # the explicit legacy alias) without writing config.toml or requiring
+        # the user to store the same secret twice.
+        if str(self._config_snapshot.get("llm_provider", "")).strip().casefold() == "qwen":
+            canonical = str(runtime_env.get("DASHSCOPE_API_KEY", "") or "").strip()
+            legacy_alias = str(runtime_env.get("QWEN_API_KEY", "") or "").strip()
+            if not str(self._config_snapshot.get("qwen_api_key", "") or "").strip():
+                self._config_snapshot["qwen_api_key"] = canonical or legacy_alias
         # Live-smoke authorization is an acceptance-only boundary.  Keep it
         # separate from the mature LLM configuration/readiness path so normal
         # creative generation remains backward compatible.  The registry
@@ -517,9 +528,13 @@ class MPTLLMProvider(LLMProvider):
                 str(self._config_snapshot.get(provider.config_key("base_url"), ""))
             )
             credential_reference = (
-                provider.config_key("api_key").upper()
-                if provider.requires_api_key
-                else None
+                "DASHSCOPE_API_KEY"
+                if provider_id == "qwen" and provider.requires_api_key
+                else (
+                    provider.config_key("api_key").upper()
+                    if provider.requires_api_key
+                    else None
+                )
             )
             if credential_reference is not None:
                 credential_present = bool(
@@ -615,6 +630,160 @@ class MPTLLMProvider(LLMProvider):
         return self.generate_structured("Repair this structured JSON without changing its intent:\n" + json.dumps(dict(value), ensure_ascii=False), schema=schema)
 
 
+class MainlandUniversalLLMProvider(LLMProvider):
+    """Exact Alibaba LLM binding over the canonical manifest runtime.
+
+    Explicit Forge MAX qwen selection reaches ``DashScopeQwenChatCodec`` and
+    ``RequestResponseDriver`` through this boundary instead of being projected
+    back through the legacy MPT/config.toml seam. Secret values remain only in
+    process memory and never enter status, RuntimePlan, persistence, or logs.
+    """
+
+    provider_name = "alibaba_model_studio"
+
+    def __init__(
+        self,
+        *,
+        credentials: Mapping[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
+        runtime_factory: object | None = None,
+        sessions: Mapping[str, object] | None = None,
+    ) -> None:
+        values = dict(os.environ if env is None else env)
+        supplied = dict(credentials or {})
+        canonical = str(
+            supplied.get("DASHSCOPE_API_KEY")
+            or values.get("DASHSCOPE_API_KEY")
+            or ""
+        ).strip()
+        if not canonical:
+            # Backward-compatible read alias only. The public identity remains
+            # DASHSCOPE_API_KEY and no duplicate value is persisted.
+            canonical = str(
+                supplied.get("QWEN_API_KEY")
+                or values.get("QWEN_API_KEY")
+                or ""
+            ).strip()
+        self._credentials = {"DASHSCOPE_API_KEY": canonical}
+        self._allow_paid_live_tests = (
+            str(values.get("AIDRAMA_ALLOW_PAID_LIVE_TESTS", "")) == "1"
+        )
+        self._workspace_base_url = str(
+            values.get("DASHSCOPE_WORKSPACE_BASE_URL", "") or ""
+        ).strip()
+        self._runtime_factory = runtime_factory
+        self._sessions = dict(sessions or {})
+
+    @property
+    def status(self) -> CapabilityStatus:
+        configured = bool(self._credentials["DASHSCOPE_API_KEY"])
+        return CapabilityStatus(
+            CapabilityKind.LLM,
+            self.provider_name,
+            configured,
+            "configured" if configured else "DASHSCOPE_API_KEY is not configured",
+            {
+                "model": "qwen-max",
+                "deployment_region": "MAINLAND_CHINA",
+                "endpoint_class": "DASHSCOPE_CN",
+                "endpoint_profile_id": "DASHSCOPE_CN_BEIJING_V1",
+                "credential_reference": "DASHSCOPE_API_KEY",
+                "credential_present": configured,
+                "configured": configured,
+                "runtime_available": True,
+                "verification_state": "NOT_VERIFIED",
+                "live_authorized": self._allow_paid_live_tests,
+                "upstream_provider_id": self.provider_name,
+                "boundary_provider_id": self.provider_name,
+                "native_universal_runtime": True,
+            },
+            configured=configured,
+            verified=False,
+            runtime_available=True,
+        )
+
+    def generate_structured(
+        self, prompt: str, *, schema: Mapping[str, object] | None = None
+    ) -> dict[str, object]:
+        del prompt, schema
+        raise CapabilityUnavailable(
+            "Alibaba LLM requires the project-scoped Universal Runtime"
+        )
+
+    def invoke_universal_text(
+        self,
+        selection: object,
+        prompt: str,
+        *,
+        project_id: str,
+    ) -> str:
+        from uuid import uuid4
+
+        from .model_runtime import (
+            CapabilityKind as UniversalCapabilityKind,
+            CapabilityRequest,
+            CapabilityResult,
+            MainlandProviderRuntime,
+        )
+
+        resolved = getattr(selection, "resolved", None)
+        manifest = getattr(resolved, "manifest", None)
+        if manifest is None:
+            raise CapabilityUnavailable("frozen qwen manifest is required")
+        if (
+            str(getattr(manifest, "provider_id", "")) != self.provider_name
+            or str(getattr(manifest, "model_id", "")) != "qwen-max"
+            or str(getattr(manifest, "credential_reference", ""))
+            != "DASHSCOPE_API_KEY"
+        ):
+            raise CapabilityUnavailable(
+                "selected LLM is not the canonical qwen-max manifest"
+            )
+        credential = self._credentials["DASHSCOPE_API_KEY"]
+        if not credential:
+            raise CapabilityUnavailable(
+                "DASHSCOPE_API_KEY is not configured; no Provider call was attempted"
+            )
+        runtime_type = self._runtime_factory or MainlandProviderRuntime
+        options: dict[str, object] = {
+            "credentials": {"DASHSCOPE_API_KEY": credential},
+            "create_authorized": True,
+            "sessions": self._sessions,
+        }
+        if self._workspace_base_url:
+            options["dashscope_workspace_base_url"] = self._workspace_base_url
+        runtime = runtime_type(**options)
+        binding = runtime.binding_for(str(getattr(manifest, "id", "")))
+        if binding.manifest.manifest_hash != getattr(manifest, "manifest_hash", None):
+            raise CapabilityUnavailable("qwen manifest contract changed after selection")
+        request = CapabilityRequest(
+            request_id=uuid4().hex,
+            project_id=project_id,
+            capability=UniversalCapabilityKind.LLM,
+            protocol_family=binding.manifest.protocol,
+            provider_id=binding.manifest.provider_id,
+            model_id=binding.manifest.model_id,
+            manifest_id=binding.manifest.id,
+            manifest_hash=binding.manifest.manifest_hash,
+            codec_id=binding.manifest.codec_id,
+            prompt_or_text=prompt,
+            create_authorized=True,
+            authorization_required=True,
+        )
+        result = runtime.submit(
+            request,
+            authorization={"create_authorized": True},
+        )
+        if not isinstance(result, CapabilityResult) or not result.succeeded:
+            raise CapabilityUnavailable(
+                "qwen Universal Runtime did not return success"
+            )
+        text = result.safe_metadata.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise CapabilityUnavailable("qwen Universal Runtime returned empty text")
+        return text.strip()
+
+
 class RuntimeVideoProvider(VideoGenerationProvider):
     """Expose a frozen ProductionRuntimeAdapter as product VIDEO capability."""
 
@@ -635,6 +804,9 @@ class RuntimeVideoProvider(VideoGenerationProvider):
             "mode": self.capability.value,
             "model": str(getattr(config, "model", getattr(self.adapter, "model_id", "runtime"))),
         }
+        declared_profile = getattr(self.adapter, "runtime_profile_metadata", None)
+        if isinstance(declared_profile, Mapping):
+            metadata.update(dict(declared_profile))
         adapter_status = getattr(self.adapter, "status", None)
         if adapter_status is not None and hasattr(adapter_status, "metadata"):
             metadata.update(dict(adapter_status.metadata))
@@ -1204,6 +1376,14 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
     )
     return CapabilityRegistry(
         [
+            MainlandUniversalLLMProvider(
+                credentials={
+                    "DASHSCOPE_API_KEY": str(
+                        values.get("DASHSCOPE_API_KEY", "") or ""
+                    )
+                },
+                env=values,
+            ),
             MPTLLMProvider(config_snapshot=llm_snapshot, env=values),
             wan,
             seedance,
@@ -1293,6 +1473,6 @@ def _llm_snapshot_for_registry_environment(
 __all__ = [
     "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",
     "LLMProvider", "ImageGenerationProvider", "VideoGenerationProvider", "VisionAnalysisProvider", "TTSProvider",
-    "ImageCandidate", "VisionAnalysis", "VisionAnalysisRequest", "VisionMediaInput", "TTSResult", "MPTLLMProvider", "RuntimeVideoProvider",
+    "ImageCandidate", "VisionAnalysis", "VisionAnalysisRequest", "VisionMediaInput", "TTSResult", "MPTLLMProvider", "MainlandUniversalLLMProvider", "RuntimeVideoProvider",
     "UnavailableImageProvider", "UnavailableVisionProvider", "UnavailableTTSProvider", "MPTTTSProvider", "DeterministicMockVisionProvider", "default_capability_registry",
 ]

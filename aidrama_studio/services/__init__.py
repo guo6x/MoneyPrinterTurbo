@@ -10,6 +10,20 @@ from .reference_assets import ReferenceAssetService, ReferenceAssetServiceError
 from .reference_agent import ReferenceAgentError, ReferenceAgentService
 from .reference_asset_storage import ReferenceAssetStorageService, ReferenceAssetStorageError
 from .production import ProductionService, ProductionServiceError
+from .shot_keyframe import (
+    GeneratedKeyframeImage,
+    ResolvedShotFirstFrame,
+    SHOT_FIRST_FRAME_ARTIFACT_TYPE,
+    SHOT_KEYFRAME_PROMPT_TEMPLATE_VERSION,
+    ShotFirstFrameArtifactResolver,
+    ShotKeyframeBriefCompiler,
+    ShotKeyframeError,
+    ShotKeyframePolicy,
+    ShotKeyframeReadinessError,
+    ShotKeyframeService,
+    UniversalImageBinding,
+    UniversalShotKeyframeImageService,
+)
 from .production_execution import ProductionExecutionService, ProductionExecutionServiceError
 from .production_worker import ProductionWorker, ProductionWorkerError
 from .production_artifact_storage import ProductionArtifactStorageError, ProductionArtifactStorageService
@@ -19,6 +33,12 @@ from .final_assembly import FinalAssemblyService, FinalAssemblyServiceError
 from .final_assembly_runtime import FinalAssemblyRenderService, FinalAssemblyRuntimeService, FinalAssemblyRuntimeServiceError
 from .postproduction import FFmpegPostProductionAdapter, PostProductionMediaAdapter, PostProductionService, PostProductionServiceError, PostRenderRequest, PostRenderService
 from .director import DirectorService, DirectorServiceError
+from .duration_planning import (
+    DurationExecutionBatch,
+    DurationPlanningError,
+    DurationPlanningService,
+    EpisodeDurationPlan,
+)
 from .producer import ProducerService, ProducerServiceError
 from .runtime_foundation import AIInvocationService, GenerationBriefCompiler, GenerationBriefService, OutputProfileService, RuntimeFoundationError, RuntimePlanService
 from .creative_control import CreativeControlError, CreativeLockService
@@ -80,6 +100,7 @@ from .ai_capabilities import (
     VisionAnalysisRequest,
     VisionMediaInput,
     MPTLLMProvider,
+    MainlandUniversalLLMProvider,
     RuntimeVideoProvider,
     UnavailableImageProvider,
     UnavailableVisionProvider,
@@ -115,6 +136,8 @@ from .adapters import (
     RuntimeSubmission,
     RuntimeTransientError,
     WanAdapterError,
+    WanFirstFrameResolver,
+    WanFirstFrameSelection,
     WanInputMapper,
     WanProductionAdapter,
     WanPromptMapper,
@@ -171,6 +194,12 @@ __all__ = [
     "ReferenceAgentService", "ReferenceAgentError",
     "ReferenceAssetStorageService", "ReferenceAssetStorageError",
     "ProductionService", "ProductionServiceError",
+    "GeneratedKeyframeImage", "ResolvedShotFirstFrame",
+    "SHOT_FIRST_FRAME_ARTIFACT_TYPE", "SHOT_KEYFRAME_PROMPT_TEMPLATE_VERSION",
+    "ShotFirstFrameArtifactResolver", "ShotKeyframeBriefCompiler",
+    "ShotKeyframeError", "ShotKeyframePolicy", "ShotKeyframeReadinessError",
+    "ShotKeyframeService", "UniversalImageBinding",
+    "UniversalShotKeyframeImageService",
     "ProductionExecutionService", "ProductionExecutionServiceError", "ProductionWorker", "ProductionWorkerError",
     "ProductionArtifactStorageService", "ProductionArtifactStorageError",
     "ProductionQCService", "ProductionQCServiceError",
@@ -180,6 +209,7 @@ __all__ = [
     "DirectorService", "DirectorServiceError", "ProducerService", "ProducerServiceError",
     "CurrentProductionState", "CurrentProductionStateService",
     "OutputProfileService", "GenerationBriefCompiler", "GenerationBriefService", "RuntimePlanService", "AIInvocationService", "RuntimeFoundationError",
+    "DurationExecutionBatch", "DurationPlanningError", "DurationPlanningService", "EpisodeDurationPlan",
     "CreativeControlError", "CreativeLockService",
     "LLM_LIVE_SMOKE_PROMPT", "LLMInvocationGateway", "LLMInvocationError",
     "ImageRuntimeService", "ImageRuntimeError",
@@ -207,7 +237,7 @@ __all__ = [
     "OfflineLivePreflightService", "OfflineProfilePreflight",
     "CapabilityKind", "CapabilityStatus", "CapabilityUnavailable", "CapabilityRegistry",
     "LLMProvider", "ImageGenerationProvider", "VideoGenerationProvider", "VisionAnalysisProvider", "TTSProvider",
-    "ImageCandidate", "VisionAnalysis", "VisionAnalysisRequest", "VisionMediaInput", "TTSResult", "MPTLLMProvider", "RuntimeVideoProvider",
+    "ImageCandidate", "VisionAnalysis", "VisionAnalysisRequest", "VisionMediaInput", "TTSResult", "MPTLLMProvider", "MainlandUniversalLLMProvider", "RuntimeVideoProvider",
     "UnavailableImageProvider", "UnavailableVisionProvider", "UnavailableTTSProvider", "DeterministicMockVisionProvider",
     "default_capability_registry",
     "GeminiHTTPTransport", "GeminiVisionError", "GeminiVisionProvider", "GeminiVisionProviderConfig",
@@ -219,6 +249,7 @@ __all__ = [
     "ProductionOrchestrator", "ProductionOrchestratorError",
     "ProductionRuntimeAdapter", "RuntimeSubmission", "RuntimeEvent", "RuntimeTransientError", "RuntimeReconciliationRequired", "RuntimeContentRejectedError", "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
     "WanAdapterError", "WanInputMapper", "WanProductionAdapter", "WanPromptMapper",
+    "WanFirstFrameResolver", "WanFirstFrameSelection",
     "WanProviderConfig", "WanProviderHTTPError", "WanReferenceResolver",
     "WanReferenceSelection", "WanVideoClient",
     "WanTransientError",

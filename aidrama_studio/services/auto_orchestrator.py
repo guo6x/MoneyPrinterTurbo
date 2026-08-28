@@ -50,6 +50,7 @@ from .reference_assets import ReferenceAssetService
 from .script import ScriptService
 from .security import sanitize_error, sanitize_persistent_metadata
 from .shot import ShotService
+from .shot_keyframe import ShotKeyframeError
 from .story import StoryService
 from .vision_qc import VisionQCService
 
@@ -89,6 +90,7 @@ class AutoOrchestratorService:
             "PROVIDER_SUCCEEDED_ARTIFACT_PENDING",
             "RECONCILIATION_REQUIRED",
             "SUBMISSION_UNCERTAIN",
+            "UNCERTAIN_CREATE",
         }
     )
     ACTIVE_HEAVY_STATES = frozenset(
@@ -160,6 +162,58 @@ class AutoOrchestratorService:
 
         decision = self._plan_raw(project_id)
         return self._apply_paid_gate(decision)
+
+    def keyframe_readiness(self, project_id: str) -> dict[str, object]:
+        """Return a safe UI projection of canonical Shot First Frame truth.
+
+        The Workbench never derives readiness from references or AUTO labels.
+        It receives the formal pre-live gate from the same service used by the
+        Production queue, while artifact IDs, hashes and private paths remain
+        outside the creator-facing projection.
+        """
+
+        self._require_project(project_id)
+        jobs = self.repository.list_production_jobs(project_id)
+        if not jobs:
+            return {
+                "gate": "PENDING",
+                "planned_shot_count": 0,
+                "validated_first_frame_count": 0,
+                "missing_first_frame_count": 0,
+                "invalid_first_frame_count": 0,
+                "unintended_duplicate_first_frame_count": 0,
+            }
+        job = jobs[-1]
+        try:
+            report = self.production_queue.shot_keyframes.validate_pre_live(
+                project_id, job.id
+            )
+        except ShotKeyframeError as exc:
+            return {
+                "gate": "BLOCKED",
+                "planned_shot_count": 0,
+                "validated_first_frame_count": 0,
+                "missing_first_frame_count": 0,
+                "invalid_first_frame_count": 0,
+                "unintended_duplicate_first_frame_count": 0,
+                "reason": sanitize_error(exc),
+            }
+        return {
+            "gate": report.gate.value,
+            "planned_shot_count": len(report.planned_shot_ids),
+            "validated_first_frame_count": len(
+                report.validated_first_frame_ids
+            ),
+            "missing_first_frame_count": len(
+                report.missing_first_frame_shot_ids
+            ),
+            "invalid_first_frame_count": len(
+                report.invalid_first_frame_shot_ids
+            ),
+            "unintended_duplicate_first_frame_count": (
+                report.unintended_duplicate_first_frame_count
+            ),
+        }
 
     def get_state(self, project_id: str) -> AutoOrchestrationState | None:
         self._require_project(project_id)
@@ -879,6 +933,28 @@ class AutoOrchestratorService:
         completed: tuple[AutoStage, ...],
     ) -> AutoDecision | None:
         tasks = self._job_provider_tasks(project_id, job_id)
+        uncertain = next(
+            (
+                task
+                for task in reversed(tasks)
+                if task.state == "UNCERTAIN_CREATE"
+            ),
+            None,
+        )
+        if uncertain is not None:
+            return self._blocked(
+                project_id,
+                state_hash,
+                AutoStage.PRODUCTION,
+                "UNCERTAIN_CREATE: provider create 结果未知；禁止 retry 或创建第二个 paid task。",
+                "UNCERTAIN_CREATE_RECONCILIATION_REQUIRED",
+                completed,
+                {
+                    "provider_task_record_id": uncertain.id,
+                    "production_job_id": job_id,
+                    "reconciliation_required": True,
+                },
+            )
         active = next(
             (
                 task

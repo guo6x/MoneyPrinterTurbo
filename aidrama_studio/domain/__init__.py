@@ -41,6 +41,27 @@ from .production_qc import (
     ProductionShotSourceSelectionKind,
 )
 from .production_snapshot import FrozenDict, ProductionInputSnapshot
+from .shot_keyframe import (
+    DuplicateFirstFrameGroup,
+    PreLiveFirstFrameGate,
+    PreLiveFirstFrameReport,
+    PreviousApprovedArtifactProvenance,
+    PreviousApprovedShotContext,
+    ReferenceProvenance,
+    ShotFirstFrame,
+    ShotFirstFrameSourceType,
+    ShotKeyframeBrief,
+    ShotKeyframeLighting,
+    ShotKeyframeLocation,
+    ShotKeyframeReferenceRole,
+    ShotKeyframeRepairAction,
+    ShotKeyframeRepairRecommendation,
+    ShotKeyframeRepairScope,
+    ShotKeyframeSelection,
+    ShotKeyframeSelectionPolicy,
+    ShotKeyframeSubject,
+    UserProvidedSourceProvenance,
+)
 from .final_assembly import FinalAssembly, FinalAssemblyItem, FinalAssemblyManifest, FinalAssemblyReadiness, FinalAssemblySource, FinalAssemblyStatus, FinalAssemblyRenderAttempt, FinalAssemblyRenderAttemptStatus
 from .post_production import AudioMixConfig, BGMTrack, MusicTrack, PostProductionPlan, PostProductionProject, PostRenderAttempt, PostRenderAttemptStatus, SubtitleCue, SubtitleItem, SubtitleTrack, VoiceTrack
 from .director import (
@@ -145,6 +166,12 @@ __all__ = [
     "ProductionShotSourceDecision", "ProductionShotSourceDecisionType",
     "ProductionShotSourceSelectionKind",
     "FrozenDict", "ProductionInputSnapshot",
+    "DuplicateFirstFrameGroup", "PreLiveFirstFrameGate", "PreLiveFirstFrameReport",
+    "PreviousApprovedArtifactProvenance", "PreviousApprovedShotContext", "ReferenceProvenance",
+    "ShotFirstFrame", "ShotFirstFrameSourceType", "ShotKeyframeBrief", "ShotKeyframeLighting",
+    "ShotKeyframeLocation", "ShotKeyframeReferenceRole", "ShotKeyframeRepairAction",
+    "ShotKeyframeRepairRecommendation", "ShotKeyframeRepairScope", "ShotKeyframeSelection",
+    "ShotKeyframeSelectionPolicy", "ShotKeyframeSubject", "UserProvidedSourceProvenance",
     "FinalAssembly", "FinalAssemblyItem", "FinalAssemblyManifest", "FinalAssemblyReadiness", "FinalAssemblySource", "FinalAssemblyStatus",
     "FinalAssemblyRenderAttempt", "FinalAssemblyRenderAttemptStatus",
     "AudioMixConfig", "MusicTrack", "BGMTrack", "PostProductionPlan", "PostProductionProject", "PostRenderAttempt", "PostRenderAttemptStatus", "SubtitleCue", "SubtitleItem", "SubtitleTrack", "VoiceTrack",

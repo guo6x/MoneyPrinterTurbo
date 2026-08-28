@@ -34,21 +34,32 @@ class _Provider:
 
     @property
     def status(self) -> CapabilityStatus:
+        metadata = {
+            "model": self.model,
+            "deployment_region": self.region.value,
+            "endpoint_class": self.endpoint,
+            "endpoint_profile_id": (
+                f"runtime:{self.capability.value}:{self.provider_name}:{self.endpoint}"
+            ),
+            "configured": self.configured,
+            "verification_state": "NOT_VERIFIED",
+        }
+        if self.capability is CapabilityKind.VIDEO_GENERATIVE:
+            metadata.update(
+                {
+                    "minimum_duration_seconds": 2,
+                    "maximum_duration_seconds": 15,
+                    "supported_durations": list(range(2, 16)),
+                    "native_generation_resolution": "720p",
+                    "native_generation_fps": 24,
+                }
+            )
         return CapabilityStatus(
             self.capability,
             self.provider_name,
             self.available,
             "configured" if self.configured else "credential unavailable",
-            {
-                "model": self.model,
-                "deployment_region": self.region.value,
-                "endpoint_class": self.endpoint,
-                "endpoint_profile_id": (
-                    f"runtime:{self.capability.value}:{self.provider_name}:{self.endpoint}"
-                ),
-                "configured": self.configured,
-                "verification_state": "NOT_VERIFIED",
-            },
+            metadata,
             configured=self.configured,
             verified=False,
         )
@@ -192,6 +203,56 @@ def test_project_default_beats_global_and_job_override_beats_project(tmp_path):
     )
     assert job_selection.source == "JOB_OVERRIDE"
     assert job_selection.profile.endpoint_profile_id == international.endpoint_profile_id
+
+
+def test_shared_endpoint_requires_exact_model_profile_identity(tmp_path):
+    repository, project = _context(tmp_path)
+    service = ProviderProfileService(repository)
+    qwen = service.register(
+        capability=CapabilityKind.IMAGE,
+        provider_id="ALIBABA_MODEL_STUDIO",
+        model_id="qwen-image-3.0",
+        project_id=project.id,
+        endpoint_profile_id="DASHSCOPE_IMAGE_SHARED",
+    )
+    z_image = service.register(
+        capability=CapabilityKind.IMAGE,
+        provider_id="ALIBABA_MODEL_STUDIO",
+        model_id="z-image-turbo",
+        project_id=project.id,
+        endpoint_profile_id="DASHSCOPE_IMAGE_SHARED",
+    )
+
+    with pytest.raises(ProviderProfileError, match="exact manifest/profile ID"):
+        service.resolve(
+            project.id,
+            CapabilityKind.IMAGE,
+            endpoint_profile_id="DASHSCOPE_IMAGE_SHARED",
+        )
+    with pytest.raises(ProviderProfileError, match="exact manifest/profile ID"):
+        service.resolve(
+            project.id,
+            CapabilityKind.IMAGE,
+            provider_id="ALIBABA_MODEL_STUDIO",
+        )
+
+    service.save_settings(
+        project_id=project.id,
+        preset=ProviderPreset.CUSTOM,
+        selections={CapabilityKind.IMAGE: z_image.id},
+    )
+    assert (
+        service.resolve(project.id, CapabilityKind.IMAGE).profile.model_id
+        == "z-image-turbo"
+    )
+    assert (
+        service.resolve(
+            project.id,
+            CapabilityKind.IMAGE,
+            endpoint_profile_id=qwen.id,
+        ).profile.model_id
+        == "qwen-image-3.0"
+    )
 
 
 def test_profile_registration_rejects_nested_secrets_and_unsafe_endpoints(tmp_path):

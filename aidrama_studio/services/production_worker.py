@@ -695,6 +695,7 @@ class ProductionWorker:
                 return float("inf"), shot_id
 
         shot_id, parameters = sorted(candidates, key=order)[0]
+        first_frame = snapshot.first_frame_for_shot(shot_id)
         return ProductionInputSnapshot(
             project_id=snapshot.project_id,
             story_revision_id=snapshot.story_revision_id,
@@ -705,6 +706,12 @@ class ProductionWorker:
             runtime_plan_hash=runtime_plan_hash or snapshot.runtime_plan_hash,
             reference_asset_versions=snapshot.reference_asset_versions,
             shot_parameters={shot_id: parameters},
+            shot_first_frames=(first_frame,) if first_frame is not None else (),
+            first_frame_required_shot_ids=(
+                (shot_id,)
+                if shot_id in snapshot.first_frame_required_shot_ids
+                else ()
+            ),
         )
 
     def _resolve_identity(

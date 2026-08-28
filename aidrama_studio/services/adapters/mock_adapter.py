@@ -10,6 +10,15 @@ from .production_adapter import ProductionRuntimeAdapter, RuntimeEvent, RuntimeS
 
 class MockProductionAdapter(ProductionRuntimeAdapter):
     name = "mock"
+    # Explicit fake-provider contract used by offline product tests. Generic
+    # Queue code must never invent duration limits for an undeclared runtime.
+    runtime_profile_metadata = {
+        "minimum_duration_seconds": 2,
+        "maximum_duration_seconds": 15,
+        "supported_durations": list(range(2, 16)),
+        "native_generation_resolution": "720p",
+        "native_generation_fps": 24,
+    }
 
     def __init__(self, *, reject_validation: bool = False, fail_submit: bool = False):
         self.reject_validation = reject_validation

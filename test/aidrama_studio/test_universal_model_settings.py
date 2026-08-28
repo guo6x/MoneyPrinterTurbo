@@ -17,6 +17,7 @@ from aidrama_studio.services.model_runtime import (
     ARK_CN_BEIJING_ENDPOINT_PROFILE,
     MainlandProviderRuntime,
     ModelResolutionError,
+    build_mainland_manifests,
     default_manifest_registry,
 )
 from aidrama_studio.services.model_settings import (
@@ -73,6 +74,45 @@ def _manifest_id(service: SettingsModelService, capability: CapabilityKind, mode
         item.manifest_id
         for item in service.inventory(capability)
         if item.model_id == model_id
+    )
+
+
+def test_manifest_contract_hash_excludes_mutable_readiness_state():
+    unavailable = {
+        item.id: item
+        for item in build_mainland_manifests(
+            credential_presence={},
+            create_authorized=False,
+            artifact_sink_available=False,
+        )
+    }
+    ready = {
+        item.id: item
+        for item in build_mainland_manifests(
+            credential_presence={
+                "DASHSCOPE_API_KEY": True,
+                "DEEPSEEK_API_KEY": True,
+                "ARK_API_KEY": True,
+            },
+            create_authorized=True,
+            artifact_sink_available=True,
+        )
+    }
+
+    assert unavailable.keys() == ready.keys()
+    assert all(
+        unavailable[manifest_id].manifest_hash
+        == ready[manifest_id].manifest_hash
+        for manifest_id in unavailable
+    )
+    assert any(
+        unavailable[manifest_id].readiness
+        != ready[manifest_id].readiness
+        for manifest_id in unavailable
+    )
+    assert all(
+        "readiness" not in manifest.contract_payload()
+        for manifest in ready.values()
     )
 
 

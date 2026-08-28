@@ -301,8 +301,14 @@ class LLMInvocationGateway:
             metadata = dict(getattr(provider.status, "metadata", {}) or {})
         except Exception as exc:
             raise LLMInvocationError("selected universal LLM provider status is unavailable") from exc
+        # A formal manifest selection owns the durable Universal provider
+        # identity. Legacy compatibility profiles may still retain their
+        # upstream spelling for historical invocation records.
         actual_provider_id = str(
-            metadata.get("upstream_provider_id") or profile.provider_id
+            profile.provider_id
+            if isinstance(getattr(profile, "profile", None), Mapping)
+            and profile.profile.get("manifest_id")
+            else (metadata.get("upstream_provider_id") or profile.provider_id)
         ).strip()
         if not actual_provider_id:
             raise LLMInvocationError("LLM Provider 身份无效")

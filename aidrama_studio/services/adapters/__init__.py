@@ -12,6 +12,8 @@ from .production_adapter import (
 )
 from .wan_video import (
     WanAdapterError,
+    WanFirstFrameResolver,
+    WanFirstFrameSelection,
     WanInputMapper,
     WanProductionAdapter,
     WanPromptMapper,
@@ -42,6 +44,7 @@ __all__ = [
     "RuntimeTransientError", "RuntimeReconciliationRequired", "RuntimeContentRejectedError",
     "MPTAdapterError", "MPTInputMapper", "MPTProductionAdapter", "MockProductionAdapter",
     "WanAdapterError", "WanInputMapper", "WanProductionAdapter", "WanPromptMapper",
+    "WanFirstFrameResolver", "WanFirstFrameSelection",
     "WanProviderConfig", "WanProviderHTTPError", "WanReferenceResolver",
     "WanReferenceSelection", "WanVideoClient",
     "WanTransientError",

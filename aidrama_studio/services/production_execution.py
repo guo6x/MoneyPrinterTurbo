@@ -228,6 +228,14 @@ class ProductionExecutionService:
         if len(input_snapshot.shot_parameters) != 1:
             raise ProductionExecutionServiceError("shot execution 必须包含且只包含一个 shot")
         shot_id = next(iter(input_snapshot.shot_parameters))
+        frozen_first_frame = input_snapshot.first_frame_for_shot(shot_id)
+        if (
+            shot_id in input_snapshot.first_frame_required_shot_ids
+            and frozen_first_frame is None
+        ):
+            raise ProductionExecutionServiceError(
+                "PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: required frozen Shot First Frame is missing"
+            )
         shots = self.repository.list_production_shots(job.id)
         shot = next((item for item in shots if item.shot_id == shot_id), None)
         if shot is None:
@@ -254,6 +262,13 @@ class ProductionExecutionService:
             )
             if generation_brief is None or generation_brief.shot_id != shot_id:
                 raise ProductionExecutionServiceError("GenerationBrief 不属于该 shot")
+            if (
+                frozen_first_frame is not None
+                and frozen_first_frame.generation_brief_id != generation_brief_id
+            ):
+                raise ProductionExecutionServiceError(
+                    "Shot First Frame 与 GenerationBrief provenance 不匹配"
+                )
         if runtime_plan is not None:
             if runtime_plan.generation_brief_id != generation_brief_id:
                 raise ProductionExecutionServiceError("RuntimePlan 与 GenerationBrief provenance 不匹配")

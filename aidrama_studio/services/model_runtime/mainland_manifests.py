@@ -133,9 +133,6 @@ def build_mainland_manifests(
             metadata={
                 "provider_family": "ALIBABA",
                 "region_scope": "MAINLAND_ONLY",
-                "runtime_provider_id": "MPT_LLM",
-                "runtime_endpoint_profile_id": "runtime:LLM:MPT_LLM:qwen:default",
-                "runtime_endpoint_class": "MPT_LLM_QWEN_DEFAULT",
             },
         ),
         ModelManifest(
@@ -242,6 +239,10 @@ def build_mainland_manifests(
             selection_policy={"priority": 10, "profile": "MAINLAND_CHEAP"},
             limits={
                 "duration_integer_only": True,
+                # Real 60-second production evidence used eight bounded Wan
+                # creates at 8/8/8/8/7/7/7/7 seconds. This is a manifest-local
+                # planning preference, never a generic product duration cap.
+                "preferred_shot_duration_seconds": 8,
                 "result_retention_hours": 24,
                 "create_retry_safe": False,
             },
@@ -375,6 +376,7 @@ def build_mainland_manifests(
             selection_policy={"priority": 40, "requires_explicit_selection": True},
             limits={
                 "duration_integer_only": True,
+                "preferred_shot_duration_seconds": 10,
                 "task_retention_days": 7,
                 "result_retention_hours": 24,
                 "create_retry_safe": False,

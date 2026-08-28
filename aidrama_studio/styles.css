@@ -637,3 +637,734 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-creative-source-row
   .aidrama-activity-strip,
   .aidrama-workstation-grid { transition: none !important; }
 }
+
+/* -------------------------------------------------------------------------
+   AI Production Workbench
+
+   AUTO is a creator-facing projection of the durable orchestrator state.  The
+   page deliberately gets its own visual vocabulary while staying inside the
+   existing dark workstation tokens: coral marks the one actionable/current
+   state, green means complete, and amber is reserved for a blocked/recovery
+   state.  These selectors target pure markdown markers emitted by auto.py;
+   they do not assume a frontend framework or create client-side state.
+   ------------------------------------------------------------------------- */
+
+.aidrama-auto-hero,
+.aidrama-auto-pipeline,
+.aidrama-auto-next-action,
+.aidrama-auto-paid-gate,
+.aidrama-auto-success,
+.aidrama-auto-capabilities {
+  box-sizing: border-box;
+  min-width: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+.aidrama-auto-hero {
+  background:
+    radial-gradient(circle at 92% -12%, rgba(239, 111, 97, .27), transparent 40%),
+    linear-gradient(135deg, rgba(31, 40, 53, .98), rgba(14, 19, 27, .98) 68%);
+  border: 1px solid rgba(239, 111, 97, .42);
+  border-radius: 18px;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, .23), inset 0 1px 0 rgba(255, 255, 255, .035);
+  margin: .15rem 0 1rem;
+  padding: clamp(1.15rem, 2.8vw, 2.2rem);
+  position: relative;
+}
+.aidrama-auto-hero::after {
+  border: 1px solid rgba(239, 111, 97, .16);
+  border-radius: 50%;
+  content: "";
+  height: 15rem;
+  pointer-events: none;
+  position: absolute;
+  right: -6rem;
+  top: -8rem;
+  width: 15rem;
+}
+.aidrama-auto-hero-copy {
+  min-width: 0;
+  position: relative;
+  z-index: 1;
+}
+.aidrama-auto-hero > * { position: relative; z-index: 1; }
+.aidrama-auto-hero-kicker,
+.aidrama-auto-pipeline-kicker,
+.aidrama-auto-next-action-kicker,
+.aidrama-auto-capabilities-kicker {
+  color: #f3a29a;
+  font-size: max(.67rem, 11px);
+  font-weight: 760;
+  letter-spacing: .15em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+.aidrama-auto-hero-project-label {
+  color: var(--aidrama-muted);
+  display: block;
+  font-size: max(.68rem, 11px);
+  letter-spacing: .08em;
+  margin-top: .85rem;
+  text-transform: uppercase;
+}
+.aidrama-auto-hero h1,
+.aidrama-auto-hero h2 {
+  color: var(--aidrama-text);
+  font-size: clamp(1.7rem, 3.7vw, 3rem);
+  letter-spacing: -.025em;
+  line-height: 1.08;
+  margin: .42rem 0 .5rem;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-hero p {
+  color: #abb6c5;
+  font-size: .89rem;
+  line-height: 1.55;
+  margin: 0;
+  max-width: 48rem;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-hero-meta,
+.aidrama-auto-hero-facts,
+.aidrama-auto-hero-metrics {
+  display: grid;
+  gap: .55rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 1.25rem;
+  min-width: 0;
+}
+.aidrama-auto-hero-meta > *,
+.aidrama-auto-hero-facts > *,
+.aidrama-auto-hero-metrics > * {
+  background: rgba(10, 14, 20, .36);
+  border: 1px solid rgba(115, 130, 151, .24);
+  border-radius: 10px;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: .62rem .7rem;
+}
+.aidrama-auto-hero-meta span,
+.aidrama-auto-hero-facts span,
+.aidrama-auto-hero-metrics span,
+.aidrama-auto-hero-meta small,
+.aidrama-auto-hero-facts small,
+.aidrama-auto-hero-metrics small {
+  color: var(--aidrama-muted);
+  display: block;
+  font-size: max(.66rem, 11px);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-hero-meta strong,
+.aidrama-auto-hero-facts strong,
+.aidrama-auto-hero-metrics strong {
+  color: var(--aidrama-text);
+  display: block;
+  font-size: .91rem;
+  line-height: 1.35;
+  margin-top: .2rem;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-hero-status,
+.aidrama-auto-hero-state {
+  align-items: center;
+  background: rgba(239, 111, 97, .13);
+  border: 1px solid rgba(239, 111, 97, .38);
+  border-radius: 999px;
+  color: #ffb1a8;
+  display: inline-flex;
+  font-size: max(.68rem, 11px);
+  font-weight: 700;
+  gap: .35rem;
+  margin-top: 1rem;
+  max-width: 100%;
+  padding: .3rem .65rem;
+  white-space: normal;
+}
+.aidrama-auto-hero-status::before,
+.aidrama-auto-hero-state::before {
+  background: currentColor;
+  border-radius: 50%;
+  content: "";
+  flex: 0 0 .42rem;
+  height: .42rem;
+}
+.aidrama-auto-hero-facts .aidrama-auto-hero-status,
+.aidrama-auto-hero-meta .aidrama-auto-hero-status,
+.aidrama-auto-hero-metrics .aidrama-auto-hero-status { margin-top: .22rem; }
+.aidrama-auto-hero[data-status="SUCCEEDED"] .aidrama-auto-hero-status,
+.aidrama-auto-hero[data-status="COMPLETED"] .aidrama-auto-hero-status,
+.aidrama-auto-hero[data-status="succeeded"] .aidrama-auto-hero-status,
+.aidrama-auto-hero[data-status="completed"] .aidrama-auto-hero-status,
+.aidrama-auto-hero[data-status="制作完成"] .aidrama-auto-hero-status {
+  background: rgba(86, 182, 139, .12);
+  border-color: rgba(86, 182, 139, .38);
+  color: #7bd1a7;
+}
+.aidrama-auto-hero[data-status="已取消"] .aidrama-auto-hero-status,
+.aidrama-auto-hero[data-status="待开始"] .aidrama-auto-hero-status {
+  background: rgba(121, 151, 190, .11);
+  border-color: rgba(121, 151, 190, .3);
+  color: #a9c2df;
+}
+.aidrama-auto-hero[data-status="BLOCKED"] .aidrama-auto-hero-status,
+.aidrama-auto-hero[data-status="blocked"] .aidrama-auto-hero-status,
+.aidrama-auto-hero[data-status="UNCERTAIN_CREATE"] .aidrama-auto-hero-status,
+.aidrama-auto-hero[data-status="需要处理"] .aidrama-auto-hero-status,
+.aidrama-auto-hero[data-status="未完成"] .aidrama-auto-hero-status {
+  background: rgba(231, 184, 106, .13);
+  border-color: rgba(231, 184, 106, .43);
+  color: #f1c779;
+}
+
+.aidrama-auto-pipeline {
+  background: linear-gradient(150deg, rgba(24, 31, 42, .98), rgba(15, 20, 28, .98));
+  border: 1px solid var(--aidrama-border);
+  border-radius: 14px;
+  margin: 0 0 1rem;
+  padding: 1rem;
+}
+.aidrama-auto-pipeline-head {
+  align-items: flex-end;
+  display: flex;
+  gap: .8rem;
+  justify-content: space-between;
+  margin-bottom: .75rem;
+  min-width: 0;
+}
+.aidrama-auto-pipeline-head > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-pipeline-head h2,
+.aidrama-auto-pipeline-head h3 {
+  color: var(--aidrama-text);
+  font-size: 1rem;
+  line-height: 1.25;
+  margin: .22rem 0 0;
+}
+.aidrama-auto-pipeline-head p,
+.aidrama-auto-pipeline-note {
+  color: var(--aidrama-muted);
+  font-size: max(.68rem, 11px);
+  line-height: 1.45;
+  margin: 0;
+  max-width: 32rem;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.aidrama-auto-pipeline-rail,
+.aidrama-auto-pipeline-stages,
+.aidrama-auto-stage-rail {
+  display: grid;
+  gap: .5rem;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  min-width: 0;
+}
+.aidrama-auto-stage {
+  background: #1a222e;
+  border: 1px solid #303c4d;
+  box-sizing: border-box;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: .23rem;
+  justify-content: flex-start;
+  min-height: 5.35rem;
+  min-width: 0;
+  overflow: hidden;
+  padding: .58rem .56rem;
+  position: relative;
+  transition: border-color .18s ease, background .18s ease, transform .18s ease;
+}
+.aidrama-auto-stage::after {
+  background: #4b586a;
+  content: "";
+  height: 1px;
+  left: calc(100% + .5rem);
+  position: absolute;
+  top: 1.42rem;
+  width: .5rem;
+}
+.aidrama-auto-stage:last-child::after { display: none; }
+.aidrama-auto-stage .node-index,
+.aidrama-auto-stage .aidrama-auto-stage-index {
+  color: #7f8b9b;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: max(.64rem, 10px);
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+.aidrama-auto-stage strong {
+  color: #d6dee8;
+  display: block;
+  font-size: max(.72rem, 11px);
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-stage small,
+.aidrama-auto-stage .stage-state,
+.aidrama-auto-stage .aidrama-auto-stage-state {
+  color: #7e8a9a;
+  display: block;
+  font-size: max(.63rem, 10px);
+  line-height: 1.3;
+  margin-top: auto;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-stage-completed,
+.aidrama-auto-stage.is-completed,
+.aidrama-auto-stage[data-state="COMPLETED"],
+.aidrama-auto-stage[data-state="completed"],
+.aidrama-auto-stage[data-status="COMPLETED"],
+.aidrama-auto-stage[data-status="completed"] {
+  background: rgba(86, 182, 139, .075);
+  border-color: rgba(86, 182, 139, .3);
+}
+.aidrama-auto-stage-completed strong,
+.aidrama-auto-stage.is-completed strong,
+.aidrama-auto-stage[data-state="COMPLETED"] strong,
+.aidrama-auto-stage[data-state="completed"] strong,
+.aidrama-auto-stage[data-status="COMPLETED"] strong,
+.aidrama-auto-stage[data-status="completed"] strong { color: #c9e7d8; }
+.aidrama-auto-stage-current,
+.aidrama-auto-stage.is-current,
+.aidrama-auto-stage[data-state="CURRENT"],
+.aidrama-auto-stage[data-state="current"],
+.aidrama-auto-stage[data-status="CURRENT"],
+.aidrama-auto-stage[data-status="current"] {
+  background: linear-gradient(150deg, rgba(239, 111, 97, .2), rgba(52, 33, 38, .8));
+  border-color: rgba(239, 111, 97, .72);
+  box-shadow: 0 0 0 1px rgba(239, 111, 97, .12), 0 8px 22px rgba(239, 111, 97, .12);
+  transform: translateY(-1px);
+}
+.aidrama-auto-stage-current .node-index,
+.aidrama-auto-stage.is-current .node-index,
+.aidrama-auto-stage[data-state="CURRENT"] .node-index,
+.aidrama-auto-stage[data-state="current"] .node-index,
+.aidrama-auto-stage[data-status="CURRENT"] .node-index,
+.aidrama-auto-stage[data-status="current"] .node-index { color: #ffaaa0; }
+.aidrama-auto-stage-current strong,
+.aidrama-auto-stage.is-current strong,
+.aidrama-auto-stage[data-state="CURRENT"] strong,
+.aidrama-auto-stage[data-state="current"] strong,
+.aidrama-auto-stage[data-status="CURRENT"] strong,
+.aidrama-auto-stage[data-status="current"] strong { color: #fff0ed; }
+.aidrama-auto-stage-current small,
+.aidrama-auto-stage.is-current small,
+.aidrama-auto-stage[data-state="CURRENT"] small,
+.aidrama-auto-stage[data-state="current"] small,
+.aidrama-auto-stage[data-status="CURRENT"] small,
+.aidrama-auto-stage[data-status="current"] small { color: #f3a29a; }
+.aidrama-auto-stage-pending,
+.aidrama-auto-stage.is-pending,
+.aidrama-auto-stage[data-state="PENDING"],
+.aidrama-auto-stage[data-state="pending"],
+.aidrama-auto-stage[data-status="PENDING"],
+.aidrama-auto-stage[data-status="pending"] { opacity: .78; }
+.aidrama-auto-stage-blocked,
+.aidrama-auto-stage.is-blocked,
+.aidrama-auto-stage[data-state="BLOCKED"],
+.aidrama-auto-stage[data-state="blocked"],
+.aidrama-auto-stage[data-status="BLOCKED"],
+.aidrama-auto-stage[data-status="blocked"] {
+  background: rgba(231, 184, 106, .11);
+  border-color: rgba(231, 184, 106, .62);
+}
+.aidrama-auto-stage-blocked strong,
+.aidrama-auto-stage.is-blocked strong,
+.aidrama-auto-stage[data-state="BLOCKED"] strong,
+.aidrama-auto-stage[data-state="blocked"] strong,
+.aidrama-auto-stage[data-status="BLOCKED"] strong,
+.aidrama-auto-stage[data-status="blocked"] strong { color: #f1d08b; }
+.aidrama-auto-stage-blocked small,
+.aidrama-auto-stage.is-blocked small,
+.aidrama-auto-stage[data-state="BLOCKED"] small,
+.aidrama-auto-stage[data-state="blocked"] small,
+.aidrama-auto-stage[data-status="BLOCKED"] small,
+.aidrama-auto-stage[data-status="blocked"] small { color: #e7bb6d; }
+
+.aidrama-auto-next-action {
+  background: linear-gradient(105deg, rgba(239, 111, 97, .19), rgba(34, 27, 34, .96) 70%);
+  border: 1px solid rgba(239, 111, 97, .56);
+  border-radius: 14px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .18);
+  display: block;
+  margin: 0 0 1rem;
+  min-height: 0;
+  padding: 1rem 1.1rem;
+}
+.aidrama-auto-next-action .aidrama-section-kicker,
+.aidrama-auto-next-action .aidrama-auto-next-action-kicker { display: block; }
+.aidrama-auto-next-action > div { min-width: 0; }
+.aidrama-auto-next-action h2,
+.aidrama-auto-next-action h3 {
+  color: #fff1ee;
+  font-size: 1.08rem;
+  line-height: 1.3;
+  margin: .2rem 0 .28rem;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-next-action p,
+.aidrama-auto-next-action small {
+  color: #c2aeb0;
+  display: block;
+  font-size: .78rem;
+  line-height: 1.5;
+  margin: 0;
+  max-width: 48rem;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-next-action.is-blocked,
+.aidrama-auto-next-action.aidrama-auto-blocked,
+.aidrama-auto-next-action.aidrama-auto-uncertain,
+.aidrama-auto-next-action[data-status="BLOCKED"],
+.aidrama-auto-next-action[data-status="blocked"] {
+  background: linear-gradient(105deg, rgba(231, 184, 106, .16), rgba(35, 29, 25, .96) 70%);
+  border-color: rgba(231, 184, 106, .62);
+}
+.aidrama-auto-next-action.is-blocked .aidrama-auto-next-action-kicker,
+.aidrama-auto-next-action.aidrama-auto-blocked .aidrama-auto-next-action-kicker,
+.aidrama-auto-next-action.aidrama-auto-uncertain .aidrama-auto-next-action-kicker,
+.aidrama-auto-next-action[data-status="BLOCKED"] .aidrama-auto-next-action-kicker,
+.aidrama-auto-next-action[data-status="blocked"] .aidrama-auto-next-action-kicker { color: #f1c779; }
+.aidrama-auto-next-action.aidrama-auto-blocked .aidrama-section-kicker,
+.aidrama-auto-next-action.aidrama-auto-uncertain .aidrama-section-kicker,
+.aidrama-auto-next-action[data-status="BLOCKED"] .aidrama-section-kicker,
+.aidrama-auto-next-action[data-status="blocked"] .aidrama-section-kicker { color: #f1c779; }
+.aidrama-auto-next-action.is-success,
+.aidrama-auto-next-action[data-status="SUCCEEDED"],
+.aidrama-auto-next-action[data-status="succeeded"] {
+  background: linear-gradient(105deg, rgba(86, 182, 139, .15), rgba(22, 35, 32, .96) 70%);
+  border-color: rgba(86, 182, 139, .5);
+}
+.aidrama-auto-human-gate .aidrama-section-kicker,
+.aidrama-auto-provider-wait .aidrama-section-kicker { color: #f3a29a; }
+.aidrama-auto-provider-wait {
+  background: linear-gradient(105deg, rgba(239, 111, 97, .14), rgba(28, 30, 39, .96) 70%);
+}
+
+/* Buttons rendered immediately after a next-action marker remain the sole
+   coral action in that card.  Secondary controls retain the workstation
+   treatment inherited above. */
+div[data-testid="stVerticalBlock"]:has(.aidrama-auto-next-action) > div:last-child .stButton > button[kind="primary"],
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-auto-next-action) .stButton > button[kind="primary"] {
+  min-width: 9.5rem;
+}
+
+.aidrama-auto-paid-gate {
+  background: linear-gradient(145deg, rgba(55, 43, 31, .92), rgba(23, 25, 29, .98));
+  border: 1px solid rgba(231, 184, 106, .64);
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
+  margin: 0 0 1rem;
+  padding: 1rem 1.1rem;
+}
+.aidrama-auto-paid-gate h2,
+.aidrama-auto-paid-gate h3 {
+  color: #f8e2b2;
+  font-size: 1.03rem;
+  margin: .2rem 0 .35rem;
+}
+.aidrama-auto-paid-gate .aidrama-section-kicker { color: #f1c779; }
+.aidrama-auto-paid-gate p,
+.aidrama-auto-paid-gate small {
+  color: #c9bda9;
+  display: block;
+  font-size: .78rem;
+  line-height: 1.5;
+  margin: 0 0 .6rem;
+  max-width: 54rem;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-paid-gate .aidrama-auto-paid-summary,
+.aidrama-auto-paid-gate .aidrama-auto-paid-metrics {
+  display: grid;
+  gap: .55rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: .8rem 0;
+}
+.aidrama-auto-paid-gate .aidrama-auto-paid-summary > *,
+.aidrama-auto-paid-gate .aidrama-auto-paid-metrics > * {
+  background: rgba(10, 14, 19, .36);
+  border: 1px solid rgba(231, 184, 106, .24);
+  border-radius: 9px;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: .58rem .65rem;
+}
+.aidrama-auto-paid-gate .aidrama-auto-paid-summary span,
+.aidrama-auto-paid-gate .aidrama-auto-paid-metrics span,
+.aidrama-auto-paid-gate .aidrama-auto-paid-summary small,
+.aidrama-auto-paid-gate .aidrama-auto-paid-metrics small {
+  color: #bcae98;
+  display: block;
+  font-size: max(.65rem, 10px);
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-paid-gate .aidrama-auto-paid-summary strong,
+.aidrama-auto-paid-gate .aidrama-auto-paid-metrics strong {
+  color: #f7e1af;
+  display: block;
+  font-size: 1rem;
+  margin-top: .18rem;
+  overflow-wrap: anywhere;
+}
+div[data-testid="stVerticalBlock"]:has(.aidrama-auto-paid-gate) [data-testid="stCheckbox"] label,
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-auto-paid-gate) [data-testid="stCheckbox"] label {
+  color: #f4e4c1 !important;
+  font-weight: 650;
+}
+div[data-testid="stVerticalBlock"]:has(.aidrama-auto-paid-gate) .stButton > button[kind="primary"],
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-auto-paid-gate) .stButton > button[kind="primary"] {
+  background: #e7b86a !important;
+  border-color: #e7b86a !important;
+  color: #191712 !important;
+  box-shadow: 0 8px 24px rgba(231, 184, 106, .18) !important;
+}
+div[data-testid="stVerticalBlock"]:has(.aidrama-auto-paid-gate) .stButton > button[kind="primary"]:disabled,
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-auto-paid-gate) .stButton > button[kind="primary"]:disabled {
+  background: #34312a !important;
+  border-color: #555043 !important;
+  color: #8e8777 !important;
+}
+
+.aidrama-auto-success {
+  background:
+    radial-gradient(circle at 88% 0, rgba(86, 182, 139, .2), transparent 42%),
+    linear-gradient(145deg, rgba(22, 48, 40, .97), rgba(15, 25, 25, .98));
+  border: 1px solid rgba(86, 182, 139, .52);
+  border-radius: 16px;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, .2);
+  margin: 0 0 1rem;
+  padding: clamp(1.25rem, 3vw, 2rem);
+}
+.aidrama-auto-success h2,
+.aidrama-auto-success h3 {
+  color: #dcf5e8;
+  font-size: clamp(1.35rem, 2.4vw, 1.85rem);
+  line-height: 1.15;
+  margin: .32rem 0 .48rem;
+}
+.aidrama-auto-success .aidrama-section-kicker { color: #7bd1a7; }
+.aidrama-auto-success p,
+.aidrama-auto-success small {
+  color: #a9cdbb;
+  display: block;
+  font-size: .81rem;
+  line-height: 1.5;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-success .aidrama-auto-success-facts,
+.aidrama-auto-success .aidrama-auto-success-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .45rem .8rem;
+  margin-top: 1rem;
+}
+.aidrama-auto-success .aidrama-auto-success-facts > *,
+.aidrama-auto-success .aidrama-auto-success-meta > * {
+  background: rgba(6, 17, 14, .36);
+  border: 1px solid rgba(86, 182, 139, .27);
+  border-radius: 8px;
+  box-sizing: border-box;
+  color: #c9e7d8;
+  font-size: .76rem;
+  min-width: 0;
+  padding: .42rem .58rem;
+}
+div[data-testid="stVerticalBlock"]:has(.aidrama-auto-success) .stButton > button[kind="primary"],
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.aidrama-auto-success) .stButton > button[kind="primary"] {
+  background: #67c999 !important;
+  border-color: #67c999 !important;
+  color: #102119 !important;
+  box-shadow: 0 8px 24px rgba(86, 182, 139, .2) !important;
+}
+
+.aidrama-auto-capabilities {
+  background: #121a23;
+  border: 1px solid var(--aidrama-border);
+  border-radius: 13px;
+  margin: 0 0 1rem;
+  padding: .95rem 1rem;
+}
+.aidrama-auto-capabilities h2,
+.aidrama-auto-capabilities h3 {
+  color: var(--aidrama-text);
+  font-size: 1rem;
+  margin: .22rem 0 .7rem;
+}
+.aidrama-auto-capabilities p,
+.aidrama-auto-capabilities small {
+  color: var(--aidrama-muted);
+  font-size: .76rem;
+  line-height: 1.45;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-capability-grid,
+.aidrama-auto-capabilities-grid {
+  display: grid;
+  gap: .48rem;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin-top: .65rem;
+  min-width: 0;
+}
+.aidrama-auto-capability,
+.aidrama-auto-capability-card {
+  background: #1a232e;
+  border: 1px solid #303c4d;
+  box-sizing: border-box;
+  border-radius: 9px;
+  min-width: 0;
+  padding: .55rem .6rem;
+}
+.aidrama-auto-capability strong,
+.aidrama-auto-capability-card strong {
+  color: #dce5ef;
+  display: block;
+  font-size: .76rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-capability span,
+.aidrama-auto-capability small,
+.aidrama-auto-capability-card span,
+.aidrama-auto-capability-card small {
+  color: #8d9aaa;
+  display: block;
+  font-size: max(.65rem, 10px);
+  line-height: 1.35;
+  margin-top: .2rem;
+  overflow-wrap: anywhere;
+}
+.aidrama-auto-capability.is-ready,
+.aidrama-auto-capability-card.is-ready,
+.aidrama-auto-capability[data-state="ready"],
+.aidrama-auto-capability-card[data-state="ready"] { border-color: rgba(86, 182, 139, .36); }
+.aidrama-auto-capability.is-ready span,
+.aidrama-auto-capability-card.is-ready span,
+.aidrama-auto-capability[data-state="ready"] span,
+.aidrama-auto-capability-card[data-state="ready"] span { color: #7bd1a7; }
+.aidrama-auto-capability.is-missing,
+.aidrama-auto-capability-card.is-missing,
+.aidrama-auto-capability[data-state="needs_setup"],
+.aidrama-auto-capability-card[data-state="needs_setup"] {
+  border-color: rgba(239, 111, 97, .52);
+  background: rgba(69, 35, 40, .42);
+}
+.aidrama-auto-capability.is-missing span,
+.aidrama-auto-capability-card.is-missing span,
+.aidrama-auto-capability[data-state="needs_setup"] span,
+.aidrama-auto-capability-card[data-state="needs_setup"] span { color: #f3a29a; }
+
+/* Advanced diagnostics are intentionally quiet and collapsed.  A marker
+   inside the Streamlit expander lets us style the complete container without
+   exposing provider IDs or resume tokens in the normal reading path. */
+.aidrama-auto-advanced-marker { display: none !important; }
+div[data-testid="stExpander"]:has(.aidrama-auto-advanced-marker) {
+  background: #101721;
+  border: 1px solid #273241;
+  border-radius: 11px;
+  margin-top: .35rem;
+}
+div[data-testid="stExpander"]:has(.aidrama-auto-advanced-marker) summary,
+div[data-testid="stExpander"]:has(.aidrama-auto-advanced-marker) [data-testid="stExpanderToggle"] {
+  color: #aab5c4 !important;
+  font-size: .77rem;
+}
+div[data-testid="stExpander"]:has(.aidrama-auto-advanced-marker) [data-testid="stExpanderDetails"] {
+  border-top: 1px solid #273241;
+  color: #8f9bab;
+  overflow-wrap: anywhere;
+}
+
+/* The grouped Streamlit sidebar is part of the product IA.  Selectors cover
+   current Streamlit nav markup and remain harmless when a future build uses a
+   slightly different wrapper. */
+[data-testid="stSidebarNav"] {
+  padding: .55rem .6rem 1rem;
+}
+[data-testid="stSidebarNav"] ul {
+  gap: .18rem;
+}
+[data-testid="stSidebarNav"] [role="heading"],
+[data-testid="stSidebarNav"] [data-testid="stSidebarNavSectionHeader"],
+[data-testid="stSidebarNav"] li[data-testid="stSidebarNavSectionHeader"],
+[data-testid="stSidebarNav"] li > div[role="heading"] {
+  color: #788698 !important;
+  font-size: max(.65rem, 10px) !important;
+  font-weight: 760 !important;
+  letter-spacing: .13em;
+  margin: .85rem .35rem .28rem;
+  text-transform: uppercase;
+}
+[data-testid="stSidebarNav"] a,
+[data-testid="stSidebarNav"] button {
+  border: 1px solid transparent !important;
+  border-radius: 8px !important;
+  color: #aeb9c8 !important;
+  font-size: .81rem !important;
+  min-height: 2.15rem;
+  transition: background .16s ease, border-color .16s ease, color .16s ease;
+}
+[data-testid="stSidebarNav"] a:hover,
+[data-testid="stSidebarNav"] button:hover {
+  background: rgba(239, 111, 97, .09) !important;
+  border-color: rgba(239, 111, 97, .2) !important;
+  color: #f1d0cb !important;
+}
+[data-testid="stSidebarNav"] a[aria-current="page"],
+[data-testid="stSidebarNav"] button[aria-current="page"],
+[data-testid="stSidebarNav"] a[data-active="true"] {
+  background: rgba(239, 111, 97, .15) !important;
+  border-color: rgba(239, 111, 97, .38) !important;
+  color: #fff0ed !important;
+  font-weight: 700 !important;
+}
+
+/* Fluid breakpoints are intentionally based on the content canvas rather
+   than the browser viewport.  Ten stage nodes remain readable at 1366px and
+   become a single-line rail on a wide 1920px workstation when space allows. */
+@media (max-width: 1180px) {
+  .aidrama-auto-pipeline-rail,
+  .aidrama-auto-pipeline-stages,
+  .aidrama-auto-stage-rail { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .aidrama-auto-stage:nth-child(5)::after,
+  .aidrama-auto-stage:nth-child(10)::after { display: none; }
+  .aidrama-auto-stage:nth-child(4)::after,
+  .aidrama-auto-stage:nth-child(9)::after { display: block; }
+  .aidrama-auto-hero-meta,
+  .aidrama-auto-hero-facts,
+  .aidrama-auto-hero-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .aidrama-auto-capability-grid,
+  .aidrama-auto-capabilities-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .aidrama-auto-hero { border-radius: 13px; padding: 1rem; }
+  .aidrama-auto-hero-meta,
+  .aidrama-auto-hero-facts,
+  .aidrama-auto-hero-metrics,
+  .aidrama-auto-pipeline-rail,
+  .aidrama-auto-pipeline-stages,
+  .aidrama-auto-stage-rail,
+  .aidrama-auto-capability-grid,
+  .aidrama-auto-capabilities-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .aidrama-auto-pipeline-head { align-items: flex-start; flex-direction: column; }
+  .aidrama-auto-pipeline-head p,
+  .aidrama-auto-pipeline-note { text-align: left; }
+  .aidrama-auto-stage::after { display: none !important; }
+  .aidrama-auto-next-action .stButton > button,
+  div[data-testid="stVerticalBlock"]:has(.aidrama-auto-next-action) .stButton > button { width: 100%; }
+  .aidrama-auto-paid-gate .aidrama-auto-paid-summary,
+  .aidrama-auto-paid-gate .aidrama-auto-paid-metrics { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .aidrama-auto-stage,
+  [data-testid="stSidebarNav"] a,
+  [data-testid="stSidebarNav"] button { transition: none !important; }
+  .aidrama-auto-stage-current,
+  .aidrama-auto-stage.is-current { transform: none; }
+}

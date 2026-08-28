@@ -292,7 +292,6 @@ def _create_project_form(service: ProjectService) -> None:
             duration = st.number_input(
                 "目标时长（秒）",
                 min_value=1,
-                max_value=3600,
                 value=60,
                 step=15,
                 help="常用：30 / 45 / 60 / 90 / 120 秒，也可自定义。",
@@ -358,7 +357,6 @@ def _edit_project(
             duration = st.number_input(
                 "目标时长（秒）",
                 min_value=1,
-                max_value=3600,
                 value=project.target_duration_seconds,
                 step=15,
             )

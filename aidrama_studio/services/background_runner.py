@@ -194,6 +194,7 @@ class BackgroundProductionRunner:
                             job_id,
                             adapter_resolver=lambda plan: self._resolve_adapter(task, plan),
                             runtime_plan_ids_by_shot=plan_ids,
+                            max_new_creates=self._max_new_creates(task),
                         )
                         state = {"SUCCEEDED": "SUCCEEDED", "FAILED": "FAILED", "CANCELLED": "CANCELLED"}.get(result.status.value, "RUNNING")
                         metadata = dict(running.metadata)
@@ -240,6 +241,9 @@ class BackgroundProductionRunner:
                                 ) or pending.metadata.get(
                                     "poll_next_retry_at"
                                 )
+                            else:
+                                state = "QUEUED"
+                                metadata.pop("not_before", None)
                         else:
                             metadata.pop("not_before", None)
                     else:
@@ -295,6 +299,19 @@ class BackgroundProductionRunner:
                     updated = running.model_copy(update={"state": "FAILED", "error_message": self._safe_error(exc), "updated_at": _now()})
                 completed.append(self.repository.update_provider_task(updated))
         return completed
+
+    @staticmethod
+    def _max_new_creates(task: ProviderTask) -> int:
+        raw = task.request_summary.get("max_paid_creates_per_tick", 8)
+        if isinstance(raw, bool):
+            raise BackgroundRunnerError("max_paid_creates_per_tick 无效")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise BackgroundRunnerError("max_paid_creates_per_tick 无效") from exc
+        if value <= 0:
+            raise BackgroundRunnerError("max_paid_creates_per_tick 必须大于 0")
+        return min(value, 8)
 
     @staticmethod
     def _retry_due(task: ProviderTask) -> bool:

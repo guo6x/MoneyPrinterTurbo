@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import streamlit as st
 
-from aidrama_studio.branding import BRAND
 from aidrama_studio.pages import (
     auto,
     assets,
@@ -19,9 +18,9 @@ from aidrama_studio.pages import (
 
 PAGE_DEFINITIONS = (
     ("dashboard", "工作台", "dashboard", dashboard.render),
-    ("auto", "自动制作", "auto", auto.render),
+    ("auto", "AI 制作台", "auto", auto.render),
     ("creative", "创意", "creative", creative.render),
-    ("story", "故事 / 剧本", "story", story.render),
+    ("story", "故事与剧本", "story", story.render),
     ("assets", "角色与场景", "assets", assets.render),
     ("director", "分镜", "director", director.render),
     ("production", "制作", "production", production.render),
@@ -65,9 +64,11 @@ def build_navigation():
     st.session_state["_aidrama_pages"] = pages
     navigation = st.navigation(
         {
-            BRAND.product_name: [
+            "开始": [
                 pages["dashboard"],
                 pages["auto"],
+            ],
+            "专业工作区": [
                 pages["creative"],
                 pages["story"],
                 pages["assets"],

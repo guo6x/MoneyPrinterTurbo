@@ -8,10 +8,12 @@ credential/capability inventory and are never copied into the plan.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from dataclasses import is_dataclass, replace
 from typing import Any
 
-from aidrama_studio.domain import ProviderTask, RuntimePlan
+from aidrama_studio.domain import ProviderTask, RuntimePlan, ShotFirstFrameSourceType
 from aidrama_studio.services.adapters import ProductionRuntimeAdapter
 from aidrama_studio.storage.repositories import ProjectRepository
 
@@ -34,6 +36,8 @@ _POLL_ONLY_TASK_STATES = frozenset(
         "PROVIDER_SUCCEEDED_ARTIFACT_PENDING",
     }
 )
+_SAFE_FIRST_FRAME_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ProductionRuntimeResolver:
@@ -97,12 +101,21 @@ class ProductionRuntimeResolver:
             required = ("validate", "submit", "cancel", "get_status")
             if not all(callable(getattr(adapter, name, None)) for name in required):
                 raise ProductionRuntimeResolutionError(f"Provider 没有 ProductionRuntimeAdapter: {provider_id}")
-        return self._pin_adapter(
+        pinned = self._pin_adapter(
             adapter,
             runtime_plan,
             model_id,
             provider_task=task,
         )
+        if bool(getattr(pinned, "requires_shot_first_frame", False)):
+            if runtime_plan is None:
+                if not poll_only_ready:
+                    raise ProductionRuntimeResolutionError(
+                        "Shot First Frame runtime 需要冻结 RuntimePlan"
+                    )
+            else:
+                self._require_first_frame_authorization(runtime_plan)
+        return pinned
 
     @staticmethod
     def _provider_matches(provider: object, provider_id: str) -> bool:
@@ -222,13 +235,46 @@ class ProductionRuntimeResolver:
             return WanProductionAdapter(
                 config=pinned_config,
                 client=pinned_client,
-                reference_resolver=adapter.reference_resolver,
+                first_frame_resolver=adapter.first_frame_resolver,
             )
         try:
             return adapter.__class__(config=pinned_config)
         except TypeError as exc:
             raise ProductionRuntimeResolutionError(
                 f"无法以冻结配置重建 adapter: {adapter.__class__.__name__}"
+            ) from exc
+
+    @staticmethod
+    def _require_first_frame_authorization(runtime_plan: RuntimePlan) -> None:
+        raw = runtime_plan.authorization.get("shot_first_frame")
+        required_keys = {
+            "first_frame_id",
+            "artifact_id",
+            "sha256",
+            "source_type",
+        }
+        if not isinstance(raw, Mapping) or set(raw) != required_keys:
+            raise ProductionRuntimeResolutionError(
+                "冻结 RuntimePlan 缺少安全的 Shot First Frame fingerprint"
+            )
+        identifiers = (raw.get("first_frame_id"), raw.get("artifact_id"))
+        if any(
+            not isinstance(value, str) or _SAFE_FIRST_FRAME_ID.fullmatch(value) is None
+            for value in identifiers
+        ):
+            raise ProductionRuntimeResolutionError(
+                "冻结 RuntimePlan 的 Shot First Frame artifact identity 无效"
+            )
+        sha256 = raw.get("sha256")
+        if not isinstance(sha256, str) or _SHA256.fullmatch(sha256) is None:
+            raise ProductionRuntimeResolutionError(
+                "冻结 RuntimePlan 的 Shot First Frame SHA-256 无效"
+            )
+        try:
+            ShotFirstFrameSourceType(raw.get("source_type"))
+        except (TypeError, ValueError) as exc:
+            raise ProductionRuntimeResolutionError(
+                "冻结 RuntimePlan 的 Shot First Frame source type 无效"
             ) from exc
 
 

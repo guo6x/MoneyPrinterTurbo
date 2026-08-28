@@ -30,8 +30,8 @@ class Project:
             raise ValueError("项目名称不能超过 120 个字符")
         if len(self.description.strip()) > 1000:
             raise ValueError("项目描述不能超过 1000 个字符")
-        if not 1 <= self.target_duration_seconds <= 3600:
-            raise ValueError("目标时长必须在 1 到 3600 秒之间")
+        if self.target_duration_seconds <= 0:
+            raise ValueError("目标时长必须大于 0 秒")
         if not self.created_at or not self.updated_at:
             raise ValueError("项目时间字段不能为空")
         return self

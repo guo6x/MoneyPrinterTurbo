@@ -1141,8 +1141,12 @@ def _render_primary_action(orchestrator, production_service, project, job, readi
         if approved:
             authorization = {
                 "approved": True,
+                "provider_profile_id": getattr(preview, "provider_profile_id", None),
                 "provider_id": getattr(preview, "provider_id", None),
                 "model_id": getattr(preview, "model_id", None),
+                "manifest_id": getattr(preview, "manifest_id", None),
+                "manifest_hash": getattr(preview, "manifest_hash", None),
+                "codec_id": getattr(preview, "codec_id", None),
                 "deployment_region": getattr(preview, "deployment_region", None),
                 "endpoint_profile_id": getattr(preview, "endpoint_profile_id", None),
                 "endpoint_class": getattr(preview, "endpoint_class", None),
@@ -1231,7 +1235,6 @@ def _render_generation_brief_editor(orchestrator, project, job) -> None:
                 duration = st.number_input(
                     "镜头创作时长（秒）",
                     min_value=0.1,
-                    max_value=3600.0,
                     value=float(brief.target_duration_seconds),
                     key=f"brief-duration-{brief.id}",
                 )

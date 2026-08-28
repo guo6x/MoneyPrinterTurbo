@@ -331,7 +331,6 @@ def _render_brief(project, service: CreativeIntakeService, items: Iterable[objec
     duration = c4.number_input(
         "目标时长（秒）",
         min_value=1,
-        max_value=3600,
         value=int(defaults["duration"]),
         key=_key(project.id, "duration"),
     )

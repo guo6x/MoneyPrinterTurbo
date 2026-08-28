@@ -33,12 +33,17 @@ from aidrama_studio.services.model_runtime import (
 from aidrama_studio.services.model_runtime.mainland_manifests import (
     build_mainland_manifests,
 )
-from aidrama_studio.services.reference_assets import ReferenceAssetService
 from aidrama_studio.storage.database import DatabasePaths, get_default_paths
 from aidrama_studio.storage.repositories import ProjectRepository
 
 from .production_adapter import ProductionRuntimeAdapter, RuntimeSubmission
-from .wan_video import WanPromptMapper, WanReferenceResolver
+from ..shot_keyframe import ShotFirstFrameArtifactResolver
+from .wan_video import (
+    WanAdapterError,
+    WanFirstFrameResolver,
+    WanFirstFrameSelection,
+    WanPromptMapper,
+)
 
 
 class MainlandWanAdapterError(RuntimeError):
@@ -52,6 +57,7 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
     provider_id = "WAN_VIDEO"
     model_id = "wan2.7-i2v-2026-04-25"
     requires_paid_budget = True
+    requires_shot_first_frame = True
     poll_interval_seconds = 5.0
     submission_uncertain_on_error = True
 
@@ -76,6 +82,7 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
         runtime_plan: RuntimePlan | None = None,
         provider_task: ProviderTask | None = None,
         env: Mapping[str, str] | None = None,
+        first_frame_resolver: WanFirstFrameResolver | object | None = None,
     ) -> None:
         self.paths = paths or get_default_paths()
         self.repository = repository or ProjectRepository(self.paths)
@@ -93,8 +100,8 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
         self._environment_workspace_base_url = str(
             self.env.pop(DASHSCOPE_WORKSPACE_BASE_URL_KEY, "") or ""
         ).strip()
-        self.reference_resolver = WanReferenceResolver(
-            ReferenceAssetService(self.repository)
+        self.first_frame_resolver = first_frame_resolver or WanFirstFrameResolver(
+            ShotFirstFrameArtifactResolver(self.repository)
         )
         self._requests: dict[str, CapabilityRequest] = {}
         self._runtimes: dict[str, object] = {}
@@ -140,7 +147,8 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
                 "maximum_duration_seconds": 15,
                 "supported_durations": list(range(2, 16)),
                 "audio_strategy": "EXTERNAL_TTS",
-                "continuity_strategy": "REFERENCE_ONLY",
+                "continuity_strategy": "SHOT_FIRST_FRAME",
+                "requires_shot_first_frame": True,
                 "prompt_template_version": "mainland-wan-i2v-v1",
                 "supports_poll_without_paid_create_authorization": True,
                 "paid_create_retry_count": 0,
@@ -173,6 +181,7 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
             runtime_plan=runtime_plan,
             provider_task=provider_task,
             env=child_env,
+            first_frame_resolver=self.first_frame_resolver,
         )
 
     def validate(self, snapshot: ProductionInputSnapshot) -> bool:
@@ -201,9 +210,9 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
         sink = self.artifact_sink_factory(
             self.paths.root / "provider_artifacts" / "mainland"
         )
-        reference = self.reference_resolver.resolve(snapshot)
+        first_frame = self._resolve_first_frame(snapshot)
         input_resolver = FrozenFileInputResolver(
-            {reference.version_id: reference.path}
+            {first_frame.artifact_id: first_frame.path}
         )
         runtime_options: dict[str, object] = {
             "credentials": {"DASHSCOPE_API_KEY": credential},
@@ -216,7 +225,11 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
             runtime_options["dashscope_workspace_base_url"] = workspace_base_url
         runtime = self.runtime_factory(**runtime_options)
         manifest = runtime.primary_manifest(CapabilityKind.VIDEO)
-        request = self._build_request(snapshot, manifest)
+        request = self._build_request(
+            snapshot,
+            manifest,
+            first_frame=first_frame,
+        )
         result = runtime.submit(
             request,
             authorization=dict(self.runtime_plan.authorization),
@@ -247,17 +260,7 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
                 "endpoint_profile_id": manifest.endpoint_profile_id,
                 "deployment_region": manifest.deployment_region,
                 "paid_create_retry_count": 0,
-                "provider_references_actually_used": [
-                    {
-                        "order": 1,
-                        "role": reference.role,
-                        "binding_key": reference.binding_key,
-                        "reference_asset_version_id": reference.version_id,
-                        "request_media_sha256": request.inputs[0].sha256,
-                        "mime_type": reference.mime_type,
-                        "size_bytes": request.inputs[0].size_bytes,
-                    }
-                ],
+                **first_frame.safe_metadata(),
             },
         )
 
@@ -346,11 +349,16 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
         input_resolver = None
         snapshot = self._recovery_snapshot()
         if snapshot is not None:
-            reference = self.reference_resolver.resolve(snapshot)
+            first_frame = self._resolve_first_frame(snapshot)
             input_resolver = FrozenFileInputResolver(
-                {reference.version_id: reference.path}
+                {first_frame.artifact_id: first_frame.path}
             )
-            request = self._build_request(snapshot, self._manifest())
+            request = self._build_request(
+                snapshot,
+                self._manifest(),
+                first_frame=first_frame,
+                create_authorized=False,
+            )
         if require_input and (request is None or input_resolver is None):
             raise MainlandWanAdapterError("Wan recovery input context is unavailable")
         runtime_options: dict[str, object] = {
@@ -378,16 +386,40 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
             raise MainlandWanAdapterError("Wan recovery execution is unavailable")
         return execution.input_snapshot
 
-    def _build_request(self, snapshot: ProductionInputSnapshot, manifest) -> CapabilityRequest:
+    def _resolve_first_frame(
+        self,
+        snapshot: ProductionInputSnapshot,
+    ) -> WanFirstFrameSelection:
+        try:
+            first_frame = self.first_frame_resolver.resolve(snapshot)
+        except WanAdapterError as exc:
+            raise MainlandWanAdapterError(str(exc)) from exc
+        if not isinstance(first_frame, WanFirstFrameSelection):
+            raise MainlandWanAdapterError(
+                "Wan resolver did not return an exact Shot First Frame"
+            )
+        try:
+            first_frame.validate_snapshot(snapshot)
+        except WanAdapterError as exc:
+            raise MainlandWanAdapterError(str(exc)) from exc
+        return first_frame
+
+    def _build_request(
+        self,
+        snapshot: ProductionInputSnapshot,
+        manifest,
+        *,
+        first_frame: WanFirstFrameSelection | None = None,
+        create_authorized: bool = True,
+    ) -> CapabilityRequest:
         plan = self._require_plan(snapshot)
         if plan.model_id != manifest.model_id:
             raise MainlandWanAdapterError("RuntimePlan model does not match Wan manifest")
-        reference = self.reference_resolver.resolve(snapshot)
+        first_frame = first_frame or self._resolve_first_frame(snapshot)
         try:
-            data = reference.path.read_bytes()
-        except OSError as exc:
-            raise MainlandWanAdapterError("locked reference cannot be read") from exc
-        digest = hashlib.sha256(data).hexdigest()
+            data = first_frame.verified_bytes()
+        except WanAdapterError as exc:
+            raise MainlandWanAdapterError(str(exc)) from exc
         shot_parameters = next(iter(snapshot.shot_parameters.values()))
         if not isinstance(shot_parameters, Mapping):
             raise MainlandWanAdapterError("shot parameters are invalid")
@@ -415,16 +447,13 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
             snapshot_hash=snapshot.runtime_plan_hash,
             inputs=(
                 ContentRef(
-                    source_kind="REFERENCE_ASSET_VERSION",
-                    source_id=reference.version_id,
+                    source_kind="SHOT_FIRST_FRAME_ARTIFACT",
+                    source_id=first_frame.artifact_id,
                     role="first_frame",
-                    mime_type=reference.mime_type,
-                    sha256=digest,
+                    mime_type=first_frame.mime_type,
+                    sha256=first_frame.sha256,
                     size_bytes=len(data),
-                    metadata={
-                        "binding_key": reference.binding_key,
-                        "reference_asset_version_id": reference.version_id,
-                    },
+                    metadata=first_frame.safe_metadata(),
                 ),
             ),
             prompt_or_text=prompt,
@@ -435,7 +464,7 @@ class MainlandWanProductionAdapter(ProductionRuntimeAdapter):
             authorization_fingerprint=str(
                 plan.authorization.get("authorization_fingerprint") or ""
             ),
-            create_authorized=True,
+            create_authorized=create_authorized,
             authorization_required=True,
         )
 

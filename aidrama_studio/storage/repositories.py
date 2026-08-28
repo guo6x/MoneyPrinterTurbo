@@ -5043,6 +5043,8 @@ class ProjectRepository:
                 (authorization_id,),
             ).fetchone()
         return self._auto_paid_authorization_from_row(updated)
+
+    @staticmethod
     def _continuity_snapshot_from_row(row) -> ContinuitySnapshot:
         return ContinuitySnapshot(
             id=row["id"],

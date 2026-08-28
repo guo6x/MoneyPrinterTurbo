@@ -5,6 +5,10 @@ import json
 from typing import Mapping
 from uuid import uuid4
 from aidrama_studio.domain import *
+from aidrama_studio.services.duration_planning import (
+    DurationPlanningError,
+    DurationPlanningService,
+)
 from aidrama_studio.services.llm_runtime import LLMInvocationError,LLMInvocationGateway
 from aidrama_studio.services.shot_parser import parse_shot_plan
 from aidrama_studio.services.shot_prompt import build_shot_prompt,build_shot_repair_prompt
@@ -12,7 +16,18 @@ from aidrama_studio.storage import ProjectRepository
 def _now(): return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 class ShotServiceError(RuntimeError): pass
 class ShotService:
-    def __init__(self,repository=None,*,llm_gateway: LLMInvocationGateway | None = None): self.repository=repository or ProjectRepository(); self._llm_gateway=llm_gateway or LLMInvocationGateway(self.repository)
+    def __init__(
+        self,
+        repository=None,
+        *,
+        llm_gateway: LLMInvocationGateway | None = None,
+        duration_planner: DurationPlanningService | None = None,
+    ):
+        self.repository = repository or ProjectRepository()
+        self._llm_gateway = llm_gateway or LLMInvocationGateway(self.repository)
+        self._duration_planner = duration_planner or DurationPlanningService(
+            self.repository
+        )
     def llm_readiness(self,project_id): return self._llm_gateway.readiness(project_id)
     def list_revisions(self,pid): return self.repository.list_shot_revisions(pid)
     def list_plans(self,pid):
@@ -204,7 +219,16 @@ class ShotService:
         story=self.repository.get_story_revision(script["source_story_revision_id"])
         if story is None or story["project_id"] != project.id:
             raise ShotServiceError("Shot Planner 缺少 source Story Bible provenance")
-        prompt=build_shot_prompt(project,script["content"],story["content"]); input_source_ids=(script["id"],story["id"])
+        try:
+            duration_plan = self._duration_planner.plan(
+                project.id, project.target_duration_seconds
+            )
+        except DurationPlanningError:
+            duration_plan = None
+        prompt = build_shot_prompt(
+            project, script["content"], story["content"], duration_plan
+        )
+        input_source_ids = (script["id"], story["id"])
         def validate(raw):
             plan=parse_shot_plan(raw)
             # Revision provenance belongs to the product action, never to a
@@ -224,7 +248,33 @@ class ShotService:
             if missing: raise ShotServiceError(f"AI proposal 丢失锁定镜头: {', '.join(missing)}")
             plan.shots=[locked.get(item.id,item) for item in plan.shots]
             self.recalculate_risk_if_needed(plan)
-        return self._create(project.id,script["id"],plan,{"target_duration_seconds":project.target_duration_seconds,"aspect_ratio":project.aspect_ratio.value} | dict(generation_provenance or {}))
+        duration_provenance = (
+            {
+                "duration_provider_id": duration_plan.provider_id,
+                "duration_model_id": duration_plan.model_id,
+                "planned_shot_count": duration_plan.planned_shot_count,
+                "planned_shot_durations": list(
+                    duration_plan.planned_shot_durations
+                ),
+                "expected_video_create_count": (
+                    duration_plan.expected_video_create_count
+                ),
+                "max_execution_batch_size": duration_plan.max_batch_size,
+            }
+            if duration_plan is not None
+            else {}
+        )
+        return self._create(
+            project.id,
+            script["id"],
+            plan,
+            {
+                "target_duration_seconds": project.target_duration_seconds,
+                "aspect_ratio": project.aspect_ratio.value,
+            }
+            | duration_provenance
+            | dict(generation_provenance or {}),
+        )
 
     def regenerate_shot(self,project,revision_id,shot_id):
         """Regenerate exactly one unlocked shot into a new DRAFT revision."""

@@ -470,6 +470,14 @@ class ProviderProfileService:
                 )
                 is True,
             }
+            supports = getattr(manifest, "supports", None)
+            supports_data = (
+                supports.to_dict()
+                if callable(getattr(supports, "to_dict", None))
+                else {}
+            )
+            if supports_data.get("first_frame") is True:
+                profile_data["requires_first_frame"] = True
             minimum = duration_data.get("minimum")
             maximum = duration_data.get("maximum")
             if minimum is not None:
@@ -481,6 +489,9 @@ class ProviderProfileService:
                 profile_data["supported_durations"] = discrete
             limits = getattr(manifest, "limits", {})
             limits = limits if isinstance(limits, Mapping) else {}
+            preferred_duration = limits.get("preferred_shot_duration_seconds")
+            if preferred_duration is not None:
+                profile_data["preferred_shot_duration_seconds"] = preferred_duration
             if (
                 "supported_durations" not in profile_data
                 and limits.get("duration_integer_only") is True
@@ -548,13 +559,18 @@ class ProviderProfileService:
             selected_id = str(profile_id).strip()
             if not selected_id:
                 continue
-            if preset_value is ProviderPreset.CUSTOM and not any(
-                item.id == selected_id or item.endpoint_profile_id == selected_id
-                for item in self.inventory(project_id, value)
-            ):
-                raise ProviderProfileError(
-                    f"自定义选择不属于当前作用域或 Provider inventory: {value}"
+            if preset_value is ProviderPreset.CUSTOM:
+                selected = self._exact_profile(
+                    self.inventory(project_id, value),
+                    selection_token=selected_id,
                 )
+                if selected is None:
+                    raise ProviderProfileError(
+                        f"自定义选择不属于当前作用域或 Provider inventory: {value}"
+                    )
+                # Persist the model/manifest identity, never a shared endpoint
+                # alias that could silently resolve to a different model.
+                selected_id = selected.id
             normalized[value] = selected_id
         now = _now()
         current = self.get_settings(project_id)
@@ -574,7 +590,9 @@ class ProviderProfileService:
         capability: CapabilityKind | str,
         *,
         provider_id: str | None = None,
+        model_id: str | None = None,
         endpoint_profile_id: str | None = None,
+        profile_id: str | None = None,
         require_available: bool = False,
     ) -> ResolvedProviderSelection:
         if project_id is not None and self.repository.get_project(project_id) is None:
@@ -582,16 +600,22 @@ class ProviderProfileService:
         value = CapabilityKind(capability).value
         inventory = self.inventory(project_id, value)
 
-        if endpoint_profile_id or provider_id:
-            profile = next(
-                (
-                    item
-                    for item in inventory
-                    if (not endpoint_profile_id or item.endpoint_profile_id == endpoint_profile_id or item.id == endpoint_profile_id)
-                    and (not provider_id or item.provider_id == provider_id)
-                ),
-                None,
+        if endpoint_profile_id or provider_id or model_id or profile_id:
+            profile = self._exact_profile(
+                inventory,
+                selection_token=profile_id or endpoint_profile_id,
+                provider_id=provider_id,
+                model_id=model_id,
             )
+            if (
+                profile is not None
+                and profile_id
+                and endpoint_profile_id
+                and profile.endpoint_profile_id != endpoint_profile_id
+            ):
+                raise ProviderProfileError(
+                    "Provider profile 与 endpoint identity 不匹配；不会 fallback"
+                )
             return self._resolved(
                 value, ProviderPreset.CUSTOM.value, "JOB_OVERRIDE", profile,
                 require_available=require_available,
@@ -606,13 +630,9 @@ class ProviderProfileService:
         if settings is not None:
             if settings.preset is ProviderPreset.CUSTOM:
                 selected_id = settings.selections.get(value)
-                profile = next(
-                    (
-                        item
-                        for item in inventory
-                        if selected_id and (item.id == selected_id or item.endpoint_profile_id == selected_id)
-                    ),
-                    None,
+                profile = self._exact_profile(
+                    inventory,
+                    selection_token=selected_id,
                 )
                 return self._resolved(
                     value, settings.preset.value, source, profile,
@@ -652,19 +672,79 @@ class ProviderProfileService:
             unavailable_detail=f"能力 {value} 没有可用 Provider",
         )
 
+    @staticmethod
+    def _exact_profile(
+        inventory: tuple[CapabilityProfile, ...],
+        *,
+        selection_token: str | None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+    ) -> CapabilityProfile | None:
+        """Resolve model identity before accepting legacy endpoint aliases.
+
+        Manifest/profile IDs are exact. Endpoint aliases remain compatible
+        only when they identify one capability-scoped model. Shared endpoints
+        such as DashScope image generation must fail closed instead of taking
+        the inventory's first model.
+        """
+
+        token = str(selection_token or "").strip()
+        provider = str(provider_id or "").strip().casefold()
+        model = str(model_id or "").strip()
+
+        def identity_matches(item: CapabilityProfile) -> bool:
+            return (
+                (not provider or item.provider_id.casefold() == provider)
+                and (not model or item.model_id == model)
+            )
+
+        if token:
+            exact = [
+                item
+                for item in inventory
+                if item.id == token and identity_matches(item)
+            ]
+            if len(exact) == 1:
+                return exact[0]
+            endpoints = [
+                item
+                for item in inventory
+                if item.endpoint_profile_id == token and identity_matches(item)
+            ]
+            if len(endpoints) == 1:
+                return endpoints[0]
+            if len(endpoints) > 1:
+                raise ProviderProfileError(
+                    "Provider endpoint 对应多个模型；必须选择 exact manifest/profile ID"
+                )
+            return None
+
+        candidates = [item for item in inventory if identity_matches(item)]
+        if len(candidates) == 1:
+            return candidates[0]
+        if (provider or model) and len(candidates) > 1:
+            raise ProviderProfileError(
+                "Provider/model 对应多个 profile；必须选择 exact manifest/profile ID"
+            )
+        return None
+
     def select(
         self,
         project_id: str,
         capability: CapabilityKind | str,
         *,
         provider_id: str | None = None,
+        model_id: str | None = None,
         endpoint_profile_id: str | None = None,
+        profile_id: str | None = None,
     ) -> CapabilityProfile:
         resolved = self.resolve(
             project_id,
             capability,
             provider_id=provider_id,
+            model_id=model_id,
             endpoint_profile_id=endpoint_profile_id,
+            profile_id=profile_id,
             require_available=True,
         )
         if resolved.profile is None or not resolved.available:

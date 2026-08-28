@@ -211,7 +211,18 @@ class ProductionQCService:
             # traceability/request context only and cannot turn a corrupt
             # file into a QC pass.
             probed = self._probe_video(artifact_path) if exists and size > 0 else {}
-            checks.extend(self._video_checks(probed))
+            job = self.repository.get_production_job(execution.production_job_id)
+            profile = (
+                self.repository.get_output_profile(job.output_profile_id)
+                if job is not None and job.output_profile_id
+                else None
+            )
+            checks.extend(
+                self._video_checks(
+                    probed,
+                    expected_codec=(profile.target_video_codec if profile else None),
+                )
+            )
             checks.extend(self._visual_checks(artifact_path, probed))
             audio_required = metadata.get("audio_required") is True
             checks.append(self._audio_check(probed, required=audio_required))
@@ -227,17 +238,48 @@ class ProductionQCService:
         checks.append(self._traceability_check(execution, artifact, metadata))
         return checks
 
-    def _video_checks(self, metadata: Mapping[str, object]) -> list[dict[str, object]]:
+    def _video_checks(
+        self,
+        metadata: Mapping[str, object],
+        *,
+        expected_codec: str | None = None,
+    ) -> list[dict[str, object]]:
         duration = metadata.get("duration_seconds", metadata.get("duration"))
         duration_ok = isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration > 0
         resolution = self._resolution(metadata)
         resolution_ok = resolution is not None and resolution[0] > 0 and resolution[1] > 0
         codec = metadata.get("codec") or metadata.get("video_codec") or metadata.get("codec_name")
         codec_ok = isinstance(codec, str) and bool(codec.strip())
+        if codec_ok and expected_codec:
+            normalize = {
+                "avc": "h264",
+                "avc1": "h264",
+                "h.264": "h264",
+                "libx264": "h264",
+                "h.265": "hevc",
+                "h265": "hevc",
+                "libx265": "hevc",
+            }
+            actual = normalize.get(codec.strip().lower(), codec.strip().lower())
+            expected = normalize.get(
+                expected_codec.strip().lower(),
+                expected_codec.strip().lower(),
+            )
+            codec_ok = actual == expected
         return [
             self._check("video_duration", "VIDEO", duration_ok, {"duration_seconds": duration}, "视频时长有效" if duration_ok else "视频时长 metadata 无效"),
             self._check("video_resolution", "VIDEO", resolution_ok, {"resolution": f"{resolution[0]}x{resolution[1]}" if resolution else ""}, "分辨率有效" if resolution_ok else "视频分辨率 metadata 无效"),
-            self._check("video_codec", "VIDEO", codec_ok, {"codec": codec or ""}, "codec metadata 有效" if codec_ok else "codec metadata 缺失"),
+            self._check(
+                "video_codec",
+                "VIDEO",
+                codec_ok,
+                {"codec": codec or "", "expected_codec": expected_codec or ""},
+                "codec 与冻结 OutputProfile 一致"
+                if codec_ok and expected_codec
+                else "codec metadata 有效"
+                if codec_ok
+                else "codec 与冻结 OutputProfile 不一致或缺失",
+            ),
         ]
 
     def _visual_checks(self, path: Path, metadata: Mapping[str, object]) -> list[dict[str, object]]:

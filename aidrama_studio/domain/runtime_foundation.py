@@ -22,7 +22,7 @@ class OutputProfile(BaseModel):
     version_number: int = Field(default=1, ge=1)
     is_project_default: bool = True
     aspect_ratio: str = Field(min_length=1, max_length=32)
-    target_episode_duration_seconds: float = Field(gt=0, le=3600)
+    target_episode_duration_seconds: float = Field(gt=0)
     delivery_width: int = Field(ge=16, le=16384)
     delivery_height: int = Field(ge=16, le=16384)
     delivery_resolution_label: str = Field(min_length=1, max_length=32)
@@ -157,8 +157,8 @@ class RuntimePlan(BaseModel):
         pattern=r"^(NATIVE|DETERMINISTIC_SCALE|DETERMINISTIC_UPSCALE)$",
     )
     quality_mode: str = Field(default="STANDARD", pattern=r"^(PREVIEW|STANDARD|HIGH|FINAL)$")
-    provider_generation_duration: float = Field(gt=0, le=3600)
-    target_creative_duration: float = Field(gt=0, le=3600)
+    provider_generation_duration: float = Field(gt=0)
+    target_creative_duration: float = Field(gt=0)
     duration_strategy: str = Field(
         default="EXACT",
         pattern=r"^(EXACT|TRIM_TO_CREATIVE|HOLD_OR_PAD|CHUNK_AND_CONTINUE)$",

@@ -25,6 +25,7 @@ from aidrama_studio.domain import (
     ProductionShotStatus,
     ProductionInputSnapshot,
     RuntimePlan,
+    ShotFirstFrame,
 )
 from aidrama_studio.services.adapters import ProductionRuntimeAdapter
 from aidrama_studio.storage.repositories import ProjectRepository
@@ -33,6 +34,12 @@ from .production import ProductionService, ProductionServiceError
 from .production_execution import ProductionExecutionService, ProductionExecutionServiceError
 from .production_qc import ProductionQCService, ProductionQCServiceError
 from .production_worker import ProductionWorker, ProductionWorkerError
+from .shot_keyframe import ShotKeyframeError, ShotKeyframeService
+
+
+_KEYFRAME_PREPARATION_WORKERS = frozenset(
+    {"UNIVERSAL_IMAGE_SHOT_KEYFRAME", "SHOT_FIRST_FRAME_INGEST"}
+)
 
 
 def _now() -> str:
@@ -75,6 +82,7 @@ class ProductionOrchestrator:
         self.adapter = adapter or runtime_adapter
         self.adapter_resolver = adapter_resolver
         self.runtime_plan_ids_by_shot = dict(runtime_plan_ids_by_shot or {})
+        self.shot_keyframes = ShotKeyframeService(self.repository)
 
     def run_job(
         self,
@@ -84,8 +92,19 @@ class ProductionOrchestrator:
         adapter: ProductionRuntimeAdapter | None = None,
         adapter_resolver: Callable[[RuntimePlan], ProductionRuntimeAdapter] | None = None,
         runtime_plan_ids_by_shot: Mapping[str, str] | None = None,
+        max_new_creates: int | None = None,
     ) -> ProductionJob:
-        """Run/resume a job until a shot fails, is cancelled, or all pass."""
+        """Run/resume a job until blocked, complete, or the local batch is full."""
+        if max_new_creates is not None:
+            if isinstance(max_new_creates, bool):
+                raise ProductionOrchestratorError("max_new_creates 无效")
+            try:
+                max_new_creates = int(max_new_creates)
+            except (TypeError, ValueError) as exc:
+                raise ProductionOrchestratorError("max_new_creates 无效") from exc
+            if max_new_creates <= 0:
+                raise ProductionOrchestratorError("max_new_creates 必须大于 0")
+        new_create_count = 0
         job = self._get_job(project_id, production_job_id)
         if job.status in (ProductionJobStatus.FAILED, ProductionJobStatus.CANCELLED):
             return job
@@ -125,6 +144,33 @@ class ProductionOrchestrator:
                 shot for shot in shots
                 if shot.status not in (ProductionShotStatus.SUCCEEDED, ProductionShotStatus.SKIPPED)
             )
+            existing_execution = self._latest_execution_for_shot(
+                self.execution_service.list_executions(project_id, job.id),
+                shot.shot_id,
+            )
+            starts_paid_create = (
+                existing_execution is None
+                or existing_execution.status is ProductionExecutionStatus.QUEUED
+                or (
+                    existing_execution.status
+                    in {
+                        ProductionExecutionStatus.SUCCEEDED,
+                        ProductionExecutionStatus.FAILED,
+                        ProductionExecutionStatus.CANCELLED,
+                    }
+                    and shot.status
+                    not in {
+                        ProductionShotStatus.SUCCEEDED,
+                        ProductionShotStatus.SKIPPED,
+                    }
+                )
+            )
+            if (
+                starts_paid_create
+                and max_new_creates is not None
+                and new_create_count >= max_new_creates
+            ):
+                return self._get_job(project_id, production_job_id)
             try:
                 passed = self._run_shot(
                     project_id,
@@ -136,6 +182,8 @@ class ProductionOrchestrator:
                 )
             except ProductionOrchestratorError:
                 raise
+            if starts_paid_create:
+                new_create_count += 1
             if not passed:
                 return self._get_job(project_id, production_job_id)
 
@@ -247,6 +295,11 @@ class ProductionOrchestrator:
             or runtime_plan.production_job_id != job.id
         ):
             raise ProductionOrchestratorError("冻结 RuntimePlan 不属于当前 ProductionJob")
+        if (
+            runtime_plan is not None
+            and runtime_plan.provider_capability != "VIDEO_GENERATIVE"
+        ):
+            raise ProductionOrchestratorError("冻结 RuntimePlan 不是 VIDEO capability")
         shot_adapter = adapter_resolver(runtime_plan) if adapter_resolver is not None and runtime_plan is not None else adapter
         if shot_adapter is None:
             if adapter_resolver is not None:
@@ -264,8 +317,21 @@ class ProductionOrchestrator:
         } and shot.status not in {ProductionShotStatus.SUCCEEDED, ProductionShotStatus.SKIPPED}:
             execution = None
 
+        if execution is not None and execution.runtime_plan_id != (
+            runtime_plan.id if runtime_plan is not None else None
+        ):
+            raise ProductionOrchestratorError(
+                "现有 VIDEO execution 与冻结 RuntimePlan 不匹配"
+            )
+
         if execution is None:
-            snapshot = self._shot_snapshot(project_id, job, shot)
+            snapshot = self._shot_snapshot(
+                project_id,
+                job,
+                shot,
+                adapter=shot_adapter,
+                runtime_plan=runtime_plan,
+            )
             try:
                 execution, attempt = self.execution_service.enqueue_shot_execution_with_attempt(
                     project_id,
@@ -279,8 +345,24 @@ class ProductionOrchestrator:
                 raise ProductionOrchestratorError(str(exc)) from exc
 
         if execution.status is ProductionExecutionStatus.QUEUED:
+            self._validate_video_snapshot(
+                project_id,
+                job,
+                shot,
+                execution,
+                shot_adapter,
+                runtime_plan,
+            )
             result = self._worker_run(project_id, execution.id, shot_adapter)
         elif execution.status is ProductionExecutionStatus.RUNNING:
+            self._validate_video_snapshot(
+                project_id,
+                job,
+                shot,
+                execution,
+                shot_adapter,
+                runtime_plan,
+            )
             result = self._worker_resume(project_id, execution.id, shot_adapter)
         else:
             result = execution
@@ -302,7 +384,15 @@ class ProductionOrchestrator:
         self._complete_shot(project_id, job, shot, attempt, result)
         return True
 
-    def _shot_snapshot(self, project_id: str, job: ProductionJob, shot: ProductionShot) -> ProductionInputSnapshot:
+    def _shot_snapshot(
+        self,
+        project_id: str,
+        job: ProductionJob,
+        shot: ProductionShot,
+        *,
+        adapter: ProductionRuntimeAdapter | None = None,
+        runtime_plan: RuntimePlan | None = None,
+    ) -> ProductionInputSnapshot:
         try:
             full = self.execution_service.create_input_snapshot(project_id, job.id)
         except ProductionExecutionServiceError as exc:
@@ -310,6 +400,34 @@ class ProductionOrchestrator:
         parameters = full.shot_parameters.get(shot.shot_id)
         if parameters is None:
             raise ProductionOrchestratorError(f"ShotPlan 中不存在 ProductionShot: {shot.shot_id}")
+        snapshot_adapter = adapter or self.adapter
+        if snapshot_adapter is None and self.worker is not None:
+            snapshot_adapter = getattr(self.worker, "adapter", None)
+        requires_first_frame = bool(
+            getattr(snapshot_adapter, "requires_shot_first_frame", False)
+        )
+        first_frame: ShotFirstFrame | None = None
+        if requires_first_frame and runtime_plan is not None:
+            first_frame = self._runtime_plan_first_frame(
+                project_id, job, shot, runtime_plan
+            )
+        elif requires_first_frame:
+            try:
+                _report, selected = self.shot_keyframes.require_pre_live(
+                    project_id, job.id
+                )
+                first_frame = selected.get(shot.shot_id)
+                if first_frame is None:
+                    raise ShotKeyframeError(
+                        f"shot {shot.shot_id} has no selected Shot First Frame"
+                    )
+                self.shot_keyframes.resolver.resolve_frame(
+                    project_id,
+                    first_frame,
+                    expected_production_job_id=job.id,
+                )
+            except ShotKeyframeError as exc:
+                raise ProductionOrchestratorError(str(exc)) from exc
         return ProductionInputSnapshot(
             project_id=full.project_id,
             story_revision_id=full.story_revision_id,
@@ -317,7 +435,124 @@ class ProductionOrchestrator:
             shot_plan_revision_id=full.shot_plan_revision_id,
             reference_asset_versions=full.reference_asset_versions,
             shot_parameters={shot.shot_id: parameters},
+            shot_first_frames=(first_frame,) if first_frame is not None else (),
+            first_frame_required_shot_ids=(
+                (shot.shot_id,) if requires_first_frame else ()
+            ),
         )
+
+    def _runtime_plan_first_frame(
+        self,
+        project_id: str,
+        job: ProductionJob,
+        shot: ProductionShot,
+        runtime_plan: RuntimePlan,
+    ) -> ShotFirstFrame:
+        raw = runtime_plan.authorization.get("shot_first_frame")
+        required_keys = {
+            "first_frame_id",
+            "artifact_id",
+            "sha256",
+            "source_type",
+        }
+        if not isinstance(raw, Mapping) or set(raw) != required_keys:
+            raise ProductionOrchestratorError(
+                "PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: "
+                "冻结 RuntimePlan 缺少安全的 Shot First Frame fingerprint"
+            )
+        artifact_id = raw.get("artifact_id")
+        artifact = (
+            self.repository.get_production_artifact(artifact_id)
+            if isinstance(artifact_id, str)
+            else None
+        )
+        contract = (
+            artifact.metadata_json.get("shot_first_frame")
+            if artifact is not None
+            else None
+        )
+        try:
+            frame = ShotFirstFrame.model_validate(contract)
+        except Exception as exc:
+            raise ProductionOrchestratorError(
+                "PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: "
+                "冻结 RuntimePlan 的 Shot First Frame artifact contract 无效"
+            ) from exc
+        if (
+            frame.id != raw.get("first_frame_id")
+            or frame.artifact_id != raw.get("artifact_id")
+            or frame.sha256 != raw.get("sha256")
+            or frame.source_type.value != raw.get("source_type")
+        ):
+            raise ProductionOrchestratorError(
+                "PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: "
+                "冻结 RuntimePlan 的 Shot First Frame fingerprint 已变化"
+            )
+        if (
+            frame.project_id != project_id
+            or frame.shot_id != shot.shot_id
+            or frame.shot_plan_revision_id != job.shot_plan_revision_id
+            or frame.generation_brief_id != runtime_plan.generation_brief_id
+        ):
+            raise ProductionOrchestratorError(
+                "PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: "
+                "冻结 Shot First Frame 不属于当前 shot/GenerationBrief"
+            )
+        try:
+            self.shot_keyframes.resolver.resolve_frame(
+                project_id,
+                frame,
+                expected_production_job_id=job.id,
+            )
+        except ShotKeyframeError as exc:
+            raise ProductionOrchestratorError(
+                f"PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: {exc}"
+            ) from exc
+        return frame
+
+    def _validate_video_snapshot(
+        self,
+        project_id: str,
+        job: ProductionJob,
+        shot: ProductionShot,
+        execution: ProductionExecution,
+        adapter: ProductionRuntimeAdapter,
+        runtime_plan: RuntimePlan | None,
+    ) -> None:
+        if not bool(getattr(adapter, "requires_shot_first_frame", False)):
+            return
+        snapshot = execution.input_snapshot
+        if snapshot is None or shot.shot_id not in snapshot.first_frame_required_shot_ids:
+            raise ProductionOrchestratorError(
+                "PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: "
+                "VIDEO execution 缺少 required Shot First Frame declaration"
+            )
+        frozen = snapshot.first_frame_for_shot(shot.shot_id)
+        if frozen is None:
+            raise ProductionOrchestratorError(
+                "PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: "
+                "VIDEO execution 缺少冻结 Shot First Frame"
+            )
+        if runtime_plan is not None:
+            expected = self._runtime_plan_first_frame(
+                project_id, job, shot, runtime_plan
+            )
+            if frozen != expected:
+                raise ProductionOrchestratorError(
+                    "PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: "
+                    "VIDEO execution 未使用 RuntimePlan 固定的 exact first frame"
+                )
+            return
+        try:
+            self.shot_keyframes.resolver.resolve_frame(
+                project_id,
+                frozen,
+                expected_production_job_id=job.id,
+            )
+        except ShotKeyframeError as exc:
+            raise ProductionOrchestratorError(
+                f"PRE_LIVE_FIRST_FRAME_GATE=BLOCKED: {exc}"
+            ) from exc
 
     def _worker_run(self, project_id: str, execution_id: str, adapter: ProductionRuntimeAdapter) -> ProductionExecution:
         worker = self.worker or ProductionWorker(self.execution_service, adapter)
@@ -449,7 +684,12 @@ class ProductionOrchestrator:
         return next((shot for shot in shots if shot.shot_id == shot_id), None)
 
     def _latest_execution_for_shot(self, executions: list[ProductionExecution], shot_id: str) -> ProductionExecution | None:
-        matches = [execution for execution in executions if self._execution_shot_id(execution) == shot_id]
+        matches = [
+            execution
+            for execution in executions
+            if execution.worker_type.upper() not in _KEYFRAME_PREPARATION_WORKERS
+            and self._execution_shot_id(execution) == shot_id
+        ]
         return matches[-1] if matches else None
 
     @staticmethod

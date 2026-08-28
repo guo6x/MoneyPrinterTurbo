@@ -518,8 +518,7 @@ def _render_output_defaults(project_id: str | None, project: object | None) -> N
             duration = st.number_input(
                 "目标时长（秒）",
                 min_value=1.0,
-                max_value=3600.0,
-                value=max(1.0, min(3600.0, duration_default)),
+                value=max(1.0, duration_default),
                 step=1.0,
                 key=f"output-duration-{project_id or 'global'}",
             )

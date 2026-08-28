@@ -11,9 +11,13 @@ import requests
 from aidrama_studio.domain import (
     ProviderTask,
     ProductionInputSnapshot,
-    ReferenceAsset,
+    ReferenceProvenance,
     ReferenceAssetType,
-    ReferenceAssetVersion,
+    ShotFirstFrame,
+    ShotFirstFrameSourceType,
+    ShotKeyframeReferenceRole,
+    ShotKeyframeSelection,
+    ShotKeyframeSelectionPolicy,
 )
 from aidrama_studio.services import (
     CapabilityRegistry,
@@ -28,13 +32,16 @@ from aidrama_studio.services.adapters import (
     WanInputMapper,
     WanProductionAdapter,
     WanProviderConfig,
-    WanReferenceResolver,
-    WanReferenceSelection,
     WanVideoClient,
     WanTransientError,
     RuntimeSubmission,
 )
+from aidrama_studio.services.adapters.wan_video import (
+    WanFirstFrameResolver,
+    WanFirstFrameSelection,
+)
 from aidrama_studio.services.provider_result_download import validate_mp4_prefix
+from aidrama_studio.services.shot_keyframe import ShotFirstFrameArtifactResolver
 from aidrama_studio.services.streaming_artifact import StreamingArtifactSource
 
 
@@ -42,12 +49,54 @@ JPEG = b"\xff\xd8\xff\xe0" + b"fixture" * 8
 MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"video"
 
 
-def _snapshot(**references: str) -> ProductionInputSnapshot:
+def _first_frame() -> ShotFirstFrame:
+    selection = ShotKeyframeSelection(
+        project_id="project-1",
+        shot_id="shot-1",
+        policy=ShotKeyframeSelectionPolicy.NEW_SCENE,
+        source_type=ShotFirstFrameSourceType.GENERATED_KEYFRAME,
+        reason="A distinct shot-specific keyframe is required.",
+    )
+    identity = ReferenceProvenance(
+        role=ShotKeyframeReferenceRole.IDENTITY,
+        asset_id="character-asset-1",
+        asset_version_id="version-1",
+        asset_type=ReferenceAssetType.CHARACTER_REFERENCE,
+        sha256="1" * 64,
+        binding_id="CHARACTER:hero",
+        subject_id="hero",
+        stable_description="Hero identity constraint",
+    )
+    return ShotFirstFrame(
+        id="first-frame-1",
+        project_id="project-1",
+        shot_id="shot-1",
+        shot_plan_revision_id="plan-1",
+        generation_brief_id="brief-1",
+        shot_keyframe_brief_id="keyframe-brief-1",
+        shot_keyframe_brief_sha256="2" * 64,
+        artifact_id="first-frame-artifact-1",
+        execution_id="keyframe-execution-1",
+        artifact_size_bytes=len(JPEG),
+        sha256=hashlib.sha256(JPEG).hexdigest(),
+        mime_type="image/jpeg",
+        source_type=ShotFirstFrameSourceType.GENERATED_KEYFRAME,
+        selection=selection,
+        identity_reference_provenance=(identity,),
+        created_at="2026-08-28T00:00:00+00:00",
+    )
+
+
+def _snapshot(
+    *, include_first_frame: bool = True, **references: str
+) -> ProductionInputSnapshot:
+    frame = _first_frame()
     return ProductionInputSnapshot(
         project_id="project-1",
         story_revision_id="story-1",
         script_revision_id="script-1",
         shot_plan_revision_id="plan-1",
+        generation_brief_id="brief-1",
         reference_asset_versions=references or {"CHARACTER:hero": "version-1"},
         shot_parameters={
             "shot-1": {
@@ -60,20 +109,28 @@ def _snapshot(**references: str) -> ProductionInputSnapshot:
                 "lighting": {"quality": "soft", "tone": "golden"},
             }
         },
+        shot_first_frames=(frame,) if include_first_frame else (),
+        first_frame_required_shot_ids=("shot-1",),
     )
 
 
 class FakeResolver:
     def __init__(self, path: Path):
-        self.selection = WanReferenceSelection(
-            role="character",
-            binding_key="CHARACTER:hero",
-            version_id="version-1",
+        frame = _first_frame()
+        self.selection = WanFirstFrameSelection(
+            first_frame_id=frame.id,
+            artifact_id=frame.artifact_id,
+            source_type=frame.source_type.value,
             path=path,
             mime_type="image/jpeg",
+            sha256=frame.sha256,
+            size_bytes=frame.artifact_size_bytes,
+            shot_id=frame.shot_id,
+            identity_reference_version_ids=("version-1",),
         )
 
     def resolve(self, snapshot):
+        self.selection.validate_snapshot(snapshot)
         return self.selection
 
 
@@ -98,11 +155,13 @@ class FakeWanClient:
         )
 
 
-def test_wan_input_mapping_uses_exact_frozen_reference_and_structured_prompt(tmp_path):
-    image = tmp_path / "reference.jpg"
+def test_wan_input_mapping_uses_exact_frozen_first_frame_and_structured_prompt(tmp_path):
+    image = tmp_path / "shot-first-frame.jpg"
     image.write_bytes(JPEG)
     config = WanProviderConfig(api_key="test-key")
-    payload, trace = WanInputMapper.map_snapshot(_snapshot(), config, FakeResolver(image))
+    snapshot = _snapshot()
+    first_frame = FakeResolver(image).resolve(snapshot)
+    payload, trace = WanInputMapper.map_snapshot(snapshot, config, first_frame)
 
     assert payload["model"] == "wan2.7-i2v-2026-04-25"
     assert payload["input"]["prompt"].startswith("A cinematic hero")
@@ -111,15 +170,18 @@ def test_wan_input_mapping_uses_exact_frozen_reference_and_structured_prompt(tmp
     encoded = media[0]["url"].split(",", 1)[1]
     assert base64.b64decode(encoded) == JPEG
     assert trace["production_shot_id"] == "shot-1"
-    assert trace["reference_asset_version_id"] == "version-1"
+    assert trace["first_frame_id"] == "first-frame-1"
+    assert trace["first_frame_artifact_id"] == "first-frame-artifact-1"
+    assert trace["first_frame_source_type"] == "GENERATED_KEYFRAME"
+    assert trace["first_frame_sha256"] == hashlib.sha256(JPEG).hexdigest()
+    assert trace["identity_reference_version_ids"] == ["version-1"]
     assert trace["provider"] == "alibaba_model_studio"
     assert trace["prompt_sha256"] == hashlib.sha256(
         payload["input"]["prompt"].encode("utf-8")
     ).hexdigest()
     assert len(trace["canonical_request_sha256"]) == 64
-    used = trace["provider_references_actually_used"]
-    assert used[0]["request_media_sha256"] == hashlib.sha256(JPEG).hexdigest()
-    assert used[0]["reference_asset_version_id"] == "version-1"
+    assert "provider_references_actually_used" not in trace
+    assert "reference_asset_version_id" not in trace
     assert "prompt" not in trace
     assert "api_key" not in trace
 
@@ -133,7 +195,7 @@ def test_wan_adapter_submit_status_and_result_download(tmp_path):
         config=WanProviderConfig(
             api_key="test-key", allow_paid_live_tests=True
         ),
-        reference_resolver=FakeResolver(image),
+        first_frame_resolver=FakeResolver(image),
     )
     snapshot = _snapshot()
     assert adapter.validate(snapshot) is True
@@ -153,22 +215,28 @@ def test_wan_adapter_submit_status_and_result_download(tmp_path):
     assert client.downloaded_url == "https://files.example/video.mp4"
 
 
-def test_wan_adapter_rejects_missing_reference_and_unsupported_cancel(tmp_path):
+def test_wan_adapter_rejects_missing_first_frame_and_unsupported_cancel(tmp_path):
     image = tmp_path / "reference.jpg"
     image.write_bytes(JPEG)
     client = FakeWanClient()
     adapter = WanProductionAdapter(
         client,
         config=WanProviderConfig(api_key="test-key"),
-        reference_resolver=FakeResolver(image),
+        first_frame_resolver=FakeResolver(image),
     )
     class RejectingResolver(FakeResolver):
         def resolve(self, snapshot):
-            raise WanAdapterError("no locked reference")
+            raise WanAdapterError("required frozen Shot First Frame is missing")
 
-    no_reference = _snapshot(**{"STYLE:look": "style-version"})
-    adapter.reference_resolver = RejectingResolver(image)
-    assert adapter.validate(no_reference) is False
+    missing_first_frame = _snapshot(
+        include_first_frame=False,
+        **{
+            "CHARACTER:hero": "version-1",
+            "LOCATION:room": "location-version-1",
+        },
+    )
+    adapter.first_frame_resolver = RejectingResolver(image)
+    assert adapter.validate(missing_first_frame) is False
     with pytest.raises(WanAdapterError, match="not supported"):
         adapter.cancel("wan-task-1")
 
@@ -190,7 +258,7 @@ def test_wan_adapter_rejects_malformed_video_result(tmp_path):
         config=WanProviderConfig(
             api_key="test-key", allow_paid_live_tests=True
         ),
-        reference_resolver=FakeResolver(image),
+        first_frame_resolver=FakeResolver(image),
     )
     adapter.submit(_snapshot())
     adapter.client.status = "SUCCEEDED"
@@ -229,12 +297,17 @@ def test_provider_trace_metadata_is_persistable_without_credentials():
             "provider": "alibaba_model_studio",
             "provider_task_id": "wan-task-1",
             "prompt": "walk forward",
-            "reference_asset_version_id": "version-1",
+            "first_frame_id": "first-frame-1",
+            "first_frame_artifact_id": "first-frame-artifact-1",
+            "first_frame_sha256": hashlib.sha256(JPEG).hexdigest(),
+            "first_frame_source_type": "GENERATED_KEYFRAME",
             "api_key": "must-not-be-stored",
         },
     )
     metadata = ProductionExecutionService._submission_metadata(submission)
     assert metadata["provider_task_id"] == "wan-task-1"
+    assert metadata["first_frame_artifact_id"] == "first-frame-artifact-1"
+    assert metadata["first_frame_sha256"] == hashlib.sha256(JPEG).hexdigest()
     assert "api_key" not in metadata
     assert "prompt" not in metadata
 
@@ -248,7 +321,7 @@ def test_wan_provider_failure_is_not_treated_as_a_result(tmp_path):
         config=WanProviderConfig(
             api_key="test-key", allow_paid_live_tests=True
         ),
-        reference_resolver=FakeResolver(image),
+        first_frame_resolver=FakeResolver(image),
     )
     adapter.submit(_snapshot())
     client.status = "FAILED"
@@ -257,60 +330,23 @@ def test_wan_provider_failure_is_not_treated_as_a_result(tmp_path):
         adapter.get_result("wan-task-1")
 
 
-class FakeReferenceRepository:
-    def __init__(self, version, asset):
-        self.version = version
-        self.asset = asset
-
-    def get_reference_asset_version(self, version_id):
-        return self.version if version_id == self.version.id else None
-
-    def get_reference_asset(self, asset_id):
-        return self.asset if asset_id == self.asset.id else None
-
-
-class FakeReferenceService:
-    def __init__(self, repository, path):
-        self.repository = repository
-        self.path = path
-
-    def resolve_version_path(self, project_id, version_id):
-        return self.path
-
-
-def test_reference_resolver_requires_locked_current_version_and_matching_story(tmp_path):
-    image = tmp_path / "reference.jpg"
-    image.write_bytes(JPEG)
-    version = ReferenceAssetVersion(
-        id="version-1",
-        asset_id="asset-1",
-        project_id="project-1",
-        version_number=1,
-        filename="reference.jpg",
-        mime_type="image/jpeg",
-        size_bytes=len(JPEG),
-        sha256=hashlib.sha256(JPEG).hexdigest(),
-        storage_path="assets/references/reference.jpg",
-        metadata={"source_story_revision_id": "story-1"},
-        created_at="2026-01-01T00:00:00+00:00",
+def test_first_frame_resolver_never_falls_back_to_character_or_location_reference():
+    references_only = _snapshot(
+        include_first_frame=False,
+        **{
+            "CHARACTER:hero": "version-1",
+            "LOCATION:room": "location-version-1",
+        },
     )
-    asset = ReferenceAsset(
-        id="asset-1",
-        project_id="project-1",
-        asset_type=ReferenceAssetType.CHARACTER_REFERENCE,
-        current_version_id="version-1",
-        created_at="2026-01-01T00:00:00+00:00",
-        updated_at="2026-01-01T00:00:00+00:00",
-    )
-    service = FakeReferenceService(FakeReferenceRepository(version, asset), image)
-    selection = WanReferenceResolver(service).resolve(_snapshot())
-    assert selection.version_id == "version-1"
-    assert selection.role == "character"
-
-    stale_asset = asset.model_copy(update={"current_version_id": None})
-    stale_service = FakeReferenceService(FakeReferenceRepository(version, stale_asset), image)
-    with pytest.raises(WanAdapterError, match="locked current"):
-        WanReferenceResolver(stale_service).resolve(_snapshot())
+    assert references_only.reference_asset_versions == {
+        "CHARACTER:hero": "version-1",
+        "LOCATION:room": "location-version-1",
+    }
+    resolver = WanFirstFrameResolver(ShotFirstFrameArtifactResolver(object()))
+    with pytest.raises(
+        WanAdapterError, match="Required frozen Shot First Frame is missing"
+    ):
+        resolver.resolve(references_only)
 
 
 def test_wan_client_uses_async_header_without_exposing_key():
@@ -349,7 +385,7 @@ def test_wan_paid_create_gate_blocks_all_create_calls_but_allows_reconciliation(
         config=WanProviderConfig(
             api_key="test-key", allow_paid_live_tests=False
         ),
-        reference_resolver=FakeResolver(image),
+        first_frame_resolver=FakeResolver(image),
     )
 
     assert adapter.status.configured is True

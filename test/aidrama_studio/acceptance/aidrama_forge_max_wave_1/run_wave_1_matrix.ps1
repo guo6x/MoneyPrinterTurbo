@@ -79,7 +79,7 @@ $runRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("aidrama-wave1-matrix-" 
 $dataRoot = Join-Path $runRoot "explicit-aidrama-data"
 $blockedLocalAppData = Join-Path $runRoot "default-localappdata-must-remain-empty"
 
-New-Item -ItemType Directory -LiteralPath $runRoot | Out-Null
+New-Item -ItemType Directory -Path $runRoot | Out-Null
 
 $oldDataDir = $env:AIDRAMA_DATA_DIR
 $oldWal = $env:AIDRAMA_SQLITE_WAL

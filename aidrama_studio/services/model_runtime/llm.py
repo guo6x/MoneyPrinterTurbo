@@ -21,6 +21,7 @@ from .contracts import (
     ProtocolFamily,
 )
 from .drivers import DriverError, RequestResponseDriver
+from .builtins import default_manifest_registry
 from .resolver import (
     ModelResolver,
     ModelResolutionError,
@@ -119,11 +120,54 @@ class UniversalLLMRuntime:
     REQUEST_RESPONSE driver -> provider-neutral result envelope.
     """
 
-    def __init__(self, legacy_registry: object) -> None:
+    def __init__(
+        self,
+        legacy_registry: object,
+        *,
+        manifest_registry: object | None = None,
+    ) -> None:
+        self.legacy_registry = legacy_registry
         self.manifest_registry, self.bridge = compatibility_registry(legacy_registry)
         self.resolver = ModelResolver(self.manifest_registry)
+        self.native_manifest_registry = manifest_registry or default_manifest_registry(
+            include_placeholders=False
+        )
+        self.native_resolver = ModelResolver(self.native_manifest_registry)
 
     def resolve(self, profile: object) -> UniversalLLMSelection:
+        profile_metadata = getattr(profile, "profile", {})
+        canonical_manifest_id = (
+            str(profile_metadata.get("manifest_id") or "").strip()
+            if isinstance(profile_metadata, dict)
+            else ""
+        )
+        if canonical_manifest_id:
+            try:
+                resolved = self.native_resolver.resolve(
+                    capability=CapabilityKind.LLM,
+                    manifest_id=canonical_manifest_id,
+                    provider_id=str(getattr(profile, "provider_id")),
+                    model_id=str(getattr(profile, "model_id")),
+                    endpoint_profile_id=str(getattr(profile, "endpoint_profile_id")),
+                    deployment_region=str(
+                        getattr(
+                            getattr(profile, "deployment_region"),
+                            "value",
+                            "UNSPECIFIED",
+                        )
+                    ),
+                    protocol=ProtocolFamily.REQUEST_RESPONSE,
+                    require_available=False,
+                )
+                expected_hash = str(profile_metadata.get("manifest_hash") or "")
+                if expected_hash and expected_hash != resolved.manifest_hash:
+                    raise ModelResolutionError("selected manifest hash changed")
+                provider = self._native_provider_for(resolved)
+            except (AttributeError, ModelResolutionError, TypeError, ValueError) as exc:
+                raise UniversalLLMRuntimeError(
+                    "selected canonical LLM manifest is unavailable; no provider fallback"
+                ) from exc
+            return UniversalLLMSelection(resolved=resolved, provider=provider)
         try:
             resolved = self.resolver.resolve(
                 capability=CapabilityKind.LLM,
@@ -143,6 +187,31 @@ class UniversalLLMRuntime:
             ) from exc
         return UniversalLLMSelection(resolved=resolved, provider=provider)
 
+    def _native_provider_for(self, resolved: ResolvedModel) -> object:
+        providers = getattr(self.legacy_registry, "list", None)
+        if not callable(providers):
+            raise ModelResolutionError("native provider registry is unavailable")
+        for provider in providers("LLM"):
+            if str(getattr(provider, "provider_name", "")) != resolved.provider_id:
+                continue
+            invoke = getattr(provider, "invoke_universal_text", None)
+            if not callable(invoke):
+                continue
+            status = getattr(provider, "status", None)
+            metadata = dict(getattr(status, "metadata", {}) or {})
+            if (
+                getattr(status, "available", False) is True
+                and str(metadata.get("model") or "") == resolved.model_id
+                and str(metadata.get("endpoint_profile_id") or "")
+                == resolved.endpoint_profile_id
+                and str(metadata.get("credential_reference") or "")
+                == str(getattr(resolved.manifest, "credential_reference", "") or "")
+            ):
+                return provider
+        raise ModelResolutionError(
+            "canonical LLM provider is not configured; no provider fallback"
+        )
+
     def invoke_text(
         self,
         selection: UniversalLLMSelection,
@@ -154,6 +223,16 @@ class UniversalLLMRuntime:
             raise UniversalLLMRuntimeError("LLM prompt is required")
         if selection.protocol is not ProtocolFamily.REQUEST_RESPONSE:
             raise UniversalLLMRuntimeError("LLM manifest protocol is not request/response")
+        native_invoke = getattr(selection.provider, "invoke_universal_text", None)
+        if callable(native_invoke):
+            try:
+                return native_invoke(
+                    selection,
+                    prompt,
+                    project_id=project_id,
+                )
+            except Exception as exc:
+                raise UniversalLLMRuntimeError(str(exc)) from exc
         request = CapabilityRequest(
             request_id=uuid4().hex,
             project_id=project_id,

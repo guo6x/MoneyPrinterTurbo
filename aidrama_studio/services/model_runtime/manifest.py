@@ -1136,8 +1136,26 @@ class ModelManifest:
 
     @property
     def manifest_hash(self) -> str:
-        encoded = json.dumps(self.canonical_payload(), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(
+            self.contract_payload(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    def contract_payload(self) -> dict[str, Any]:
+        """Stable model contract identity, excluding mutable readiness.
+
+        Credentials, local artifact-sink availability, verification, and paid
+        authorization may change between processes without changing what the
+        selected model/codec contract means. Frozen RuntimePlans therefore
+        hash only the stable manifest contract.
+        """
+
+        payload = self.canonical_payload()
+        payload.pop("readiness", None)
+        return payload
 
     def canonical_payload(self) -> dict[str, Any]:
         """Canonical, non-secret payload used for identity hashing."""
@@ -1187,9 +1205,9 @@ class ModelManifest:
         value["cost_authorization"] = self.authorization.to_dict()
         value["verification_state"] = self.readiness.verification_state
         value["paid_create_requires_authorization"] = self.readiness.authorization_required
-        # Independent readiness dimensions are exposed as projections for
-        # diagnostics/settings consumers; the nested ``readiness`` object
-        # remains canonical and is what contributes to the manifest hash.
+        # Independent readiness dimensions are exposed for diagnostics and
+        # Settings consumers but deliberately do not contribute to the stable
+        # manifest contract hash.
         value.update(self.readiness.to_dict())
         value["available"] = self.runtime_available
         value["live_authorized"] = self.create_authorized

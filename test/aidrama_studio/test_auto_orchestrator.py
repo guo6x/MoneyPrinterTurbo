@@ -202,11 +202,21 @@ class _FakeImageProvider(ImageGenerationProvider):
 
     def generate_candidate(self, prompt, *, project_id, metadata=None):
         self.calls += 1
+        palette = (
+            "red",
+            "blue",
+            "green",
+            "yellow",
+            "purple",
+            "orange",
+            "black",
+            "white",
+        )
         return ImageCandidate(
             project_id=project_id,
             provider=self.provider_name,
             prompt=prompt,
-            content=png_bytes(color="red" if self.calls == 1 else "blue"),
+            content=png_bytes(color=palette[(self.calls - 1) % len(palette)]),
             mime_type="image/png",
             metadata={**dict(metadata or {}), "model": "fake-image-v1"},
         )
