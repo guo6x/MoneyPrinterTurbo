@@ -8,6 +8,7 @@ fails or ``--browser`` is requested.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -587,12 +588,36 @@ class DesktopLauncher:
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Launch the AIDrama Studio desktop shell")
+    parser.add_argument("--version", action="store_true", help="print product version and build SHA")
     parser.add_argument("--port", type=int, default=8501, help="preferred loopback port")
     parser.add_argument("--host", default="127.0.0.1", help="loopback host only")
     parser.add_argument("--browser", action="store_true", help="force browser fallback")
     parser.add_argument("--smoke", action="store_true", help="start, health-check, and cleanly stop")
     parser.add_argument("--startup-timeout", type=float, default=30.0)
     return parser.parse_args(argv)
+
+
+def _print_build_version() -> int:
+    """Expose the immutable package provenance to support operators."""
+
+    candidates = []
+    executable = getattr(sys, "executable", "")
+    if executable:
+        candidates.append(Path(executable).resolve().parent / "build-info.json")
+    candidates.extend((PROJECT_ROOT / "build-info.json", PROJECT_ROOT.parent / "build-info.json"))
+    for path in candidates:
+        if path.is_file():
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            print(
+                f"AIDrama Studio {value.get('product_version', 'unknown')} "
+                f"({value.get('delivery_head', 'unknown')})"
+            )
+            return 0
+    print("AIDrama Studio version metadata unavailable", file=sys.stderr)
+    return 2
 
 
 def _run_streamlit_child(argv: Sequence[str]) -> int:
@@ -624,6 +649,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if raw_argv and raw_argv[0] == "--streamlit-child":
         return _run_streamlit_child(raw_argv[1:])
     args = _parse_args(raw_argv)
+    if args.version:
+        return _print_build_version()
     from desktop.background import DesktopBackgroundRunnerHost
 
     launcher = DesktopLauncher(
