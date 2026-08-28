@@ -105,6 +105,7 @@ try {
         Fail-Smoke "Start Menu shortcut is missing"
     }
     Write-Host 'FFMPEG_DISCOVERY=PASS'
+    Write-Host 'FFPROBE_DISCOVERY=NOT_SHIPPED_APPLICATION_DOES_NOT_REQUIRE_FFPROBE'
     Write-Host 'TEMP_DB_INITIALIZATION=PASS'
     Write-Host 'HEALTH_READY=PASS'
     Write-Host 'UI_OPEN_PATH=PASS'

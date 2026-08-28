@@ -178,6 +178,8 @@ try {
     if ($ffmpeg.Count -eq 0) {
         Fail-Closed "FFmpeg binary is not bundled; refusing a package that depends on global PATH"
     }
+    $ffprobe = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^ffprobe(?:[-_].*)?\.exe$' })
 
     $secretPattern = '(?i)(sk-[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,}|api[_-]?key\s*=\s*["''][^"'']{12,})'
     $textExtensions = @('.py', '.toml', '.json', '.txt', '.md', '.yaml', '.yml', '.ini', '.cfg')
@@ -251,6 +253,7 @@ try {
         installer = if ($installer.Count -eq 1) { $installer[0].Name } else { $null }
         installer_sha256 = if ($installer.Count -eq 1) { (Get-FileHash -LiteralPath $installer[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
         ffmpeg_discovery = 'PASS'
+        ffprobe_discovery = if ($ffprobe.Count -gt 0) { 'PASS' } else { 'NOT_SHIPPED_APPLICATION_DOES_NOT_REQUIRE_FFPROBE' }
         credentials_bundled = $false
         built_at_utc = [DateTime]::UtcNow.ToString('o')
     }
