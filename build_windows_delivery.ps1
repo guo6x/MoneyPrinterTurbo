@@ -72,21 +72,14 @@ $shortSha = $DeliveryHead.Substring(0, 12)
 if ([string]::IsNullOrWhiteSpace($PythonExecutable)) {
     $candidates = @(
         (Join-Path $RepoRoot '.venv\Scripts\python.exe'),
-        (Join-Path $RepoRoot 'build-env\Scripts\python.exe'),
-        'python3.11',
-        'python'
+        (Join-Path $RepoRoot 'build-env\Scripts\python.exe')
     )
     foreach ($candidate in $candidates) {
-        if ([System.IO.Path]::IsPathRooted($candidate)) {
-            if (Test-Path -LiteralPath $candidate) { $PythonExecutable = $candidate; break }
-        } else {
-            $command = Get-Command $candidate -ErrorAction SilentlyContinue
-            if ($null -ne $command) { $PythonExecutable = $command.Source; break }
-        }
+        if (Test-Path -LiteralPath $candidate) { $PythonExecutable = $candidate; break }
     }
 }
 if ([string]::IsNullOrWhiteSpace($PythonExecutable)) {
-    Fail-Closed "no dedicated build Python found; pass -PythonExecutable or set AIDRAMA_BUILD_PYTHON"
+    Fail-Closed "no dedicated build Python found in the packaging worktree; pass -PythonExecutable or set AIDRAMA_BUILD_PYTHON"
 }
 $PythonExecutable = (Resolve-Path -LiteralPath $PythonExecutable -ErrorAction Stop).Path
 

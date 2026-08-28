@@ -233,6 +233,16 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as exc:
         print(f"AIDrama build provenance unavailable: {exc}", file=sys.stderr)
         return 3
+    try:
+        from desktop.license_materials import collect_license_materials
+
+        collect_license_materials(
+            args.output_dir / "AIDramaStudio",
+            lock_path=Path(args.source_root).resolve() / "uv.lock",
+        )
+    except Exception as exc:
+        print(f"AIDrama license materials unavailable: {exc}", file=sys.stderr)
+        return 3
     from desktop.release import ReleaseDefinitionError, write_package_release_metadata
 
     try:
