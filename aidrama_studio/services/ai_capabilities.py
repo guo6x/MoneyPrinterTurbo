@@ -1301,8 +1301,8 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
     """
     from .adapters import (
         MainlandWanProductionAdapter,
+        MainlandSeedanceProductionAdapter,
         MPTProductionAdapter,
-        SeedanceProductionAdapter,
     )
     from .providers import (
         GeminiVisionProvider,
@@ -1348,18 +1348,13 @@ def default_capability_registry(*, env: Mapping[str, str] | None = None) -> Capa
 
     if credential_store is None:
         credential_store = _RegistryCredentialStore(values)
-    from .adapters.seedance_video import SeedanceProviderConfig
-
     wan_adapter = MainlandWanProductionAdapter(env=values)
     wan = RuntimeVideoProvider(wan_adapter, provider_name="WAN_VIDEO", mode=CapabilityKind.VIDEO_GENERATIVE)
-    seedance = RuntimeVideoProvider(SeedanceProductionAdapter(config=SeedanceProviderConfig(
-        api_key=str(values.get("ARK_API_KEY", "")).strip(),
-        base_url=str(values.get("SEEDANCE_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")).strip(),
-        model=str(
-            values.get("SEEDANCE_VIDEO_MODEL", "doubao-seedance-2-5-260628")
-        ).strip(),
-        allow_paid_live_tests=str(values.get("AIDRAMA_ALLOW_PAID_LIVE_TESTS", "")) == "1",
-    )), provider_name="SEEDANCE", mode=CapabilityKind.VIDEO_GENERATIVE)
+    seedance = RuntimeVideoProvider(
+        MainlandSeedanceProductionAdapter(env=values),
+        provider_name="SEEDANCE",
+        mode=CapabilityKind.VIDEO_GENERATIVE,
+    )
     stock = RuntimeVideoProvider(MPTProductionAdapter(), provider_name="MPT_STOCK", mode=CapabilityKind.VIDEO_STOCK)
     # Preserve the existing Wan capability as the default compatibility
     # provider; a configured Seedance profile is selected explicitly through

@@ -145,6 +145,33 @@ def _finite_number(value: object, *, name: str) -> float:
     return result
 
 
+def _manifest_duration_bounds(
+    manifest: ModelManifest | Mapping[str, object] | None,
+    *,
+    defaults: tuple[float, float] = (4.0, 30.0),
+) -> tuple[float, float]:
+    """Read duration authority from the selected manifest, not product code."""
+
+    raw = getattr(manifest, "duration", None)
+    if isinstance(manifest, Mapping):
+        raw = manifest.get("duration", raw)
+    if raw is None:
+        return defaults
+    minimum = getattr(raw, "minimum", None)
+    maximum = getattr(raw, "maximum", None)
+    if isinstance(raw, Mapping):
+        minimum = raw.get("minimum", raw.get("min", minimum))
+        maximum = raw.get("maximum", raw.get("max", maximum))
+    try:
+        lower = float(minimum) if minimum is not None else defaults[0]
+        upper = float(maximum) if maximum is not None else defaults[1]
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CodecError("Seedance manifest duration contract is malformed") from exc
+    if not math.isfinite(lower) or not math.isfinite(upper) or lower < 0 or lower > upper:
+        raise CodecError("Seedance manifest duration contract is malformed")
+    return lower, upper
+
+
 def _generation_parameters(request: CapabilityRequest) -> dict[str, object]:
     """Map provider-neutral generation controls to provider JSON fields."""
 
@@ -1014,12 +1041,16 @@ class ArkSeedanceCodec:
             if not item.mime_type.startswith(("image/", "video/", "audio/")):
                 raise CodecError("Seedance media reference type is unsupported")
             _provider_input_uri(item, self.input_resolver)
+        minimum, maximum = _manifest_duration_bounds(manifest)
         duration = _finite_number(
-            request.provider_parameters.get("duration_seconds", 5),
+            request.provider_parameters.get("duration_seconds", minimum),
             name="duration_seconds",
         )
-        if not duration.is_integer() or not 4 <= int(duration) <= 30:
-            raise CodecError("Seedance duration_seconds must be an integer from 4 to 30")
+        if not duration.is_integer() or not minimum <= duration <= maximum:
+            raise CodecError(
+                "Seedance duration_seconds must be an integer from "
+                f"{minimum:g} to {maximum:g}"
+            )
 
     def encode_request(
         self, request: CapabilityRequest, manifest: ModelManifest | None = None
@@ -1047,7 +1078,10 @@ class ArkSeedanceCodec:
                 }
             )
         parameters = request.provider_parameters
-        duration = int(_finite_number(parameters.get("duration_seconds", 5), name="duration_seconds"))
+        minimum, _maximum = _manifest_duration_bounds(manifest)
+        duration = int(
+            _finite_number(parameters.get("duration_seconds", minimum), name="duration_seconds")
+        )
         resolution = str(parameters.get("resolution", "720P")).lower()
         if resolution not in {"480p", "720p", "1080p"}:
             raise CodecError("Seedance resolution must be 480P, 720P, or 1080P")
