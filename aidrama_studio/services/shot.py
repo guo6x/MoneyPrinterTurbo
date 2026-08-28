@@ -2,6 +2,7 @@ from __future__ import annotations
 from datetime import datetime,timezone
 import ast
 import json
+import math
 from typing import Mapping
 from uuid import uuid4
 from aidrama_studio.domain import *
@@ -85,6 +86,28 @@ class ShotService:
         rev=rev_or_plan if isinstance(rev_or_plan,dict) else None; plan=rev["content"] if rev else rev_or_plan; script,story=self._story_script(rev["project_id"] if rev else project.id); plan.validate_against(script["content"],story["content"]); self.recalculate_risk_if_needed(plan)
         if block_extreme and project and abs(plan.total_duration_seconds-project.target_duration_seconds)>project.target_duration_seconds*.30: raise ValueError("Shot duration exceeds ±30% blocking threshold")
         return plan
+    @staticmethod
+    def apply_authoritative_duration_plan(plan, duration_plan):
+        """Apply manifest-derived execution timing without changing shot semantics."""
+        expected_count = int(duration_plan.planned_shot_count)
+        durations = tuple(float(item) for item in duration_plan.planned_shot_durations)
+        if expected_count <= 0 or len(durations) != expected_count:
+            raise ShotServiceError("DurationPlan 镜头数量或时长序列无效")
+        if len(plan.shots) != expected_count:
+            raise ShotServiceError(
+                "Shot Plan 镜头数量必须匹配产品 DurationPlan: "
+                f"expected {expected_count}, got {len(plan.shots)}"
+            )
+        ordered = sorted(plan.shots, key=lambda item: item.order)
+        if [item.order for item in ordered] != list(range(1, expected_count + 1)):
+            raise ShotServiceError("Shot Plan order 必须从 1 连续递增")
+        if any(not math.isfinite(item) or item <= 0 for item in durations):
+            raise ShotServiceError("DurationPlan 包含无效 provider execution duration")
+        authoritative = plan.model_copy(deep=True)
+        by_order = {item.order: item for item in authoritative.shots}
+        for order, duration in enumerate(durations, start=1):
+            by_order[order].duration_seconds = duration
+        return authoritative
     def create_manual_shot_plan(self,project,script_revision=None):
         if script_revision is None: script_revision,_=self._story_script(project.id)
         if not script_revision or script_revision["status"] is not ScriptRevisionStatus.APPROVED: raise ShotServiceError("请先完成并确认结构化剧本。")
@@ -225,8 +248,10 @@ class ShotService:
             duration_plan = self._duration_planner.plan(
                 project.id, project.target_duration_seconds
             )
-        except DurationPlanningError:
-            duration_plan = None
+        except DurationPlanningError as exc:
+            raise ShotServiceError(
+                "Shot Planner 缺少权威 VIDEO manifest DurationPlan；不会调用 LLM"
+            ) from exc
         prompt = build_shot_prompt(
             project,
             script["content"],
@@ -242,7 +267,9 @@ class ShotService:
             )
             if plan.source_script_revision_id != script["id"]:
                 raise ValueError("Shot Plan source Script provenance 不一致")
-            plan.validate_against(script["content"],story["content"]); self.recalculate_risk_if_needed(plan); return plan
+            plan.validate_against(script["content"],story["content"])
+            self.recalculate_risk_if_needed(plan)
+            return plan
         try:
             plan=self._llm_gateway.generate_validated_json(project.id,prompt,operation="SHOT_PLAN_GENERATION",validator=validate,repair_prompt_builder=lambda raw,exc: build_shot_repair_prompt(raw,str(exc),source_script_revision_id=script["id"]),input_source_ids=input_source_ids,provenance=generation_provenance)
         except LLMInvocationError as e: raise ShotServiceError(str(e)) from e
@@ -255,6 +282,7 @@ class ShotService:
             if missing: raise ShotServiceError(f"AI proposal 丢失锁定镜头: {', '.join(missing)}")
             plan.shots=[locked.get(item.id,item) for item in plan.shots]
             self.recalculate_risk_if_needed(plan)
+        plan = self.apply_authoritative_duration_plan(plan, duration_plan)
         duration_provenance = (
             {
                 "duration_provider_id": duration_plan.provider_id,

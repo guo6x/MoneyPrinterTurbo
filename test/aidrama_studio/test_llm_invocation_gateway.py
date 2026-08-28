@@ -640,15 +640,16 @@ def test_shot_canonical_generation_records_script_and_story_sources(tmp_path):
         source_script_revision_id=script["id"],
         shots=[
             Shot(
-                id="shot_001",
-                order=1,
+                id=f"shot_{order:03d}",
+                order=order,
                 scene_id="scene_001",
                 source_script_beat_ids=["beat_001"],
                 duration_seconds=5,
                 subject=["char_001"],
-                action="主角等待",
-                visual_intent="建立场景",
+                action=f"主角等待 {order}",
+                visual_intent=f"建立场景 {order}",
             )
+            for order in range(1, 9)
         ],
     )
     plan_provider.responses.append(

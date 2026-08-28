@@ -673,9 +673,17 @@ def test_creative_qwen_settings_use_one_canonical_universal_identity_for_all_sta
         for item in settings.inventory(CapabilityKind.LLM)
         if item.model_id == "qwen-max"
     )
+    wan_manifest_id = next(
+        item.manifest_id
+        for item in settings.inventory(CapabilityKind.VIDEO)
+        if item.model_id == "wan2.7-i2v-2026-04-25"
+    )
     settings.save_selections(
         project_id=None,
-        selections={CapabilityKind.LLM: qwen_manifest_id},
+        selections={
+            CapabilityKind.LLM: qwen_manifest_id,
+            CapabilityKind.VIDEO: wan_manifest_id,
+        },
     )
 
     provider = _QwenCreativeProvider(

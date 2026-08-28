@@ -35,8 +35,10 @@ def build_shot_prompt(
             "planned_shot_durations_seconds="
             f"{json.dumps(duration_plan.planned_shot_durations)}; "
             f"execution_batch_size<={duration_plan.max_batch_size}. "
-            "Use this count and duration sequence so every shot remains one "
-            "provider-valid bounded create."
+            "Return exactly this many semantic shots in canonical order. The "
+            "product, not the model, owns provider execution timing and will "
+            "deterministically replace duration_seconds with this exact sequence. "
+            "Do not add, remove, merge or split shots relative to this count."
         )
     return (
         "Generate a SHOT PLAN from ONLY this APPROVED Structured Script and Story "

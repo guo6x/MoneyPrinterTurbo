@@ -139,8 +139,21 @@ def _plan() -> dict[str, object]:
         title="末班车分镜",
         source_script_revision_id="product-injects-this-provenance",
         shots=[
-            Shot(id="shot_001", order=1, scene_id="scene_001", source_script_beat_ids=["script_beat_001"], duration_seconds=30, subject=["char_001"], action="发动公交", visual_intent="建立夜班车厢"),
-            Shot(id="shot_002", order=2, scene_id="scene_001", source_script_beat_ids=["script_beat_002"], duration_seconds=30, subject=["char_001"], action="停在终点站", visual_intent="收束选择时刻"),
+            Shot(
+                id=f"shot_{order:03d}",
+                order=order,
+                scene_id="scene_001",
+                source_script_beat_ids=[
+                    "script_beat_001" if order <= 4 else "script_beat_002"
+                ],
+                # Deliberately non-authoritative: ShotService replaces these
+                # with the frozen manifest-derived 60-second plan.
+                duration_seconds=1,
+                subject=["char_001"],
+                action=f"末班车动作 {order}",
+                visual_intent=f"镜头视觉意图 {order}",
+            )
+            for order in range(1, 9)
         ],
     ).model_dump(mode="json")
     payload.pop("source_script_revision_id")
