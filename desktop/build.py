@@ -132,6 +132,8 @@ def build_command(
         str(source),
         "--paths",
         str(DESKTOP_ENTRYPOINT.parent.parent),
+        "--additional-hooks-dir",
+        str(PACKAGING_ROOT / "desktop" / "pyinstaller_hooks"),
         # Streamlit and the product services load package resources and a few
         # modules dynamically.  Collecting these namespaces keeps the frozen
         # shell faithful to the source launcher without changing application
