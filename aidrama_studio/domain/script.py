@@ -18,6 +18,22 @@ class TimeOfDay(str, Enum):
     UNSPECIFIED = "UNSPECIFIED"
 
 
+_TIME_OF_DAY_EXACT_ALIASES = {
+    "深夜": TimeOfDay.NIGHT,
+    "夜晚": TimeOfDay.NIGHT,
+    "夜间": TimeOfDay.NIGHT,
+    "晚上": TimeOfDay.NIGHT,
+    "清晨": TimeOfDay.DAWN,
+    "黎明": TimeOfDay.DAWN,
+    "白天": TimeOfDay.DAY,
+    "日间": TimeOfDay.DAY,
+    "黄昏": TimeOfDay.DUSK,
+    "傍晚": TimeOfDay.DUSK,
+    "未指定": TimeOfDay.UNSPECIFIED,
+    "不确定": TimeOfDay.UNSPECIFIED,
+}
+
+
 class ScriptBeatType(str, Enum):
     ACTION = "ACTION"
     DIALOGUE = "DIALOGUE"
@@ -59,6 +75,16 @@ class Scene(BaseModel):
     estimated_duration_seconds: float = Field(gt=0)
     beats: list[ScriptBeat] = Field(min_length=1, max_length=100)
     source_story_beat_ids: list[str] = Field(default_factory=list, max_length=30)
+
+    @field_validator("time_of_day", mode="before")
+    @classmethod
+    def normalize_time_of_day(cls, value: object) -> object:
+        if isinstance(value, TimeOfDay):
+            return value
+        if isinstance(value, str):
+            exact = value.strip()
+            return _TIME_OF_DAY_EXACT_ALIASES.get(exact, exact)
+        return value
 
     @model_validator(mode="after")
     def unique_beats(self) -> "Scene":
